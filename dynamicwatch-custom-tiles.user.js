@@ -899,13 +899,13 @@
 					try {
 						if (r.status === 200) {
 							const data = JSON.parse(r.responseText);
-							const releases = Object.values(data)
-								.filter((item) => item.releaseNum && item.releaseDateLabel)
-								.map((item) => ({
-									label: item.releaseDateLabel,
-									releaseNum: item.releaseNum,
-									url: this._tileUrl(item.releaseNum),
-								}));
+							const releases = Object.entries(data)
+								.filter(([, item]) => item.itemTitle)
+								.map(([key, item]) => {
+									const releaseNum = parseInt(key, 10);
+									const label = item.itemTitle.replace(/^World Imagery \(Wayback /, "").replace(/\)$/, "");
+									return { label, releaseNum, url: this._tileUrl(releaseNum) };
+								});
 							releases.sort((a, b) => b.releaseNum - a.releaseNum);
 							_waybackReleasesCache = releases;
 							this._releases = releases;
