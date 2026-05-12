@@ -12,6 +12,7 @@
 // @connect      qldglobe.information.qld.gov.au
 // @connect      spatial-img.information.qld.gov.au
 // @connect      spatial-gis.information.qld.gov.au
+// @connect      connecttile.garmin.com
 // @run-at       document-start
 // ==/UserScript==
 
@@ -28,6 +29,7 @@
 		LAYER_LABELS: "QLD Labels",
 		LAYER_ROADS: "QLD Roads",
 		LAYER_STRAVA: "Strava Heatmap",
+		LAYER_GARMIN: "Garmin Heatmap",
 
 		QLD_ORIGIN: "https://qldglobe.information.qld.gov.au",
 		QLD_TOKEN_EP:
@@ -593,6 +595,82 @@
 		}
 	}
 
+	// -- Garmin Heatmap ---------------------------------------------------
+
+	class GarminHeatmapLayerProvider extends LayerProvider {
+		create() {
+			const ACTIVITIES = ["RUNNING", "HIKING", "TRAIL_RUNNING", "ROAD_CYCLING", "MOUNTAIN_BIKING"];
+
+			const GarminHeatGrid = L.GridLayer.extend({
+				createTile(coords, done) {
+					const canvas = document.createElement("canvas");
+					canvas.width = 256;
+					canvas.height = 256;
+					const ctx = canvas.getContext("2d");
+
+					let remaining = ACTIVITIES.length;
+					let failed = 0;
+
+					const finish = () => {
+						remaining--;
+						if (remaining === 0) {
+							if (failed === ACTIVITIES.length) {
+								done(new Error("All Garmin activity tiles failed"), canvas);
+							} else {
+								done(null, canvas);
+							}
+						}
+					};
+
+					for (const activity of ACTIVITIES) {
+						const url =
+							"https://connecttile.garmin.com/" +
+							activity + "/" + coords.z + "/" + coords.x + "/" + coords.y + ".png";
+						GM_xmlhttpRequest({
+							method: "GET",
+							url: url,
+							responseType: "arraybuffer",
+							onload: (r) => {
+								if (r.status === 200) {
+									try {
+										const blob = new Blob([r.response], { type: "image/png" });
+										const objUrl = URL.createObjectURL(blob);
+										const img = new Image();
+										img.onload = () => {
+											ctx.globalCompositeOperation = "lighter";
+											ctx.drawImage(img, 0, 0);
+											URL.revokeObjectURL(objUrl);
+											finish();
+										};
+										img.onerror = () => { URL.revokeObjectURL(objUrl); failed++; finish(); };
+										img.src = objUrl;
+									} catch (e) {
+										failed++;
+										finish();
+									}
+								} else {
+									failed++;
+									finish();
+								}
+							},
+							onerror: () => { failed++; finish(); },
+						});
+					}
+
+					return canvas;
+				},
+			});
+
+			return new GarminHeatGrid({
+				tileSize: 256,
+				maxNativeZoom: 17,
+				maxZoom: 25,
+				opacity: 0.8,
+				attribution: "© Garmin",
+			});
+		}
+	}
+
 	/* -- Layer Manager UI -------------------------------------------------- */
 
 	class LayerManagerUI {
@@ -885,6 +963,9 @@
 
 				this.layers[CFG.LAYER_STRAVA] = new StravaHeatmapLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_STRAVA], CFG.LAYER_STRAVA);
+
+				this.layers[CFG.LAYER_GARMIN] = new GarminHeatmapLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_GARMIN], CFG.LAYER_GARMIN);
 
 				if (!map.getPane("dwRoadsPane")) {
 					map.createPane("dwRoadsPane");
