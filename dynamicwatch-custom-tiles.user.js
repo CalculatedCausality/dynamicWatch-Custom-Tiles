@@ -17,6 +17,9 @@
 // @connect      nrmaps.nt.gov.au
 // @connect      portal.spatial.nsw.gov.au
 // @connect      s3-us-west-2.amazonaws.com
+// @connect      services2.arcgis.com
+// @connect      opensky-network.org
+// @connect      www.marinetraffic.com
 // @run-at       document-start
 // ==/UserScript==
 
@@ -78,6 +81,14 @@
 		QLD_HIST_SERVICE:
 			"https://spatial-img.information.qld.gov.au/arcgis/rest/services/" +
 			"TimeSeries/AerialOrtho_AllUsers/ImageServer",
+		QLD_HIST_PHOTOS_SERVICE:
+			"https://spatial-img.information.qld.gov.au/arcgis/rest/services/" +
+			"QImagery/HistoricalAerialPhoto_AllUsers/ImageServer",
+
+		LAYER_UW:       "Unity Water",
+		LAYER_FLIGHTS:  "Live Flights",
+		LAYER_MARINE:   "Marine Vessels",
+		UW_FS_BASE: "https://services2.arcgis.com/tQg86iShPXJPWQWw",
 	};
 
 	const BLANK_TILE =
@@ -434,8 +445,9 @@
 	// -- QLD Historical -------------------------------------------------------
 
 	class QldHistoricalLayerProvider extends LayerProvider {
-		constructor() {
+		constructor(qldToken) {
 			super();
+			this._qldToken = qldToken || null;
 			this._captures = [];
 			this._captureIdx = 0;
 			this._currentOid = null;
@@ -455,57 +467,111 @@
 
 			const c = map.getCenter();
 			this._lastCenter = c;
+
+			const geomParam =
+				"?geometry=" + encodeURIComponent(JSON.stringify({ x: c.lng, y: c.lat, spatialReference: { wkid: 4326 } })) +
+				"&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects" +
+				"&outFields=objectid,name,year,title,capturestart" +
+				"&returnGeometry=false&orderByFields=capturestart+DESC&f=json";
+
+			const parseCaptures = (responseText, service, needsToken, mosaicWhere) => {
+				try {
+					const data = JSON.parse(responseText);
+					return (data.features || [])
+						.map((f) => ({
+							objectid: f.attributes.objectid,
+							title: f.attributes.title || f.attributes.name || String(f.attributes.year || ""),
+							captureDate: f.attributes.capturestart
+								? new Date(f.attributes.capturestart).toISOString().slice(0, 10)
+								: (f.attributes.year ? String(f.attributes.year) : null),
+							service,
+							needsToken,
+							mosaicWhere,
+						}))
+						.filter((f) => f.objectid);
+				} catch (e) {
+					return [];
+				}
+			};
+
+			let orthoCaptures = null;
+			let photosCaptures = null;
+
+			const finish = () => {
+				this._fetching = false;
+				const all = [...(orthoCaptures || []), ...(photosCaptures || [])];
+				all.sort((a, b) => {
+					const da = a.captureDate || "";
+					const db = b.captureDate || "";
+					return db < da ? -1 : db > da ? 1 : 0;
+				});
+				this._captures = all;
+				if (this._captures.length) {
+					console.info("[CustomTiles] QLD Historical:", this._captures.length,
+						"captures, latest:", this._captures[0].captureDate || this._captures[0].title);
+				} else {
+					console.warn("[CustomTiles] QLD Historical: no coverage at",
+						c.lng.toFixed(4), c.lat.toFixed(4));
+				}
+				this._captureIdx = 0;
+				this._currentOid = (this._captures[0] && this._captures[0].objectid) || null;
+				this._fetchPending.splice(0).forEach((fn) => fn(this._currentOid));
+				if (this._gridLayerRef) this._gridLayerRef.fire("capturechange");
+			};
+
+			const tryFinish = () => {
+				if (orthoCaptures !== null && photosCaptures !== null) finish();
+			};
+
+			// Query 1: AerialOrtho (no token, public)
 			GM_xmlhttpRequest({
 				method: "GET",
-				url:
-					CFG.QLD_HIST_SERVICE + "/query" +
-					"?geometry=" + encodeURIComponent(JSON.stringify({ x: c.lng, y: c.lat, spatialReference: { wkid: 4326 } })) +
-					"&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects" +
-					"&outFields=objectid,name,year,title,capturestart" +
-					"&returnGeometry=false&where=category%3D1&orderByFields=capturestart+DESC" +
-					"&f=json",
+				url: CFG.QLD_HIST_SERVICE + "/query" + geomParam + "&where=category%3D1",
 				headers: { Origin: "https://qldglobe.information.qld.gov.au" },
 				onload: (r) => {
-					this._fetching = false;
-					try {
-						if (r.status === 200) {
-							const data = JSON.parse(r.responseText);
-							this._captures = (data.features || [])
-								.map((f) => ({
-									objectid: f.attributes.objectid,
-									title: f.attributes.title || f.attributes.name || String(f.attributes.year || ""),
-									captureDate: f.attributes.capturestart
-										? new Date(f.attributes.capturestart).toISOString().slice(0, 10)
-										: (f.attributes.year ? String(f.attributes.year) : null),
-								}))
-								.filter((f) => f.objectid);
-							if (this._captures.length) {
-								console.info("[CustomTiles] QLD Historical:", this._captures.length,
-									"captures, latest:", this._captures[0].captureDate || this._captures[0].title);
-							} else {
-								console.warn("[CustomTiles] QLD Historical: no coverage at",
-									c.lng.toFixed(4), c.lat.toFixed(4));
-							}
-						} else {
-							console.error("[CustomTiles] QLD Historical query HTTP", r.status);
-							this._captures = [];
-						}
-					} catch (e) {
-						console.error("[CustomTiles] QLD Historical parse error:", e.message);
-						this._captures = [];
+					if (r.status === 200) {
+						orthoCaptures = parseCaptures(r.responseText, CFG.QLD_HIST_SERVICE, false, "category=1");
+					} else {
+						console.error("[CustomTiles] QLD Historical ortho query HTTP", r.status);
+						orthoCaptures = [];
 					}
-					this._captureIdx = 0;
-					this._currentOid = (this._captures[0] && this._captures[0].objectid) || null;
-					this._fetchPending.splice(0).forEach((fn) => fn(this._currentOid));
-					if (this._gridLayerRef) this._gridLayerRef.fire("capturechange");
+					tryFinish();
 				},
 				onerror: () => {
-					this._fetching = false;
-					console.error("[CustomTiles] QLD Historical query network error");
-					this._currentOid = null;
-					this._fetchPending.splice(0).forEach((fn) => fn(null));
+					console.error("[CustomTiles] QLD Historical ortho query network error");
+					orthoCaptures = [];
+					tryFinish();
 				},
 			});
+
+			// Query 2: HistoricalAerialPhoto (requires token)
+			const doPhotosQuery = (tok) => {
+				const tokenParam = tok ? "&token=" + encodeURIComponent(tok) : "";
+				GM_xmlhttpRequest({
+					method: "GET",
+					url: CFG.QLD_HIST_PHOTOS_SERVICE + "/query" + geomParam + "&where=1%3D1" + tokenParam,
+					headers: { Origin: "https://qldglobe.information.qld.gov.au" },
+					onload: (r) => {
+						if (r.status === 200) {
+							photosCaptures = parseCaptures(r.responseText, CFG.QLD_HIST_PHOTOS_SERVICE, !!tok, null);
+						} else {
+							// 499 = no token; silently fall back to ortho-only
+							photosCaptures = [];
+						}
+						tryFinish();
+					},
+					onerror: () => {
+						photosCaptures = [];
+						tryFinish();
+					},
+				});
+			};
+
+			if (this._qldToken) {
+				this._qldToken.get((err, tok) => doPhotosQuery(err ? null : tok));
+			} else {
+				doPhotosQuery(null);
+			}
 		}
 
 		create() {
@@ -513,7 +579,6 @@
 			const MERC_ORIGIN = 20037508.3428;
 			const MERC_FULL = 2 * MERC_ORIGIN;
 			const TILE_PX = 256;
-			const SERVICE = CFG.QLD_HIST_SERVICE;
 
 			const QldHistGrid = L.GridLayer.extend({
 				createTile(coords, done) {
@@ -531,23 +596,29 @@
 					const myGen = provider._captureGeneration;
 					provider._queryCatalog(map, (oid) => {
 						if (!oid || provider._captureGeneration !== myGen) { done(null, img); return; }
-						const mosaicRule = encodeURIComponent(
-							JSON.stringify({
-								mosaicMethod: "esriMosaicLockRaster",
-								lockRasterIds: [oid],
-								ascending: true,
-								where: "category=1",
-							}),
-						);
+						const cap = provider._captures[provider._captureIdx];
+						const svc = cap ? cap.service : CFG.QLD_HIST_SERVICE;
+						const mosaicWhere = cap ? cap.mosaicWhere : "category=1";
+						const needsToken = cap && cap.needsToken;
+						const tokenStr = needsToken && provider._qldToken && provider._qldToken.token
+							? "&token=" + encodeURIComponent(provider._qldToken.token)
+							: "";
+						const mosaicRuleObj = {
+							mosaicMethod: "esriMosaicLockRaster",
+							lockRasterIds: [oid],
+							ascending: true,
+						};
+						if (mosaicWhere) mosaicRuleObj.where = mosaicWhere;
+						const mosaicRule = encodeURIComponent(JSON.stringify(mosaicRuleObj));
 						img.onload = () => done(null, img);
 						img.onerror = () => done(new Error("QLD Hist tile failed"), img);
 						img.src =
-							SERVICE +
+							svc +
 							"/exportImage?bbox=" + bbox +
 							"&bboxSR=102100&imageSR=102100" +
 							"&size=" + TILE_PX + "%2C" + TILE_PX +
 							"&format=jpg&mosaicRule=" + mosaicRule +
-							"&f=image";
+							"&f=image" + tokenStr;
 					});
 					return img;
 				},
@@ -906,7 +977,7 @@
 									const label = item.itemTitle.replace(/^World Imagery \(Wayback /, "").replace(/\)$/, "");
 									return { label, releaseNum, url: this._tileUrl(releaseNum) };
 								});
-							releases.sort((a, b) => b.releaseNum - a.releaseNum);
+							releases.sort((a, b) => (a.label < b.label ? 1 : a.label > b.label ? -1 : 0));
 							_waybackReleasesCache = releases;
 							this._releases = releases;
 							console.info("[CustomTiles] Wayback:", releases.length, "releases loaded");
@@ -1194,6 +1265,408 @@
 				opacity: 0.8,
 				attribution: "© Garmin",
 			});
+		}
+	}
+
+	// -- Unity Water Infrastructure ------------------------------------------
+
+	/**
+	 * Renders one or more Esri FeatureServer layers as a GeoJSON overlay.
+	 * Queries the visible extent on each map move and re-renders features.
+	 *
+	 * @param {Array<{url:string, fields:string, style:object|function}>} configs
+	 */
+	class UnityWaterLayerProvider extends LayerProvider {
+		constructor(configs) {
+			super();
+			this._configs = configs;
+		}
+
+		create() {
+			const configs = this._configs;
+
+			const UWLayer = L.Layer.extend({
+				initialize(cfgs) {
+					L.setOptions(this, {});
+					this._cfgs = cfgs;
+					this._group = null;
+					this._timer = null;
+					this._guards = [];
+				},
+
+				onAdd(map) {
+					if (!map.getPane("dwUWPane")) {
+						map.createPane("dwUWPane");
+						map.getPane("dwUWPane").style.zIndex = "400";
+						map.getPane("dwUWPane").style.pointerEvents = "none";
+					}
+					this._group = L.layerGroup().addTo(map);
+					map.on("moveend", this._schedule, this);
+					map.on("zoomend", this._schedule, this);
+					this._fetch();
+				},
+
+				onRemove(map) {
+					clearTimeout(this._timer);
+					map.off("moveend", this._schedule, this);
+					map.off("zoomend", this._schedule, this);
+					this._guards.forEach(g => { g.dead = true; });
+					this._guards = [];
+					if (this._group) { this._group.remove(); this._group = null; }
+				},
+
+				_schedule() {
+					clearTimeout(this._timer);
+					this._timer = setTimeout(() => this._fetch(), 400);
+				},
+
+				_fetch() {
+					const self = this;
+					const map = this._map;
+					if (!map || !this._group) return;
+					if (map.getZoom() < 13) { this._group.clearLayers(); return; }
+
+					const b = map.getBounds();
+					const geomParam = encodeURIComponent(JSON.stringify({
+						xmin: b.getWest(), ymin: b.getSouth(),
+						xmax: b.getEast(), ymax: b.getNorth(),
+						spatialReference: { wkid: 4326 },
+					}));
+
+					this._guards.forEach(g => { g.dead = true; });
+					const guards = this._cfgs.map(() => ({ dead: false }));
+					this._guards = guards;
+
+					const results = new Array(this._cfgs.length).fill(null);
+					let remaining = this._cfgs.length;
+
+					this._cfgs.forEach((cfg, i) => {
+						const guard = guards[i];
+						const url =
+							cfg.url +
+							"/query?geometry=" + geomParam +
+							"&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326" +
+							"&spatialRel=esriSpatialRelIntersects" +
+							"&outFields=" + encodeURIComponent(cfg.fields || "ObjectId") +
+							"&returnGeometry=true&f=geojson";
+
+						GM_xmlhttpRequest({
+							method: "GET",
+							url: url,
+							onload(resp) {
+								if (guard.dead) return;
+								try { results[i] = { cfg, data: JSON.parse(resp.responseText) }; } catch (_) {}
+								if (--remaining === 0) self._render(results, guards);
+							},
+							onerror() {
+								if (guard.dead) return;
+								if (--remaining === 0) self._render(results, guards);
+							},
+						});
+					});
+				},
+
+				_render(results, guards) {
+					if (!this._group || guards.some(g => g.dead)) return;
+					this._group.clearLayers();
+					for (const r of results) {
+						if (!r || !r.data || r.data.error || !r.data.features) continue;
+						const cfg = r.cfg;
+						L.geoJSON(r.data, {
+							pane: "dwUWPane",
+							style: typeof cfg.style === "function" ? cfg.style : () => cfg.style,
+							pointToLayer: (ft, ll) => {
+								const s = typeof cfg.style === "function" ? cfg.style(ft) : cfg.style;
+								return L.circleMarker(ll, Object.assign({ radius: 4, pane: "dwUWPane" }, s));
+							},
+						}).addTo(this._group);
+					}
+				},
+
+				getAttribution() {
+					return "\u00a9 Unitywater";
+				},
+			});
+
+			return new UWLayer(configs);
+		}
+	}
+
+	/* -- Live Flights (OpenSky Network) ------------------------------------ */
+
+	class FlightsLayerProvider extends LayerProvider {
+		create() {
+			const POLL_MS  = 10000;
+			const MIN_ZOOM = 1;
+			const OPENSKY  = "https://opensky-network.org/api/states/all";
+
+			const FlightsLayer = L.Layer.extend({
+				initialize() {
+					this._group    = null;
+					this._timer    = null;
+					this._debounce = null;
+				},
+
+				onAdd(map) {
+					if (!map.getPane("dwFlightsPane")) {
+						map.createPane("dwFlightsPane");
+						map.getPane("dwFlightsPane").style.zIndex = "450";
+					}
+					this._group = L.layerGroup().addTo(map);
+					this._startPoll();
+					map.on("moveend zoomend", this._onViewChange, this);
+				},
+
+				onRemove(map) {
+					clearInterval(this._timer);
+					clearTimeout(this._debounce);
+					this._timer = this._debounce = null;
+					map.off("moveend zoomend", this._onViewChange, this);
+					if (this._group) { this._group.remove(); this._group = null; }
+				},
+
+				_startPoll() {
+					clearInterval(this._timer);
+					this._fetch();
+					this._timer = setInterval(() => this._fetch(), POLL_MS);
+				},
+
+				_onViewChange() {
+					clearInterval(this._timer);
+					clearTimeout(this._debounce);
+					this._timer = this._debounce = null;
+					this._debounce = setTimeout(() => this._startPoll(), 400);
+				},
+
+				_fetch() {
+					const map = this._map;
+					if (!map || !this._group) return;
+					if (map.getZoom() < MIN_ZOOM) { this._group.clearLayers(); return; }
+					const b   = map.getBounds();
+					const url = OPENSKY +
+						"?lamin=" + b.getSouth().toFixed(3) +
+						"&lomin=" + b.getWest().toFixed(3) +
+						"&lamax=" + b.getNorth().toFixed(3) +
+						"&lomax=" + b.getEast().toFixed(3);
+					GM_xmlhttpRequest({
+						method: "GET",
+						url,
+						onload: (r) => {
+							if (r.status === 200 && this._group) {
+								try { this._render(JSON.parse(r.responseText).states || []); }
+								catch (_) {}
+							}
+						},
+						onerror: () => {},
+					});
+				},
+
+				_render(states) {
+					if (!this._group) return;
+					this._group.clearLayers();
+					for (const s of states) {
+						const lon = s[5], lat = s[6];
+						if (lon == null || lat == null) continue;
+						const callsign  = (s[1] || "").trim() || s[0];
+						const track     = s[10] || 0;
+						const onGround  = s[8];
+						const altM      = s[7];
+						const speedMs   = s[9];
+						const country   = s[2] || "";
+						const altStr    = altM    != null ? Math.round(altM)            + "\u202fm" : "\u2014";
+						const spdStr    = speedMs != null ? Math.round(speedMs * 1.944) + "\u202fkts" : "\u2014";
+						const fill = onGround ? "#aaa" : "#FFE066";
+						const stroke = onGround ? "#666" : "#444";
+						const plane =
+							`<svg viewBox="0 0 20 20" width="20" height="20" xmlns="http://www.w3.org/2000/svg">` +
+							`<g transform="translate(10,10) rotate(${track})">` +
+							`<ellipse rx="1.5" ry="7" fill="${fill}" stroke="${stroke}" stroke-width="0.6"/>` +
+							`<polygon points="0,-2 -9,4 -8,5.5 0,2 8,5.5 9,4" fill="${fill}" stroke="${stroke}" stroke-width="0.6"/>` +
+							`<polygon points="0,5 -4,8 -3.5,9 0,7 3.5,9 4,8" fill="${fill}" stroke="${stroke}" stroke-width="0.6"/>` +
+							`</g></svg>`;
+						const icon = L.divIcon({
+							className: "dw-flight-icon",
+							html: plane,
+							iconSize:   [20, 20],
+							iconAnchor: [10, 10],
+						});
+						L.marker([lat, lon], { icon, pane: "dwFlightsPane", interactive: true })
+							.bindTooltip(
+								`<b>${callsign}</b><br>Alt: ${altStr}&nbsp; Speed: ${spdStr}<br>${country}`,
+								{ className: "dw-flight-tip", sticky: true }
+							)
+							.addTo(this._group);
+					}
+				},
+
+				getAttribution() {
+					return "Flights \u00a9 <a href=\"https://opensky-network.org\" target=\"_blank\" rel=\"noreferrer\">OpenSky Network</a>";
+				},
+			});
+
+			return new FlightsLayer();
+		}
+	}
+
+	/* -- Marine Traffic ---------------------------------------------------- */
+
+	class MarineTrafficLayerProvider extends LayerProvider {
+		create() {
+			const POLL_MS   = 20000;
+			const MIN_ZOOM  = 1;
+			const MAX_TILES = 25;
+			const MT_BASE   = "https://www.marinetraffic.com/getData/get_data_json_4";
+
+			function latLonToTile(lat, lon, z) {
+				lat = Math.max(-85.0511, Math.min(85.0511, lat));
+				const n   = Math.pow(2, z);
+				const x   = Math.floor((lon + 180) / 360 * n);
+				const rad = lat * Math.PI / 180;
+				const y   = Math.floor((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * n);
+				return { x: Math.max(0, Math.min(n - 1, x)), y: Math.max(0, Math.min(n - 1, y)) };
+			}
+
+			function shipColor(type) {
+				const t = parseInt(type) || 0;
+				if (t >= 70 && t < 80) return "#5B9BD5";  // Cargo
+				if (t >= 80 && t < 90) return "#D9534F";  // Tanker
+				if (t >= 60 && t < 70) return "#9B59B6";  // Passenger
+				if (t >= 40 && t < 50) return "#F0A500";  // High speed craft
+				if (t === 30)          return "#2ECC71";  // Fishing
+				if (t >= 36 && t <= 37) return "#2980B9"; // Sailing / pleasure
+				return "#90A4AE";                          // Other
+			}
+
+			const MTLayer = L.Layer.extend({
+				initialize() {
+					this._group    = null;
+					this._timer    = null;
+					this._debounce = null;
+				},
+
+				onAdd(map) {
+					if (!map.getPane("dwMarinePane")) {
+						map.createPane("dwMarinePane");
+						map.getPane("dwMarinePane").style.zIndex = "440";
+					}
+					this._group = L.layerGroup().addTo(map);
+					this._startPoll();
+					map.on("moveend zoomend", this._onViewChange, this);
+				},
+
+				onRemove(map) {
+					clearInterval(this._timer);
+					clearTimeout(this._debounce);
+					this._timer = this._debounce = null;
+					map.off("moveend zoomend", this._onViewChange, this);
+					if (this._group) { this._group.remove(); this._group = null; }
+				},
+
+				_startPoll() {
+					clearInterval(this._timer);
+					this._fetch();
+					this._timer = setInterval(() => this._fetch(), POLL_MS);
+				},
+
+				_onViewChange() {
+					clearInterval(this._timer);
+					clearTimeout(this._debounce);
+					this._timer = this._debounce = null;
+					this._debounce = setTimeout(() => this._startPoll(), 400);
+				},
+
+				_fetch() {
+					const map = this._map;
+					if (!map || !this._group) return;
+					if (map.getZoom() < MIN_ZOOM) { this._group.clearLayers(); return; }
+					const apiZ   = Math.max(5, Math.min(map.getZoom(), 9));
+					const b      = map.getBounds();
+					const center = map.getCenter();
+					const nw     = latLonToTile(b.getNorth(), b.getWest(), apiZ);
+					const se     = latLonToTile(b.getSouth(), b.getEast(), apiZ);
+					const tiles  = [];
+					for (let y = nw.y; y <= se.y && tiles.length < MAX_TILES; y++) {
+						for (let x = nw.x; x <= se.x && tiles.length < MAX_TILES; x++) {
+							tiles.push({ x, y });
+						}
+					}
+					if (!tiles.length) return;
+					const vessels   = new Map();
+					let   remaining = tiles.length;
+					const referer   =
+						`https://www.marinetraffic.com/en/ais/home` +
+						`/centerx:${center.lng.toFixed(1)}/centery:${center.lat.toFixed(1)}/zoom:${apiZ}`;
+					const done = () => {
+						if (--remaining === 0 && this._group) this._render([...vessels.values()]);
+					};
+					for (const { x, y } of tiles) {
+						GM_xmlhttpRequest({
+							method: "GET",
+							url: `${MT_BASE}/z:${apiZ}/X:${x}/Y:${y}/station:0`,
+							headers: {
+								"Accept": "*/*",
+								"X-Requested-With": "XMLHttpRequest",
+								"Referer": referer,
+							},
+							onload: (r) => {
+								if (r.status === 200) {
+									try {
+										const rows = JSON.parse(r.responseText).data || [];
+										for (const v of rows) {
+											const key = v.MMSI || v.mmsi ||
+												(String(v.LAT || v.lat) + "," + String(v.LON || v.lon));
+											if (key && !vessels.has(key)) vessels.set(key, v);
+										}
+									} catch (_) {}
+								}
+								done();
+							},
+							onerror: done,
+						});
+					}
+				},
+
+				_render(rows) {
+					if (!this._group) return;
+					this._group.clearLayers();
+					for (const v of rows) {
+						const lat = parseFloat(v.LAT  || v.lat);
+						const lon = parseFloat(v.LON  || v.lon);
+						if (!isFinite(lat) || !isFinite(lon)) continue;
+						const name   = (v.SHIPNAME || v.shipname || v.MMSI || "").trim() || "Unknown";
+						const mmsi   = v.MMSI  || v.mmsi  || "";
+						const type   = parseInt(v.SHIPTYPE || v.shiptype || "0") || 0;
+						const hdg    = parseFloat(v.HEADING || v.heading || v.COURSE || v.course || "0") || 0;
+						const rawSpd = parseFloat(v.SPEED   || v.speed   || "0") || 0;
+						// AIS speed is in 1/10 knots; guard against pre-divided values
+						const spdKts = rawSpd > 102 ? (rawSpd / 10).toFixed(1) : rawSpd.toFixed(1);
+						const fill   = shipColor(type);
+						const svg =
+							`<svg viewBox="0 0 14 20" width="14" height="20" xmlns="http://www.w3.org/2000/svg">` +
+							`<g transform="translate(7,10) rotate(${hdg})">` +
+							`<polygon points="0,-9 4.5,8 0,5 -4.5,8" fill="${fill}" stroke="#333" stroke-width="0.7"/>` +
+							`</g></svg>`;
+						const icon = L.divIcon({
+							className: "dw-marine-icon",
+							html: svg,
+							iconSize:   [14, 20],
+							iconAnchor: [7, 10],
+						});
+						L.marker([lat, lon], { icon, pane: "dwMarinePane", interactive: true })
+							.bindTooltip(
+								`<b>${name}</b><br>MMSI: ${mmsi}<br>Speed: ${spdKts}\u202fkts\u2002Hdg: ${Math.round(hdg)}\u00b0`,
+								{ className: "dw-marine-tip", sticky: true }
+							)
+							.addTo(this._group);
+					}
+				},
+
+				getAttribution() {
+					return "Vessels \u00a9 <a href=\"https://www.marinetraffic.com\" target=\"_blank\" rel=\"noreferrer\">MarineTraffic</a>";
+				},
+			});
+
+			return new MTLayer();
 		}
 	}
 
@@ -1504,7 +1977,7 @@
 			try {
 				this.layers[CFG.LAYER_GOOGLE] = new GoogleHybridLayerProvider().create();
 				this.layers[CFG.LAYER_QLD] = new QldGlobeLayerProvider(this.qldToken).create();
-				this.layers[CFG.LAYER_HIST] = new QldHistoricalLayerProvider().create();
+				this.layers[CFG.LAYER_HIST] = new QldHistoricalLayerProvider(this.qldToken).create();
 				this.histCompass = this._makeHistoryControl(
 					this.layers[CFG.LAYER_HIST],
 				);
@@ -1541,6 +2014,36 @@
 
 				this.layers[CFG.LAYER_GARMIN] = new GarminHeatmapLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_GARMIN], CFG.LAYER_GARMIN);
+
+				this.layers[CFG.LAYER_UW] = new UnityWaterLayerProvider([
+					{
+						url: CFG.UW_FS_BASE + "/ArcGIS/rest/services/UWPublicAccessWaterInfrastructureLayers/FeatureServer/10",
+						fields: "SubtypeCD",
+						style: (f) => {
+							const s = f.properties && f.properties.SubtypeCD;
+							return s === 11101 ? { color: "#005ce6", weight: 3,   opacity: 0.85 }
+							     : s === 11102 ? { color: "#00c5ff", weight: 2.5, opacity: 0.85 }
+							     :               { color: "#73b2ff", weight: 1.5, opacity: 0.85 };
+						},
+					},
+					{
+						url: CFG.UW_FS_BASE + "/ArcGIS/rest/services/UWPublicAccessSewerInfrastructureLayers/FeatureServer/11",
+						fields: "NominalDiameter",
+						style: { color: "#734c00", weight: 1.5, opacity: 0.85 },
+					},
+					{
+						url: CFG.UW_FS_BASE + "/ArcGIS/rest/services/UWPublicAccessSewerInfrastructureLayers/FeatureServer/12",
+						fields: "NominalDiameter",
+						style: { color: "#df3c00", weight: 2, opacity: 0.85 },
+					},
+				]).create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_UW], CFG.LAYER_UW);
+
+				this.layers[CFG.LAYER_FLIGHTS] = new FlightsLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_FLIGHTS], CFG.LAYER_FLIGHTS);
+
+				this.layers[CFG.LAYER_MARINE] = new MarineTrafficLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_MARINE], CFG.LAYER_MARINE);
 
 				if (!map.getPane("dwRoadsPane")) {
 					map.createPane("dwRoadsPane");
@@ -1967,6 +2470,10 @@
 				".dw-popup-btn-row button:hover { background: #f0f0f0; border-color: #9ca3af; }",
 				".dw-sv-btn { background: #eff6ff !important; color: #1d4ed8 !important; border-color: #bfdbfe !important; }",
 				".dw-sv-btn:hover { background: #dbeafe !important; border-color: #93c5fd !important; }",
+				".dw-flight-icon { background: none !important; border: none !important; }",
+				".dw-flight-tip { font-size: 11px; line-height: 1.4; }",
+				".dw-marine-icon { background: none !important; border: none !important; }",
+				".dw-marine-tip { font-size: 11px; line-height: 1.4; }",
 			].join("\n");
 
 			const style = document.createElement("style");
