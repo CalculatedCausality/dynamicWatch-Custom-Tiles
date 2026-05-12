@@ -15,10 +15,13 @@ The stock dynamicWatch map only ships with OpenStreetMap/topo. This script adds 
 | **QLD Globe** | Base | 21 | High-res Queensland Government aerial imagery; clearest option for most of QLD |
 | **Google Hybrid** | Base | 21 | Satellite with road labels baked in; good fallback outside QLD |
 | **QLD Historical** | Base | 21 | Browse past aerial captures of a location; see how an area looked years ago |
+| **NSW Imagery** | Base | 21 | NSW Government (SIX Maps) high-res aerial imagery |
+| **VIC Imagery** | Base | 20 | Victoria's Vicmap aerial imagery from the Department of Transport and Planning |
+| **NT Imagery** | Base | 19 | Northern Territory NRMaps satellite/aerial imagery |
 | **Strava Heatmap** | Overlay | 10 | Aggregated Strava activity data; useful for finding popular routes |
 | **Garmin Heatmap** | Overlay | 17 | Composited heatmap from Garmin Connect — running, hiking, trail running and mountain biking all blended together |
 
-**QLD Labels** and **QLD Roads** are injected as overlays and toggle on/off automatically when you switch to or away from a QLD base layer. They don't clutter the layer switcher.
+**QLD Labels** and **QLD Roads** are injected as overlays and toggle on/off automatically when you switch to or away from a QLD base layer. **VIC Labels** and **NT Labels** work the same way for their respective base layers. None of these clutter the layer switcher.
 
 | QLD Globe + Strava Heatmap | QLD Historical (1972) |
 |---|---|
@@ -61,4 +64,5 @@ Queensland Globe imagery requires a short-lived bearer token issued by the QLD G
 
 - **Strava Heatmap is zoom <= 10 only.** Higher-zoom tiles require CloudFront signed cookies that Strava only issues via a browser session on their own site. Fetching them from an external script isn't reliably possible, so the layer uses the anonymous endpoint and caps at zoom 10.
 - **Garmin Heatmap composites 4 activity types** (running, hiking, trail running, mountain biking) by fetching each tile separately and blending them with additive canvas compositing. Other Garmin activity types (cycling, walking, etc.) don't have public tile endpoints. Each map tile requires 4 network requests so it may be slightly slower to load.
+- **NT Imagery and NT Labels** are served via a POST-based API (not a standard tile service) so each tile is fetched individually through Tampermonkey's cross-origin request handler. Tiles may load slightly slower than standard layers.
 - **QLD Historical coverage is location-dependent.** Some parts of QLD have many captures going back decades; others have very few or none. The navigator shows "Loading..." while querying the catalog and updates once results come back.
