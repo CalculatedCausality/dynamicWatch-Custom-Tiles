@@ -16,6 +16,7 @@
 // @connect      base.maps.vic.gov.au
 // @connect      nrmaps.nt.gov.au
 // @connect      portal.spatial.nsw.gov.au
+// @connect      s3-us-west-2.amazonaws.com
 // @run-at       document-start
 // ==/UserScript==
 
@@ -33,9 +34,13 @@
 		LAYER_NSW_LABELS: "NSW Labels",
 		LAYER_NSW_HIST: "NSW Historical",
 		LAYER_VIC: "VIC Imagery",
+		LAYER_VIC_HIST: "VIC Historical",
 		LAYER_VIC_LABELS: "VIC Labels",
+		LAYER_WA_HIST: "WA Historical",
 		LAYER_NT: "NT Imagery",
 		LAYER_NT_LABELS: "NT Labels",
+
+		WAYBACK_CONFIG_URL: "https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json",
 
 		NT_IMAGERY_URL: "https://nrmaps.nt.gov.au/nrmaps2_lite/services/api/v1/map/image/mapengine.ntlis_mapproxy",
 		NT_LABELS_URL: "https://nrmaps.nt.gov.au/nrmaps2_lite/services/api/v1/map/image/mapengine.geoserver",
@@ -77,6 +82,17 @@
 
 	const BLANK_TILE =
 		"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+
+	// Layer groups for the picker and Manage Layers panel.
+	// shortLabels strip the state prefix so labels are concise inside their group.
+	const DW_LAYER_GROUPS = [
+		{ header: "Global",             names: [CFG.LAYER_GOOGLE] },
+		{ header: "Queensland",         names: [CFG.LAYER_QLD, CFG.LAYER_HIST],       shortLabels: { [CFG.LAYER_QLD]: "Current Imagery", [CFG.LAYER_HIST]: "Historical" } },
+		{ header: "New South Wales",    names: [CFG.LAYER_NSW, CFG.LAYER_NSW_HIST],   shortLabels: { [CFG.LAYER_NSW]: "Current Imagery", [CFG.LAYER_NSW_HIST]: "Historical" } },
+		{ header: "Victoria",           names: [CFG.LAYER_VIC, CFG.LAYER_VIC_HIST],   shortLabels: { [CFG.LAYER_VIC]: "Current Imagery", [CFG.LAYER_VIC_HIST]: "Historical" } },
+		{ header: "Western Australia",  names: [CFG.LAYER_WA_HIST],                   shortLabels: { [CFG.LAYER_WA_HIST]: "Historical" } },
+		{ header: "Northern Territory", names: [CFG.LAYER_NT],                        shortLabels: { [CFG.LAYER_NT]: "Current Imagery" } },
+	];
 
 	/* -- QLD Token Manager ------------------------------------------------- */
 
@@ -840,6 +856,113 @@
 		}
 	}
 
+	// -- Esri World Imagery Wayback (VIC Historical, WA Historical) --------
+	// Public tile archive of Esri World Imagery snapshots going back to 2014.
+	// Config JSON lists every release; tile URL template uses the releaseNum.
+	// Shared cache avoids fetching the catalog twice for VIC and WA layers.
+	let _waybackReleasesCache = null;
+
+	class WaybackLayerProvider extends LayerProvider {
+		constructor() {
+			super();
+			this._releases = null;
+			this._idx = 0;
+			this._fetching = false;
+			this._layerRef = null;
+		}
+
+		_tileUrl(releaseNum) {
+			return (
+				"https://wayback.maptiles.arcgis.com/arcgis/rest/services/" +
+				"World_Imagery/WMTS/1.0.0/default028mm/MapServer/tile/" +
+				releaseNum + "/{z}/{y}/{x}"
+			);
+		}
+
+		_fetchCatalog() {
+			if (this._fetching) return;
+			if (_waybackReleasesCache) {
+				this._releases = _waybackReleasesCache;
+				this._idx = 0;
+				if (this._layerRef) {
+					this._layerRef.setUrl(this._releases[0].url);
+					this._layerRef.fire("histchange");
+				}
+				return;
+			}
+			this._fetching = true;
+			GM_xmlhttpRequest({
+				method: "GET",
+				url: CFG.WAYBACK_CONFIG_URL,
+				onload: (r) => {
+					this._fetching = false;
+					try {
+						if (r.status === 200) {
+							const data = JSON.parse(r.responseText);
+							const releases = Object.values(data)
+								.filter((item) => item.releaseNum && item.releaseDateLabel)
+								.map((item) => ({
+									label: item.releaseDateLabel,
+									releaseNum: item.releaseNum,
+									url: this._tileUrl(item.releaseNum),
+								}));
+							releases.sort((a, b) => b.releaseNum - a.releaseNum);
+							_waybackReleasesCache = releases;
+							this._releases = releases;
+							console.info("[CustomTiles] Wayback:", releases.length, "releases loaded");
+						} else {
+							console.warn("[CustomTiles] Wayback catalog HTTP", r.status);
+						}
+					} catch (e) {
+						console.error("[CustomTiles] Wayback catalog parse:", e.message);
+					}
+					this._idx = 0;
+					if (this._releases && this._layerRef) {
+						this._layerRef.setUrl(this._releases[0].url);
+						this._layerRef.fire("histchange");
+					}
+				},
+				onerror: () => {
+					this._fetching = false;
+					console.error("[CustomTiles] Wayback catalog network error");
+				},
+			});
+		}
+
+		create() {
+			const provider = this;
+			const layer = L.tileLayer(BLANK_TILE, {
+				maxNativeZoom: 19,
+				maxZoom: 25,
+				tileSize: 256,
+				attribution: "&copy; Esri, Maxar, Earthstar Geographics",
+			});
+			this._layerRef = layer;
+
+			layer.getHistCount = () => (provider._releases ? provider._releases.length : 0);
+			layer.getHistIdx   = () => provider._idx;
+			layer.getHistLabel = (i) => {
+				if (!provider._releases) return null;
+				return (provider._releases[i ?? provider._idx] || {}).label || null;
+			};
+			layer.setHistIdx   = (i) => {
+				if (!provider._releases) return;
+				if (i < 0 || i >= provider._releases.length || i === provider._idx) return;
+				provider._idx = i;
+				layer.setUrl(provider._releases[i].url);
+				layer.fire("histchange");
+			};
+
+			layer.on("add", function () {
+				if (!provider._releases && !provider._fetching) {
+					provider._fetchCatalog();
+				}
+			});
+
+			return layer;
+		}
+	}
+
 	// -- VIC Imagery -------------------------------------------------------
 
 	// The Vicmap WMTS uses zero-padded two-digit TileMatrix IDs ("00".."20"),
@@ -1133,6 +1256,7 @@
 			if (!base) return null;
 			for (const label of base.querySelectorAll("label")) {
 				if (!label.querySelector("input[type=radio]")) continue;
+				if (label.dataset.dwName === name) return label;
 				const span = label.querySelector("span");
 				if (span && span.textContent.trim() === name) return label;
 			}
@@ -1193,22 +1317,37 @@
 			const origTitle = titleBar ? titleBar.textContent : null;
 			if (titleBar) titleBar.textContent = "Manage Layers";
 
-			let rows = "";
-			for (const item of items) {
+			const buildRow = (item, displayName) => {
 				const isActive = item.name === activeName;
 				const checked = !archived.has(item.name);
 				const chkId = "dw-chk-" + item.name.replace(/[^a-z0-9]/gi, "_");
-				rows +=
+				return (
 					`<label class="dw-manager-row${isActive ? " dw-manager-row--active" : ""}">` +
 					`<input type="checkbox" id="${LayerManagerUI.escHtml(chkId)}"` +
 					` data-name="${LayerManagerUI.escHtml(item.name)}"` +
 					(checked ? " checked" : "") +
-					(isActive
-						? ' disabled title="Switch to another layer before archiving this one"'
-						: "") +
-					`><span class="dw-manager-name">${LayerManagerUI.escHtml(item.name)}</span>` +
+					(isActive ? ' disabled title="Switch to another layer before archiving this one"' : "") +
+					`><span class="dw-manager-name">${LayerManagerUI.escHtml(displayName || item.name)}</span>` +
 					(isActive ? '<span class="dw-badge">active</span>' : "") +
-					"</label>";
+					"</label>"
+				);
+			};
+			const usedNames = new Set();
+			let rows = "";
+			for (const group of DW_LAYER_GROUPS) {
+				const groupItems = items.filter((it) => group.names.includes(it.name));
+				if (!groupItems.length) continue;
+				rows += `<div class="dw-manager-group-hd">${LayerManagerUI.escHtml(group.header)}</div>`;
+				rows += `<div class="dw-manager-group">`;
+				for (const item of groupItems) {
+					usedNames.add(item.name);
+					const short = group.shortLabels && group.shortLabels[item.name];
+					rows += buildRow(item, short);
+				}
+				rows += `</div>`;
+			}
+			for (const item of items) {
+				if (!usedNames.has(item.name)) rows += buildRow(item, null);
 			}
 
 			const panel = document.createElement("div");
@@ -1267,6 +1406,8 @@
 			this.layers = {};
 			this.injected = false;
 			this.histCompass = null;
+			this.vicHistControl = null;
+			this.waHistControl = null;
 
 			// Wire token refresh callbacks so the managers don't need layer references.
 			this.qldToken.onRefresh = (token) => {
@@ -1382,6 +1523,14 @@
 				this.layers[CFG.LAYER_VIC] = new VicImageryLayerProvider().create();
 				ctrl.addBaseLayer(this.layers[CFG.LAYER_VIC], CFG.LAYER_VIC);
 
+				this.layers[CFG.LAYER_VIC_HIST] = new WaybackLayerProvider().create();
+				this.vicHistControl = this._makeNswHistControl(this.layers[CFG.LAYER_VIC_HIST]);
+				ctrl.addBaseLayer(this.layers[CFG.LAYER_VIC_HIST], CFG.LAYER_VIC_HIST);
+
+				this.layers[CFG.LAYER_WA_HIST] = new WaybackLayerProvider().create();
+				this.waHistControl = this._makeNswHistControl(this.layers[CFG.LAYER_WA_HIST]);
+				ctrl.addBaseLayer(this.layers[CFG.LAYER_WA_HIST], CFG.LAYER_WA_HIST);
+
 				this.layers[CFG.LAYER_NT] = new NtImageryLayerProvider().create();
 				ctrl.addBaseLayer(this.layers[CFG.LAYER_NT], CFG.LAYER_NT);
 
@@ -1414,6 +1563,8 @@
 					this._syncLabelsLayer(map);
 					this._syncHistCompass(map);
 					this._syncNswHistControl(map);
+					this._syncVicHistControl(map);
+					this._syncWaHistControl(map);
 					this._syncZoomLevel(map);
 				});
 				map.on("layeradd", (e) => {
@@ -1423,12 +1574,16 @@
 						e.layer === this.layers[CFG.LAYER_NSW] ||
 						e.layer === this.layers[CFG.LAYER_NSW_HIST] ||
 						e.layer === this.layers[CFG.LAYER_VIC] ||
+						e.layer === this.layers[CFG.LAYER_VIC_HIST] ||
+						e.layer === this.layers[CFG.LAYER_WA_HIST] ||
 						e.layer === this.layers[CFG.LAYER_NT] ||
 						e.layer === this.layers[CFG.LAYER_HIST]
 					) {
 						this._syncLabelsLayer(map);
 						this._syncHistCompass(map);
 						this._syncNswHistControl(map);
+						this._syncVicHistControl(map);
+						this._syncWaHistControl(map);
 						this._syncZoomLevel(map);
 					}
 				});
@@ -1446,8 +1601,8 @@
 
 		_syncLabelsLayer(map) {
 			const isQld = map.hasLayer(this.layers[CFG.LAYER_QLD]) || map.hasLayer(this.layers[CFG.LAYER_HIST]);
-			const isNsw = map.hasLayer(this.layers[CFG.LAYER_NSW]);
-			const isVic = map.hasLayer(this.layers[CFG.LAYER_VIC]);
+			const isNsw = map.hasLayer(this.layers[CFG.LAYER_NSW]) || map.hasLayer(this.layers[CFG.LAYER_NSW_HIST]);
+			const isVic = map.hasLayer(this.layers[CFG.LAYER_VIC]) || map.hasLayer(this.layers[CFG.LAYER_VIC_HIST]);
 			const isNt = map.hasLayer(this.layers[CFG.LAYER_NT]);
 			for (const lyr of [this.layers[CFG.LAYER_ROADS], this.layers[CFG.LAYER_LABELS]]) {
 				if (!lyr) continue;
@@ -1479,6 +1634,22 @@
 			else if (!isNswHist && ctrl._map) map.removeControl(ctrl);
 		}
 
+		_syncVicHistControl(map) {
+			const ctrl = this.vicHistControl;
+			if (!ctrl) return;
+			const active = !!(this.layers[CFG.LAYER_VIC_HIST] && map.hasLayer(this.layers[CFG.LAYER_VIC_HIST]));
+			if (active && !ctrl._map) ctrl.addTo(map);
+			else if (!active && ctrl._map) map.removeControl(ctrl);
+		}
+
+		_syncWaHistControl(map) {
+			const ctrl = this.waHistControl;
+			if (!ctrl) return;
+			const active = !!(this.layers[CFG.LAYER_WA_HIST] && map.hasLayer(this.layers[CFG.LAYER_WA_HIST]));
+			if (active && !ctrl._map) ctrl.addTo(map);
+			else if (!active && ctrl._map) map.removeControl(ctrl);
+		}
+
 		_syncHistCompass(map) {
 			const hist = this.histCompass;
 			if (!hist) return;
@@ -1496,6 +1667,8 @@
 				map.hasLayer(this.layers[CFG.LAYER_NSW]) ||
 				map.hasLayer(this.layers[CFG.LAYER_NSW_HIST]) ||
 				map.hasLayer(this.layers[CFG.LAYER_VIC]) ||
+				map.hasLayer(this.layers[CFG.LAYER_VIC_HIST]) ||
+				map.hasLayer(this.layers[CFG.LAYER_WA_HIST]) ||
 				map.hasLayer(this.layers[CFG.LAYER_NT]) ||
 				map.hasLayer(this.layers[CFG.LAYER_HIST]);
 			const newMax = isDeep ? 25 : 22;
@@ -1593,12 +1766,6 @@
 		}
 
 		_injectGroupHeaders(ctrl) {
-			const GROUPS = [
-				{ header: "Queensland",         names: [CFG.LAYER_QLD, CFG.LAYER_HIST] },
-				{ header: "New South Wales",    names: [CFG.LAYER_NSW, CFG.LAYER_NSW_HIST] },
-				{ header: "Victoria",           names: [CFG.LAYER_VIC] },
-				{ header: "Northern Territory", names: [CFG.LAYER_NT] },
-			];
 			const collapsedGroups = new Set();
 			const doInject = () => {
 				const container = ctrl.getContainer();
@@ -1608,24 +1775,41 @@
 				const labelMap = new Map();
 				for (const lbl of base.querySelectorAll(":scope > label")) {
 					const span = lbl.querySelector("span");
-					if (span) labelMap.set(span.textContent.trim(), lbl);
+					if (span) {
+						const name = span.textContent.trim();
+						lbl.dataset.dwName = name;
+						labelMap.set(name, lbl);
+					}
 				}
-				for (const group of GROUPS) {
+				for (const group of DW_LAYER_GROUPS) {
 					const labels = group.names.map((n) => labelMap.get(n)).filter(Boolean);
 					if (!labels.length) continue;
-					const details = document.createElement("details");
-					details.className = "dw-layer-group";
-					details.open = !collapsedGroups.has(group.header);
-					details.addEventListener("toggle", () => {
-						if (details.open) collapsedGroups.delete(group.header);
-						else collapsedGroups.add(group.header);
+					const grpDiv = document.createElement("div");
+					grpDiv.className = "dw-layer-group";
+					if (collapsedGroups.has(group.header)) grpDiv.classList.add("dw-layer-group--closed");
+					const hdr = document.createElement("div");
+					hdr.className = "dw-layer-group-header";
+					hdr.textContent = group.header;
+					hdr.addEventListener("click", () => {
+						const nowClosed = grpDiv.classList.toggle("dw-layer-group--closed");
+						if (nowClosed) collapsedGroups.add(group.header);
+						else collapsedGroups.delete(group.header);
 					});
-					const summary = document.createElement("summary");
-					summary.className = "dw-layer-group-header";
-					summary.textContent = group.header;
-					details.appendChild(summary);
-					base.insertBefore(details, labels[0]);
-					for (const lbl of labels) details.appendChild(lbl);
+					grpDiv.appendChild(hdr);
+					const content = document.createElement("div");
+					content.className = "dw-layer-group-content";
+					grpDiv.appendChild(content);
+					base.insertBefore(grpDiv, labels[0]);
+					for (const lbl of labels) {
+						content.appendChild(lbl);
+						if (group.shortLabels) {
+							const short = group.shortLabels[lbl.dataset.dwName];
+							if (short) {
+								const span = lbl.querySelector("span span");
+								if (span) span.textContent = " " + short;
+							}
+						}
+					}
 				}
 			};
 			const origUpdate = ctrl._update.bind(ctrl);
@@ -1771,10 +1955,12 @@
 				".dw-vxh-disabled { opacity: 0.3; cursor: default; pointer-events: none; }",
 				".dw-vxh-label { min-width: 85px; text-align: center; color: #333; }",
 				".dw-layer-group { margin: 1px 0; }",
-				".dw-layer-group-header { list-style: none; font-size: 10px; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 0.05em; padding: 5px 8px 1px; cursor: pointer; user-select: none; }",
-				".dw-layer-group-header::-webkit-details-marker { display: none; }",
-				".dw-layer-group[open] > .dw-layer-group-header::before { content: '▾  '; }",
-				".dw-layer-group:not([open]) > .dw-layer-group-header::before { content: '▸  '; }",
+				".dw-layer-group-header { font-size: 10px; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 0.05em; padding: 5px 8px 1px; cursor: pointer; user-select: none; }",
+				".dw-layer-group:not(.dw-layer-group--closed) > .dw-layer-group-header::before { content: '\u25be  '; }",
+				".dw-layer-group--closed > .dw-layer-group-header::before { content: '\u25b8  '; }",
+				".dw-layer-group--closed > .dw-layer-group-content { display: none; }",
+				".dw-manager-group-hd { font-size: 10px; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 0.05em; padding: 5px 6px 1px; margin-top: 3px; border-top: 1px solid #f0f0f0; }",
+				".dw-manager-group { padding-left: 6px; border-left: 2px solid #eee; margin: 0 0 2px 8px; }",
 				".dw-popup-coords { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: #6b7280; margin: 0 0 10px; letter-spacing: 0.04em; }",
 				".dw-popup-btn-row { display: flex; flex-wrap: wrap; gap: 6px; }",
 				".dw-popup-btn-row button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px; font-size: 12.5px; font-family: inherit; background: #f9f9f9; color: #374151; border: 1px solid #d1d5db; border-radius: 5px; cursor: pointer; white-space: nowrap; }",
