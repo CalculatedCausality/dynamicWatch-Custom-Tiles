@@ -21,7 +21,7 @@ The stock dynamicWatch map only ships with OpenStreetMap/topo. This script adds 
 
 | QLD Globe + Strava Heatmap | QLD Historical (1972) |
 |---|---|
-| ![QLD Globe aerial imagery with Strava heatmap overlay showing trail activity](images/qldglobe-strava.png) | ![QLD Historical layer showing a 1972 aerial capture with the date navigator control](images/qld-historical.png) |
+| ![QLD Globe aerial imagery with Strava heatmap overlay showing trail activity](images/screenshot-strava.png) | ![QLD Historical layer showing a 1972 aerial capture with the date navigator control](images/screenshot-historical.png) |
 
 ### Historical imagery navigator
 
