@@ -8,14 +8,15 @@ A Tampermonkey userscript that improves the [dynamicWatch](https://dynamic.watch
 
 ### Map layers
 
-The stock dynamicWatch map only ships with OpenStreetMap/topo. This script adds four more options to the layer switcher:
+The stock dynamicWatch map only ships with OpenStreetMap/topo. This script adds several more options to the layer switcher:
 
-| Layer | Max zoom | What it's good for |
-|---|---|---|
-| **QLD Globe** | 21 | High-res Queensland Government aerial imagery; clearest option for most of QLD |
-| **Google Hybrid** | 21 | Satellite with road labels baked in; good fallback outside QLD |
-| **QLD Historical** | 21 | Browse past aerial captures of a location; see how an area looked years ago |
-| **Strava Heatmap** | 10 | Aggregated activity data; useful for finding unofficial trails and popular routes |
+| Layer | Type | Max zoom | What it's good for |
+|---|---|---|---|
+| **QLD Globe** | Base | 21 | High-res Queensland Government aerial imagery; clearest option for most of QLD |
+| **Google Hybrid** | Base | 21 | Satellite with road labels baked in; good fallback outside QLD |
+| **QLD Historical** | Base | 21 | Browse past aerial captures of a location; see how an area looked years ago |
+| **Strava Heatmap** | Overlay | 10 | Aggregated Strava activity data; useful for finding popular routes |
+| **Garmin Heatmap** | Overlay | 17 | Composited heatmap from Garmin Connect — running, hiking, trail running and mountain biking all blended together |
 
 **QLD Labels** and **QLD Roads** are injected as overlays and toggle on/off automatically when you switch to or away from a QLD base layer. They don't clutter the layer switcher.
 
@@ -58,5 +59,6 @@ Queensland Globe imagery requires a short-lived bearer token issued by the QLD G
 
 ## Known limitations
 
-- **Strava Heatmap is zoom ≤ 10 only.** Higher-zoom tiles require CloudFront signed cookies that Strava only issues via a browser session on their own site. Fetching them from an external script isn't reliably possible, so the layer uses the anonymous endpoint and caps at zoom 10.
-- **QLD Historical coverage is location-dependent.** Some parts of QLD have many captures going back decades; others have very few or none. The navigator shows "Loading…" while querying the catalog and updates once results come back.
+- **Strava Heatmap is zoom <= 10 only.** Higher-zoom tiles require CloudFront signed cookies that Strava only issues via a browser session on their own site. Fetching them from an external script isn't reliably possible, so the layer uses the anonymous endpoint and caps at zoom 10.
+- **Garmin Heatmap composites 4 activity types** (running, hiking, trail running, mountain biking) by fetching each tile separately and blending them with additive canvas compositing. Other Garmin activity types (cycling, walking, etc.) don't have public tile endpoints. Each map tile requires 4 network requests so it may be slightly slower to load.
+- **QLD Historical coverage is location-dependent.** Some parts of QLD have many captures going back decades; others have very few or none. The navigator shows "Loading..." while querying the catalog and updates once results come back.
