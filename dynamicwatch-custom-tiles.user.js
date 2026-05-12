@@ -1528,13 +1528,21 @@
 
 			function shipColor(type) {
 				const t = parseInt(type) || 0;
+				// MarineTraffic internal single-digit codes
+				if (t === 7) return "#5B9BD5";   // Cargo
+				if (t === 8) return "#D9534F";   // Tanker
+				if (t === 6) return "#9B59B6";   // Passenger
+				if (t === 4) return "#F0A500";   // High speed craft
+				if (t === 3) return "#2ECC71";   // Fishing / special
+				if (t === 5) return "#2980B9";   // Sailing / pleasure
+				// AIS standard codes (fallback)
 				if (t >= 70 && t < 80) return "#5B9BD5";  // Cargo
 				if (t >= 80 && t < 90) return "#D9534F";  // Tanker
 				if (t >= 60 && t < 70) return "#9B59B6";  // Passenger
 				if (t >= 40 && t < 50) return "#F0A500";  // High speed craft
 				if (t === 30)          return "#2ECC71";  // Fishing
 				if (t >= 36 && t <= 37) return "#2980B9"; // Sailing / pleasure
-				return "#90A4AE";                          // Other
+				return "#90A4AE";                          // Other / unknown
 			}
 
 			const MTLayer = L.Layer.extend({
@@ -1579,11 +1587,13 @@
 					const map = this._map;
 					if (!map || !this._group) return;
 					if (map.getZoom() < MIN_ZOOM) { this._group.clearLayers(); return; }
-					const apiZ   = Math.max(5, Math.min(map.getZoom(), 9));
+					// MT API z parameter is one more than the OSM tile zoom used for X/Y
+					const tileZ  = Math.max(4, Math.min(map.getZoom(), 8));
+					const apiZ   = tileZ + 1;
 					const b      = map.getBounds();
 					const center = map.getCenter();
-					const nw     = latLonToTile(b.getNorth(), b.getWest(), apiZ);
-					const se     = latLonToTile(b.getSouth(), b.getEast(), apiZ);
+					const nw     = latLonToTile(b.getNorth(), b.getWest(), tileZ);
+					const se     = latLonToTile(b.getSouth(), b.getEast(), tileZ);
 					const tiles  = [];
 					for (let y = nw.y; y <= se.y && tiles.length < MAX_TILES; y++) {
 						for (let x = nw.x; x <= se.x && tiles.length < MAX_TILES; x++) {
@@ -1595,7 +1605,7 @@
 					let   remaining = tiles.length;
 					const referer   =
 						`https://www.marinetraffic.com/en/ais/home` +
-						`/centerx:${center.lng.toFixed(1)}/centery:${center.lat.toFixed(1)}/zoom:${apiZ}`;
+						`/centerx:${center.lng.toFixed(1)}/centery:${center.lat.toFixed(1)}/zoom:${tileZ}`;
 					const done = () => {
 						if (--remaining === 0 && this._group) this._render([...vessels.values()]);
 					};
@@ -1611,13 +1621,30 @@
 							onload: (r) => {
 								if (r.status === 200) {
 									try {
-										const rows = JSON.parse(r.responseText).data || [];
+										const parsed = JSON.parse(r.responseText);
+										// Format: { type, data: { rows: [...], areaShips: N } }
+										const raw = (parsed.data && parsed.data.rows) ||
+										            (Array.isArray(parsed.data) ? parsed.data : null) ||
+										            (Array.isArray(parsed) ? parsed : null);
+										if (!Array.isArray(raw)) return;
+										let rows = raw;
+										// Normalise array-of-arrays (first row = column headers)
+										if (rows.length && Array.isArray(rows[0])) {
+											const hdrs = rows[0];
+											rows = rows.slice(1).map(row => {
+												const obj = {};
+												hdrs.forEach((h, i) => { obj[h] = row[i]; });
+												return obj;
+											});
+										}
 										for (const v of rows) {
 											const key = v.MMSI || v.mmsi ||
 												(String(v.LAT || v.lat) + "," + String(v.LON || v.lon));
 											if (key && !vessels.has(key)) vessels.set(key, v);
 										}
-									} catch (_) {}
+									} catch (e) {
+										console.warn("[CustomTiles] MarineTraffic parse error", e);
+									}
 								}
 								done();
 							},
@@ -1633,9 +1660,9 @@
 						const lat = parseFloat(v.LAT  || v.lat);
 						const lon = parseFloat(v.LON  || v.lon);
 						if (!isFinite(lat) || !isFinite(lon)) continue;
-						const name   = (v.SHIPNAME || v.shipname || v.MMSI || "").trim() || "Unknown";
+						const name   = (v.SHIPNAME || v.shipname || v.NAME || v.name || v.MMSI || "").trim() || "Unknown";
 						const mmsi   = v.MMSI  || v.mmsi  || "";
-						const type   = parseInt(v.SHIPTYPE || v.shiptype || "0") || 0;
+						const type   = parseInt(v.SHIPTYPE || v.shiptype || v.TYPE || v.type || "0") || 0;
 						const hdg    = parseFloat(v.HEADING || v.heading || v.COURSE || v.course || "0") || 0;
 						const rawSpd = parseFloat(v.SPEED   || v.speed   || "0") || 0;
 						// AIS speed is in 1/10 knots; guard against pre-divided values
