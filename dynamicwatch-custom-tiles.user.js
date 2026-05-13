@@ -20,6 +20,8 @@
 // @connect      services2.arcgis.com
 // @connect      opensky-network.org
 // @connect      www.marinetraffic.com
+// @connect      overpass.kumi.systems
+// @connect      spatial.infrastructure.gov.au
 // @run-at       document-start
 // ==/UserScript==
 
@@ -88,6 +90,8 @@
 		LAYER_UW:       "Unity Water",
 		LAYER_FLIGHTS:  "Live Flights",
 		LAYER_MARINE:   "Marine Vessels",
+		LAYER_WRECKS:   "Shipwrecks",
+		LAYER_MOBILE:   "Mobile Coverage",
 		UW_FS_BASE: "https://services2.arcgis.com/tQg86iShPXJPWQWw",
 	};
 
@@ -1697,6 +1701,195 @@
 		}
 	}
 
+	/* -- Shipwrecks Layer -------------------------------------------------- */
+
+	class ShipwrecksLayerProvider extends LayerProvider {
+		create() {
+			const L        = pageWin.L;
+			const OVERPASS = "https://overpass.kumi.systems/api/interpreter";
+			const MIN_ZOOM = 8;
+
+			function wreckColor(category) {
+				if (!category) return "#888";
+				if (category === "dangerous")    return "#D9534F";
+				if (category === "hull_showing") return "#F0A500";
+				if (category === "hull_visible") return "#5B9BD5";
+				return "#888";
+			}
+
+			const WreckLayer = L.Layer.extend({
+				initialize() {
+					this._group    = null;
+					this._debounce = null;
+					this._lastBbox = null;
+				},
+
+				onAdd(map) {
+					if (!map.getPane("dwWrecksPane")) {
+						map.createPane("dwWrecksPane");
+						map.getPane("dwWrecksPane").style.zIndex = "420";
+					}
+					this._group = L.layerGroup().addTo(map);
+					this._fetch();
+					map.on("moveend zoomend", this._onViewChange, this);
+				},
+
+				onRemove(map) {
+					clearTimeout(this._debounce);
+					this._debounce = null;
+					map.off("moveend zoomend", this._onViewChange, this);
+					if (this._group) { this._group.remove(); this._group = null; }
+				},
+
+				_onViewChange() {
+					clearTimeout(this._debounce);
+					this._debounce = setTimeout(() => this._fetch(), 400);
+				},
+
+				_fetch() {
+					const map = this._map;
+					if (!map || !this._group) return;
+					if (map.getZoom() < MIN_ZOOM) { this._group.clearLayers(); return; }
+
+					const b    = map.getBounds().pad(0.1);
+					const bbox = `${b.getSouth().toFixed(4)},${b.getWest().toFixed(4)},${b.getNorth().toFixed(4)},${b.getEast().toFixed(4)}`;
+					if (bbox === this._lastBbox) return;
+					this._lastBbox = bbox;
+
+					const q = `[out:json][timeout:20];(node[historic=wreck](${bbox});way[historic=wreck](${bbox}););out center tags;`;
+					GM_xmlhttpRequest({
+						method:  "POST",
+						url:     OVERPASS,
+						headers: { "Content-Type": "application/x-www-form-urlencoded" },
+						data:    "data=" + encodeURIComponent(q),
+						timeout: 60000,
+						onload:  (r) => {
+							if (r.status !== 200) return;
+							try {
+								const json = JSON.parse(r.responseText);
+								if (this._group) this._render(json.elements || []);
+							} catch (e) {
+								console.warn("[CustomTiles] Overpass parse error", e);
+							}
+						},
+						onerror: (e) => console.warn("[CustomTiles] Overpass request error", e),
+					});
+				},
+
+				_render(elements) {
+					if (!this._group) return;
+					this._group.clearLayers();
+					for (const el of elements) {
+						let lat, lon;
+						if (el.type === "node") {
+							lat = el.lat;
+							lon = el.lon;
+						} else if (el.center) {
+							lat = el.center.lat;
+							lon = el.center.lon;
+						} else {
+							continue;
+						}
+						if (!isFinite(lat) || !isFinite(lon)) continue;
+
+						const tags     = el.tags || {};
+						const name     = tags.name || "";
+						const category = tags["seamark:wreck:category"] || "";
+						const dateSunk = tags["wreck:date_sunk"] || "";
+						const fill     = wreckColor(category);
+						const catLabel = category.replace(/_/g, " ") || "unknown";
+
+						const svg =
+							`<svg viewBox="0 0 16 16" width="16" height="16" xmlns="http://www.w3.org/2000/svg">` +
+							`<circle cx="8" cy="8" r="6" fill="${fill}" stroke="#333" stroke-width="1.2" opacity="0.9"/>` +
+							`<text x="8" y="12" text-anchor="middle" font-size="9" font-family="sans-serif" fill="#fff">\u2693</text>` +
+							`</svg>`;
+
+						const icon = L.divIcon({
+							className: "dw-wreck-icon",
+							html:      svg,
+							iconSize:   [16, 16],
+							iconAnchor: [8, 8],
+						});
+
+						let tip = name ? `<b>${name}</b><br>` : "";
+						tip += `Category: ${catLabel}`;
+						if (dateSunk) tip += `<br>Sunk: ${dateSunk}`;
+
+						L.marker([lat, lon], { icon, pane: "dwWrecksPane", interactive: true })
+							.bindTooltip(tip, { className: "dw-wreck-tip", sticky: true })
+							.addTo(this._group);
+					}
+				},
+
+				getAttribution() {
+					return "Wrecks \u00a9 <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\" rel=\"noreferrer\">OpenStreetMap</a> contributors";
+				},
+			});
+
+			return new WreckLayer();
+		}
+	}
+
+	/* -- Mobile Coverage Layer --------------------------------------------- */
+
+	class MobileCoverageLayerProvider extends LayerProvider {
+		create() {
+			const L       = pageWin.L;
+			// ACCC Mobile Sites and Coverages (national AU, 2024)
+			// Layer 2 = All Network Operators 4G Outdoor Mobile Coverage ACCC 2024
+			const BASE    =
+				"https://spatial.infrastructure.gov.au/server/rest/services/" +
+				"ACCC_Mobile_Sites_and_Coverages/MapServer";
+			const LAYER_ID = 2;  // 4G All Operators
+
+			// Convert Leaflet tile (z,x,y) to geographic bbox (EPSG:4326)
+			function tileToBBox(z, x, y) {
+				const n    = Math.pow(2, z);
+				const lon1 = x / n * 360 - 180;
+				const lon2 = (x + 1) / n * 360 - 180;
+				const lat1 = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)))       * 180 / Math.PI;
+				const lat2 = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n))) * 180 / Math.PI;
+				return { minLon: lon1, minLat: lat2, maxLon: lon2, maxLat: lat1 };
+			}
+
+			const MobileTileLayer = L.TileLayer.extend({
+				onAdd(map) {
+					if (!map.getPane("dwMobilePane")) {
+						map.createPane("dwMobilePane");
+						map.getPane("dwMobilePane").style.zIndex = "380";
+						map.getPane("dwMobilePane").style.pointerEvents = "none";
+					}
+					L.TileLayer.prototype.onAdd.call(this, map);
+				},
+
+				getTileUrl(coords) {
+					const { z, x, y } = coords;
+					const bb = tileToBBox(z, x, y);
+					return (
+						`${BASE}/export?` +
+						`bbox=${bb.minLon},${bb.minLat},${bb.maxLon},${bb.maxLat}` +
+						`&bboxSR=4326&imageSR=4326` +
+						`&layers=show:${LAYER_ID}` +
+						`&size=256,256` +
+						`&format=png32` +
+						`&transparent=true` +
+						`&f=image`
+					);
+				},
+			});
+
+			return new MobileTileLayer("", {
+				opacity:     0.5,
+				attribution: "Mobile coverage \u00a9 <a href=\"https://data.gov.au\" target=\"_blank\" rel=\"noreferrer\">ACCC / Dept. of Infrastructure</a>",
+				minZoom:     5,
+				maxZoom:     18,
+				tileSize:    256,
+				pane:        "dwMobilePane",
+			});
+		}
+	}
+
 	/* -- Layer Manager UI -------------------------------------------------- */
 
 	class LayerManagerUI {
@@ -2072,6 +2265,12 @@
 				this.layers[CFG.LAYER_MARINE] = new MarineTrafficLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_MARINE], CFG.LAYER_MARINE);
 
+				this.layers[CFG.LAYER_MOBILE] = new MobileCoverageLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_MOBILE], CFG.LAYER_MOBILE);
+
+				this.layers[CFG.LAYER_WRECKS] = new ShipwrecksLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_WRECKS], CFG.LAYER_WRECKS);
+
 				if (!map.getPane("dwRoadsPane")) {
 					map.createPane("dwRoadsPane");
 					map.getPane("dwRoadsPane").style.zIndex = 225;
@@ -2296,7 +2495,9 @@
 		}
 
 		_injectGroupHeaders(ctrl) {
-			const collapsedGroups = new Set();
+			const collapsedGroups = new Set(
+				JSON.parse(GM_getValue("dw_collapsed_groups", "[]"))
+			);
 			const doInject = () => {
 				const container = ctrl.getContainer();
 				if (!container) return;
@@ -2324,6 +2525,7 @@
 						const nowClosed = grpDiv.classList.toggle("dw-layer-group--closed");
 						if (nowClosed) collapsedGroups.add(group.header);
 						else collapsedGroups.delete(group.header);
+						GM_setValue("dw_collapsed_groups", JSON.stringify([...collapsedGroups]));
 					});
 					grpDiv.appendChild(hdr);
 					const content = document.createElement("div");
@@ -2501,6 +2703,8 @@
 				".dw-flight-tip { font-size: 11px; line-height: 1.4; }",
 				".dw-marine-icon { background: none !important; border: none !important; }",
 				".dw-marine-tip { font-size: 11px; line-height: 1.4; }",
+				".dw-wreck-icon { background: none !important; border: none !important; }",
+				".dw-wreck-tip { font-size: 11px; line-height: 1.4; }",
 			].join("\n");
 
 			const style = document.createElement("style");
