@@ -13,10 +13,11 @@
 // @connect      spatial-img.information.qld.gov.au
 // @connect      spatial-gis.information.qld.gov.au
 // @connect      connecttile.garmin.com
-// @connect      base.maps.vic.gov.au
-// @connect      nrmaps.nt.gov.au
-// @connect      portal.spatial.nsw.gov.au
+// @connect      cdn.apple-mapkit.com
+// @connect      duckduckgo.com
+// @connect      tiles.stadiamaps.com
 // @connect      s3-us-west-2.amazonaws.com
+// @connect      wayback.maptiles.arcgis.com
 // @connect      services2.arcgis.com
 // @connect      opensky-network.org
 // @connect      www.marinetraffic.com
@@ -35,21 +36,33 @@
 	const CFG = {
 		LAYER_QLD: "QLD Globe",
 		LAYER_GOOGLE: "Google Hybrid",
-		LAYER_NSW: "NSW Imagery",
-		LAYER_NSW_LABELS: "NSW Labels",
-		LAYER_NSW_HIST: "NSW Historical",
-		LAYER_VIC: "VIC Imagery",
-		LAYER_VIC_HIST: "VIC Historical",
-		LAYER_VIC_LABELS: "VIC Labels",
-		LAYER_WA_HIST: "WA Historical",
-		LAYER_NT: "NT Imagery",
-		LAYER_NT_LABELS: "NT Labels",
+		LAYER_APPLE: "Apple Maps",
+		LAYER_STAMEN_TONER: "Stamen Toner",
+		LAYER_WAYBACK: "Esri Wayback",
 
 		WAYBACK_CONFIG_URL: "https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json",
 
-		NT_IMAGERY_URL: "https://nrmaps.nt.gov.au/nrmaps2_lite/services/api/v1/map/image/mapengine.ntlis_mapproxy",
-		NT_LABELS_URL: "https://nrmaps.nt.gov.au/nrmaps2_lite/services/api/v1/map/image/mapengine.geoserver",
-		NT_CLIENT_ID: "84d3f61f-9b3c-44d0-9f38-c464692d9909",
+		// Apple MapKit raster tile endpoint (ti/tile). The vector endpoint
+		// (md/v1/vtile) returns protobuf and won't render in plain Leaflet.
+		// style=0 = road map; tint=dark gives the dark colour scheme.
+		// accessKey and `v` build number are injected at runtime by
+		// AppleTokenManager (acquired via DuckDuckGo's bootstrap flow).
+		APPLE_TILE_BASE:
+			"https://cdn.apple-mapkit.com/ti/tile?x={x}&y={y}&z={z}" +
+			"&style=0&size=1&scale=2&lang=en&poi=1&labels=1&tint=dark&emphasis=standard",
+		APPLE_DDG_TOKEN_URL: "https://duckduckgo.com/local.js?get_mk_token=1",
+		APPLE_BOOTSTRAP_URL:
+			"https://cdn.apple-mapkit.com/ma/bootstrap?apiVersion=2&mkjsVersion=5.79.95&poi=1",
+		APPLE_DDG_ORIGIN: "https://duckduckgo.com",
+		APPLE_TOKEN_TTL: 30 * 60 * 1000,
+		APPLE_DEFAULT_V: "2605231",
+
+		// Stadia Maps (Stamen Toner host) allows keyless tile requests from
+		// localhost. We proxy tiles through GM_xmlhttpRequest with spoofed
+		// Origin/Referer headers — browser CORS blocks setting these from
+		// regular XHR, but the userscript-manager API bypasses that.
+		STADIA_SPOOF_ORIGIN: "http://localhost",
+
 		LAYER_LABELS: "QLD Labels",
 		LAYER_ROADS: "QLD Roads",
 		LAYER_STRAVA: "Strava Heatmap",
@@ -101,12 +114,8 @@
 	// Layer groups for the picker and Manage Layers panel.
 	// shortLabels strip the state prefix so labels are concise inside their group.
 	const DW_LAYER_GROUPS = [
-		{ header: "Global",             names: [CFG.LAYER_GOOGLE] },
-		{ header: "Queensland",         names: [CFG.LAYER_QLD, CFG.LAYER_HIST],       shortLabels: { [CFG.LAYER_QLD]: "Current Imagery", [CFG.LAYER_HIST]: "Historical" } },
-		{ header: "New South Wales",    names: [CFG.LAYER_NSW, CFG.LAYER_NSW_HIST],   shortLabels: { [CFG.LAYER_NSW]: "Current Imagery", [CFG.LAYER_NSW_HIST]: "Historical" } },
-		{ header: "Victoria",           names: [CFG.LAYER_VIC, CFG.LAYER_VIC_HIST],   shortLabels: { [CFG.LAYER_VIC]: "Current Imagery", [CFG.LAYER_VIC_HIST]: "Historical" } },
-		{ header: "Western Australia",  names: [CFG.LAYER_WA_HIST],                   shortLabels: { [CFG.LAYER_WA_HIST]: "Historical" } },
-		{ header: "Northern Territory", names: [CFG.LAYER_NT],                        shortLabels: { [CFG.LAYER_NT]: "Current Imagery" } },
+		{ header: "Global",     names: [CFG.LAYER_GOOGLE, CFG.LAYER_APPLE, CFG.LAYER_STAMEN_TONER, CFG.LAYER_WAYBACK] },
+		{ header: "Queensland", names: [CFG.LAYER_QLD, CFG.LAYER_HIST], shortLabels: { [CFG.LAYER_QLD]: "Current Imagery", [CFG.LAYER_HIST]: "Historical" } },
 	];
 
 	/* -- QLD Token Manager ------------------------------------------------- */
@@ -314,6 +323,165 @@
 		}
 	}
 
+	/* -- Apple MapKit Token Manager --------------------------------------- */
+
+	// Two-step bootstrap, modelled on the QGIS Apple Maps plugin's manual flow:
+	//   1. GET duckduckgo.com/local.js?get_mk_token=1  -> raw JWT (DDG-signed,
+	//      ~6 hr life, Origin pinned to duckduckgo.com)
+	//   2. GET cdn.apple-mapkit.com/ma/bootstrap with Authorization: Bearer <jwt>
+	//      and Origin: https://duckduckgo.com  ->  JSON containing accessKey
+	//      (good for 30 min) and current tile-URL templates (where the `v`
+	//      build number lives).
+	class AppleTokenManager {
+		constructor() {
+			this.accessKey = GM_getValue("apple_accesskey", null);
+			this.version = GM_getValue("apple_version", CFG.APPLE_DEFAULT_V);
+			this.expires = GM_getValue("apple_accesskey_expires", 0);
+			this.fetching = false;
+			this.pending = [];
+			this.refreshScheduled = false;
+			this.retryCount = 0;
+			/** Set by CustomTilesApp; called with (accessKey, version) on refresh. */
+			this.onRefresh = null;
+		}
+
+		isValid() {
+			return !!(this.accessKey && this.expires - Date.now() > CFG.REFRESH_MARGIN);
+		}
+
+		save(accessKey, version, expiresMs) {
+			this.accessKey = accessKey;
+			this.version = version || this.version;
+			this.expires = expiresMs;
+			GM_setValue("apple_accesskey", accessKey);
+			GM_setValue("apple_version", this.version);
+			GM_setValue("apple_accesskey_expires", expiresMs);
+		}
+
+		get(cb) {
+			if (this.isValid()) { cb(null, this.accessKey, this.version); return; }
+			this.pending.push(cb);
+			if (this.fetching) return;
+			this.fetching = true;
+			this._doFetch((err, accessKey, version) => {
+				this.fetching = false;
+				const cbs = this.pending.splice(0);
+				cbs.forEach((fn) => fn(err, accessKey, version));
+				if (!err) {
+					this.retryCount = 0;
+					this.scheduleRefresh();
+				} else if (!this.refreshScheduled) {
+					const delay = Math.min(
+						CFG.RETRY_DELAY * Math.pow(2, this.retryCount),
+						CFG.RETRY_MAX_DELAY,
+					);
+					this.retryCount++;
+					setTimeout(() => this.scheduleRefresh(), delay);
+				}
+			});
+		}
+
+		_doFetch(done) {
+			GM_xmlhttpRequest({
+				method: "GET",
+				url: CFG.APPLE_DDG_TOKEN_URL,
+				headers: {
+					"Accept": "*/*",
+					"Referer": CFG.APPLE_DDG_ORIGIN + "/",
+				},
+				onload: (r) => {
+					if (r.status < 200 || r.status >= 300) {
+						done(new Error("[Apple] DDG token HTTP " + r.status), null);
+						return;
+					}
+					const jwt = (r.responseText || "").trim();
+					if (!/^[\w-]+\.[\w-]+\.[\w-]+$/.test(jwt)) {
+						done(new Error("[Apple] DDG returned invalid JWT"), null);
+						return;
+					}
+					this._doBootstrap(jwt, done);
+				},
+				onerror: () => done(new Error("[Apple] DDG token network error"), null),
+			});
+		}
+
+		_doBootstrap(jwt, done) {
+			GM_xmlhttpRequest({
+				method: "GET",
+				url: CFG.APPLE_BOOTSTRAP_URL,
+				headers: {
+					"Accept": "*/*",
+					"Authorization": "Bearer " + jwt,
+					"Origin": CFG.APPLE_DDG_ORIGIN,
+					"Referer": CFG.APPLE_DDG_ORIGIN + "/",
+				},
+				onload: (r) => {
+					if (r.status < 200 || r.status >= 300) {
+						done(
+							new Error(
+								`[Apple] Bootstrap HTTP ${r.status}: ${r.responseText.slice(0, 160)}`,
+							),
+							null,
+						);
+						return;
+					}
+					try {
+						const data = JSON.parse(r.responseText);
+						if (!data.accessKey) throw new Error("No accessKey in bootstrap response");
+						// Pull the current `v` build number out of any tile-URL template
+						// in the response (tileSources, tileURLTemplate, etc.) so we
+						// don't drift onto a stale build.
+						const vMatch = r.responseText.match(/[?&]v=(\d+)/);
+						const version = vMatch ? vMatch[1] : this.version;
+						const exp = Date.now() + CFG.APPLE_TOKEN_TTL;
+						this.save(data.accessKey, version, exp);
+						console.info(
+							"[CustomTiles] Apple accessKey acquired, v=" + version + ", expires",
+							new Date(exp).toISOString(),
+						);
+						done(null, data.accessKey, version);
+					} catch (e) {
+						done(new Error("[Apple] Bootstrap parse: " + e.message), null);
+					}
+				},
+				onerror: () => done(new Error("[Apple] Bootstrap network error"), null),
+			});
+		}
+
+		scheduleRefresh() {
+			if (this.refreshScheduled) return;
+			this.refreshScheduled = true;
+			const wait = Math.max(
+				30000,
+				this.expires - Date.now() - CFG.REFRESH_MARGIN,
+			);
+			setTimeout(() => {
+				this.refreshScheduled = false;
+				this._doFetch((err, accessKey, version) => {
+					if (err) {
+						const delay = Math.min(
+							CFG.RETRY_DELAY * Math.pow(2, this.retryCount),
+							CFG.RETRY_MAX_DELAY,
+						);
+						this.retryCount++;
+						console.warn(
+							"[CustomTiles] Apple token refresh failed:",
+							err.message,
+							"– retry in",
+							Math.round(delay / 60000),
+							"min",
+						);
+						setTimeout(() => this.scheduleRefresh(), delay);
+						return;
+					}
+					this.retryCount = 0;
+					if (this.onRefresh) this.onRefresh(accessKey, version);
+					this.scheduleRefresh();
+				});
+			}, wait);
+		}
+	}
+
 	/* -- Layer Providers --------------------------------------------------- */
 
 	class LayerProvider {
@@ -370,6 +538,181 @@
 					attribution: "&copy; Google",
 				},
 			);
+		}
+	}
+
+	// -- Apple Maps ----------------------------------------------------------
+
+	class AppleMapsLayerProvider extends LayerProvider {
+		constructor(appleToken) {
+			super();
+			this._token = appleToken;
+		}
+
+		static tileUrl(accessKey, version) {
+			return CFG.APPLE_TILE_BASE +
+				"&v=" + encodeURIComponent(version || CFG.APPLE_DEFAULT_V) +
+				(accessKey ? "&accessKey=" + encodeURIComponent(accessKey) : "");
+		}
+
+		create() {
+			const url = this._token.isValid()
+				? AppleMapsLayerProvider.tileUrl(this._token.accessKey, this._token.version)
+				: BLANK_TILE;
+			const layer = L.tileLayer(url, {
+				maxNativeZoom: 19,
+				maxZoom: 22,
+				tileSize: 256,
+				crossOrigin: true,
+				attribution: "&copy; Apple",
+			});
+			if (!this._token.isValid()) {
+				this._token.get((err, accessKey, version) => {
+					if (!err) layer.setUrl(AppleMapsLayerProvider.tileUrl(accessKey, version));
+				});
+			}
+			return layer;
+		}
+	}
+
+	// -- Stamen Toner (via Stadia Maps, localhost-spoofed) -------------------
+
+	class StamenTonerLayerProvider extends LayerProvider {
+		create() {
+			const TILE_PX = 256;
+			const TILE_BASE = "https://tiles.stadiamaps.com/tiles/stamen_toner/";
+			const spoofOrigin = CFG.STADIA_SPOOF_ORIGIN;
+
+			const TonerGrid = L.GridLayer.extend({
+				createTile(coords, done) {
+					const img = document.createElement("img");
+					img.setAttribute("role", "presentation");
+					GM_xmlhttpRequest({
+						method: "GET",
+						url: TILE_BASE + coords.z + "/" + coords.x + "/" + coords.y + ".png",
+						responseType: "arraybuffer",
+						headers: {
+							"Origin": spoofOrigin,
+							"Referer": spoofOrigin + "/",
+							"Accept": "image/png,image/*,*/*;q=0.8",
+						},
+						onload: (r) => {
+							if (r.status === 200) {
+								const blob = new Blob([r.response], { type: "image/png" });
+								const objUrl = URL.createObjectURL(blob);
+								img.onload = () => { URL.revokeObjectURL(objUrl); done(null, img); };
+								img.onerror = () => { URL.revokeObjectURL(objUrl); done(new Error("Stamen decode failed"), img); };
+								img.src = objUrl;
+							} else {
+								done(new Error("Stamen HTTP " + r.status), img);
+							}
+						},
+						onerror: () => done(new Error("Stamen network error"), img),
+					});
+					return img;
+				},
+			});
+
+			return new TonerGrid({
+				tileSize: TILE_PX,
+				maxNativeZoom: 20,
+				maxZoom: 22,
+				attribution:
+					'&copy; <a href="https://stadiamaps.com/" target="_blank" rel="noreferrer">Stadia Maps</a> ' +
+					'&copy; <a href="https://stamen.com/" target="_blank" rel="noreferrer">Stamen Design</a> ' +
+					'&copy; <a href="https://openmaptiles.org/" target="_blank" rel="noreferrer">OpenMapTiles</a> ' +
+					'&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors',
+			});
+		}
+	}
+
+	// -- Esri World Imagery Wayback ------------------------------------------
+	// Public archive of every Esri World Imagery release (~2014 onward).
+	// Bootstrap fetches the release catalog; tile URL embeds the release number.
+
+	class WaybackLayerProvider extends LayerProvider {
+		constructor() {
+			super();
+			this._releases = null;
+			this._idx = 0;
+			this._fetching = false;
+			this._layerRef = null;
+		}
+
+		_tileUrl(releaseNum) {
+			return (
+				"https://wayback.maptiles.arcgis.com/arcgis/rest/services/" +
+				"World_Imagery/WMTS/1.0.0/default028mm/MapServer/tile/" +
+				releaseNum + "/{z}/{y}/{x}"
+			);
+		}
+
+		_fetchCatalog() {
+			if (this._fetching || this._releases) return;
+			this._fetching = true;
+			GM_xmlhttpRequest({
+				method: "GET",
+				url: CFG.WAYBACK_CONFIG_URL,
+				onload: (r) => {
+					this._fetching = false;
+					try {
+						if (r.status === 200) {
+							const data = JSON.parse(r.responseText);
+							const releases = Object.entries(data)
+								.filter(([, item]) => item.itemTitle)
+								.map(([key, item]) => {
+									const releaseNum = parseInt(key, 10);
+									const label = item.itemTitle.replace(/^World Imagery \(Wayback /, "").replace(/\)$/, "");
+									return { label, releaseNum, url: this._tileUrl(releaseNum) };
+								});
+							releases.sort((a, b) => (a.label < b.label ? 1 : a.label > b.label ? -1 : 0));
+							this._releases = releases;
+							console.info("[CustomTiles] Wayback:", releases.length, "releases loaded");
+						} else {
+							console.warn("[CustomTiles] Wayback catalog HTTP", r.status);
+						}
+					} catch (e) {
+						console.error("[CustomTiles] Wayback catalog parse:", e.message);
+					}
+					this._idx = 0;
+					if (this._releases && this._layerRef) {
+						this._layerRef.setUrl(this._releases[0].url);
+						this._layerRef.fire("histchange");
+					}
+				},
+				onerror: () => {
+					this._fetching = false;
+					console.error("[CustomTiles] Wayback catalog network error");
+				},
+			});
+		}
+
+		create() {
+			const provider = this;
+			const layer = L.tileLayer(BLANK_TILE, {
+				maxNativeZoom: 19,
+				maxZoom: 25,
+				tileSize: 256,
+				attribution: "&copy; Esri, Maxar, Earthstar Geographics",
+			});
+			this._layerRef = layer;
+
+			layer.getHistCount = () => (provider._releases ? provider._releases.length : 0);
+			layer.getHistIdx   = () => provider._idx;
+			layer.getHistLabel = (i) => {
+				if (!provider._releases) return null;
+				return (provider._releases[i ?? provider._idx] || {}).label || null;
+			};
+			layer.setHistIdx = (i) => {
+				if (!provider._releases) return;
+				if (i < 0 || i >= provider._releases.length || i === provider._idx) return;
+				provider._idx = i;
+				layer.setUrl(provider._releases[i].url);
+				layer.fire("histchange");
+			};
+
+			layer.on("add", () => provider._fetchCatalog());
+			return layer;
 		}
 	}
 
@@ -683,501 +1026,6 @@
 		}
 	}
 
-	// -- NSW Imagery -------------------------------------------------------
-
-	class NswImageryLayerProvider extends LayerProvider {
-		create() {
-			return L.tileLayer(
-				"https://maps.six.nsw.gov.au/arcgis/rest/services/public/NSW_Imagery/MapServer/tile/{z}/{y}/{x}?blankTile=false",
-				{
-					maxNativeZoom: 21,
-					maxZoom: 25,
-					tileSize: 256,
-					attribution: "&copy; NSW Spatial Services",
-				},
-			);
-		}
-	}
-
-	// -- NSW Historical ---------------------------------------------------
-
-	// Rectified historical imagery mosaics from NSW Spatial Services (HAPE program).
-	// Hosted tile services at portal.spatial.nsw.gov.au/tileservices/Hosted/ are public.
-	// sydney1943 is separately hosted at maps.six.nsw.gov.au (different copyright).
-	// Ordered newest-first so idx=0 shows the most recent capture (matches QLD convention).
-	const _NSW_HIST_PORTAL = "https://portal.spatial.nsw.gov.au/tileservices/Hosted/";
-	const _NSW_SIX_BASE    = "https://maps.six.nsw.gov.au/arcgis/rest/services/sixmaps/";
-	const _NSW_FEAT_URL    =
-		"https://portal.spatial.nsw.gov.au/agolproxy/Yb2UeNWvQYEwyYDl/arcgis/rest/services/" +
-		"Historical_Image_Index_view/FeatureServer/0/query";
-	const NSW_HIST_SERVICES = [
-		{ label: "NSW 2013",        year: 2013, url: _NSW_HIST_PORTAL + "HistoricalImagery2013/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW Towns 2006",  year: 2006, url: _NSW_HIST_PORTAL + "HistoricalImageryTowns2006/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 2006",        year: 2006, url: _NSW_HIST_PORTAL + "HistoricalImagery2006/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 2005",        year: 2005, url: _NSW_HIST_PORTAL + "HistoricalImagery2005/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 2004",        year: 2004, url: _NSW_HIST_PORTAL + "HistoricalImagery2004/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 2001",        year: 2001, url: _NSW_HIST_PORTAL + "HistoricalImagery2001/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1998 BW",     year: 1998, url: _NSW_HIST_PORTAL + "HistoricalImagery1998_BW/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1998",        year: 1998, url: _NSW_HIST_PORTAL + "HistoricalImagery1998/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1996",        year: 1996, url: _NSW_HIST_PORTAL + "HistoricalImagery1996/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1994",        year: 1994, url: _NSW_HIST_PORTAL + "HistoricalImagery1994/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1993",        year: 1993, url: _NSW_HIST_PORTAL + "HistoricalImagery1993/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1991",        year: 1991, url: _NSW_HIST_PORTAL + "HistoricalImagery1991/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1990",        year: 1990, url: _NSW_HIST_PORTAL + "HistoricalImagery1990/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1989",        year: 1989, url: _NSW_HIST_PORTAL + "HistoricalImagery1989/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1987",        year: 1987, url: _NSW_HIST_PORTAL + "HistoricalImagery1987/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1986",        year: 1986, url: _NSW_HIST_PORTAL + "HistoricalImagery1986/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1984",        year: 1984, url: _NSW_HIST_PORTAL + "HistoricalImagery1984/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1983",        year: 1983, url: _NSW_HIST_PORTAL + "HistoricalImagery1983/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1982",        year: 1982, url: _NSW_HIST_PORTAL + "HistoricalImagery1982/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1980",        year: 1980, url: _NSW_HIST_PORTAL + "HistoricalImagery1980/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1979",        year: 1979, url: _NSW_HIST_PORTAL + "HistoricalImagery1979/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1978",        year: 1978, url: _NSW_HIST_PORTAL + "HistoricalImagery1978/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1976",        year: 1976, url: _NSW_HIST_PORTAL + "HistoricalImagery1976/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1975",        year: 1975, url: _NSW_HIST_PORTAL + "HistoricalImagery1975/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1974",        year: 1974, url: _NSW_HIST_PORTAL + "HistoricalImagery1974/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1972",        year: 1972, url: _NSW_HIST_PORTAL + "HistoricalImagery1972/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1971",        year: 1971, url: _NSW_HIST_PORTAL + "HistoricalImagery1971/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1970",        year: 1970, url: _NSW_HIST_PORTAL + "HistoricalImagery1970/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1969",        year: 1969, url: _NSW_HIST_PORTAL + "HistoricalImagery1969/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1966",        year: 1966, url: _NSW_HIST_PORTAL + "HistoricalImagery1966/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1965",        year: 1965, url: _NSW_HIST_PORTAL + "HistoricalImagery1965/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "Wollongong 1955", year: 1955, url: _NSW_HIST_PORTAL + "HistoricalImageryWollongongCityCouncil1955/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1955",        year: 1955, url: _NSW_HIST_PORTAL + "HistoricalImagery1955/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1954",        year: 1954, url: _NSW_HIST_PORTAL + "HistoricalImagery1954/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1951",        year: 1951, url: _NSW_HIST_PORTAL + "HistoricalImagery1951/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1947",        year: 1947, url: _NSW_HIST_PORTAL + "HistoricalImagery1947/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "NSW 1944",        year: 1944, url: _NSW_HIST_PORTAL + "HistoricalImagery1944/MapServer/tile/{z}/{y}/{x}" },
-		{ label: "Sydney 1943",     year: 1943, url: _NSW_SIX_BASE    + "sydney1943/MapServer/tile/{z}/{y}/{x}" },
-	];
-
-	class NswHistoricalLayerProvider extends LayerProvider {
-		constructor() {
-			super();
-			this._available = null; // null until first catalog query completes; falls back to full list
-			this._idx = 0;
-			this._fetching = false;
-			this._fetchPending = [];
-			this._lastCenter = null;
-			this._layerRef = null;
-		}
-
-		_getAvailable() {
-			return this._available || NSW_HIST_SERVICES;
-		}
-
-		_queryCatalog(map) {
-			if (this._fetching) return;
-			this._fetching = true;
-
-			const b = map.getBounds();
-			const geom = encodeURIComponent(JSON.stringify({
-				xmin: b.getWest(), ymin: b.getSouth(),
-				xmax: b.getEast(), ymax: b.getNorth(),
-				spatialReference: { wkid: 4326 },
-			}));
-			this._lastCenter = map.getCenter();
-
-			GM_xmlhttpRequest({
-				method: "GET",
-				url:
-					_NSW_FEAT_URL +
-					"?f=json&returnGeometry=false&returnDistinctValues=true" +
-					"&outFields=year&orderByFields=year+DESC" +
-					"&geometry=" + geom +
-					"&geometryType=esriGeometryEnvelope&inSR=4326" +
-					"&spatialRel=esriSpatialRelIntersects&resultRecordCount=10000",
-				headers: {
-					Referer: "https://portal.spatial.nsw.gov.au/portal/apps/webappviewer/index.html?id=f7c215b873864d44bccddda8075238cb",
-				},
-				onload: (r) => {
-					this._fetching = false;
-					const pending = this._fetchPending.splice(0);
-					try {
-						if (r.status === 200) {
-							const data = JSON.parse(r.responseText);
-							const years = new Set(
-								(data.features || []).map((f) => new Date(f.attributes.year).getFullYear()),
-							);
-							const filtered = NSW_HIST_SERVICES.filter((s) => years.has(s.year));
-							this._available = filtered.length ? filtered : [...NSW_HIST_SERVICES];
-							if (filtered.length) {
-								console.info(
-									"[CustomTiles] NSW Historical:",
-									filtered.length,
-									"services at current view; years:",
-									[...years].sort((a, b) => b - a).join(", "),
-								);
-							} else {
-								console.warn("[CustomTiles] NSW Historical: no coverage at current view");
-							}
-						} else {
-							console.warn("[CustomTiles] NSW Historical catalog HTTP", r.status);
-							this._available = [...NSW_HIST_SERVICES];
-						}
-					} catch (e) {
-						console.error("[CustomTiles] NSW Historical catalog parse:", e.message);
-						this._available = [...NSW_HIST_SERVICES];
-					}
-					this._idx = 0;
-					if (this._layerRef) {
-						this._layerRef.setUrl(this._getAvailable()[0].url);
-						this._layerRef.fire("histchange");
-					}
-					pending.forEach((fn) => fn());
-				},
-				onerror: () => {
-					this._fetching = false;
-					console.error("[CustomTiles] NSW Historical catalog network error");
-					this._available = [...NSW_HIST_SERVICES];
-					this._fetchPending.splice(0).forEach((fn) => fn());
-				},
-			});
-		}
-
-		create() {
-			const provider = this;
-			const layer = L.tileLayer(
-				NSW_HIST_SERVICES[0].url,
-				{
-					maxNativeZoom: 19,
-					maxZoom: 25,
-					tileSize: 256,
-					attribution: "&copy; NSW Spatial Services",
-				},
-			);
-			this._layerRef = layer;
-
-			layer.getHistCount = () => provider._getAvailable().length;
-			layer.getHistIdx   = () => provider._idx;
-			layer.getHistLabel = (i) => (provider._getAvailable()[i ?? provider._idx] || {}).label || null;
-			layer.setHistIdx   = (i) => {
-				const avail = provider._getAvailable();
-				if (i < 0 || i >= avail.length || i === provider._idx) return;
-				provider._idx = i;
-				layer.setUrl(avail[i].url);
-				layer.fire("histchange");
-			};
-
-			layer.on("add", function () {
-				const map = this._map;
-				provider._queryCatalog(map);
-				const onMoveEnd = () => {
-					if (!provider._lastCenter) return;
-					const c = map.getCenter();
-					const d =
-						Math.abs(c.lng - provider._lastCenter.lng) +
-						Math.abs(c.lat - provider._lastCenter.lat);
-					if (d > 0.05) {
-						provider._available = null;
-						provider._idx = 0;
-						provider._fetching = false;
-						provider._fetchPending = [];
-						provider._lastCenter = null;
-						provider._queryCatalog(map);
-					}
-				};
-				map.on("moveend", onMoveEnd);
-				this.once("remove", () => {
-					map.off("moveend", onMoveEnd);
-					provider._fetching = false;
-					provider._fetchPending = [];
-					provider._lastCenter = null;
-				});
-			});
-
-			return layer;
-		}
-	}
-
-	class NswLabelsLayerProvider extends LayerProvider {
-		create() {
-			const MERC_ORIGIN = 20037508.3428;
-			const MERC_FULL = 2 * MERC_ORIGIN;
-			const TILE_PX = 256;
-			const EXPORT_URL =
-				"https://maps.six.nsw.gov.au/arcgis/rest/services/sixmaps/LPI_RasterLabels_1/MapServer/export";
-
-			const NswLabelsGrid = L.GridLayer.extend({
-				createTile(coords, done) {
-					const img = document.createElement("img");
-					img.setAttribute("role", "presentation");
-					const n = Math.pow(2, coords.z);
-					const tw = MERC_FULL / n;
-					const west = -MERC_ORIGIN + coords.x * tw;
-					const east = west + tw;
-					const north = MERC_ORIGIN - coords.y * tw;
-					const south = north - tw;
-					const bbox = encodeURIComponent(`${west},${south},${east},${north}`);
-					img.onload = () => done(null, img);
-					img.onerror = () => done(new Error("NSW labels tile failed"), img);
-					img.src =
-						EXPORT_URL +
-						`?dpi=96&transparent=true&format=png32` +
-						`&bbox=${bbox}&bboxSR=3857&imageSR=3857` +
-						`&size=${TILE_PX}%2C${TILE_PX}&f=image`;
-					return img;
-				},
-			});
-
-			return new NswLabelsGrid({
-				tileSize: TILE_PX,
-				maxNativeZoom: 19,
-				maxZoom: 25,
-				pane: "dwLabelsPane",
-				opacity: 1,
-				attribution: "&copy; NSW Spatial Services",
-			});
-		}
-	}
-
-	// -- Esri World Imagery Wayback (VIC Historical, WA Historical) --------
-	// Public tile archive of Esri World Imagery snapshots going back to 2014.
-	// Config JSON lists every release; tile URL template uses the releaseNum.
-	// Shared cache avoids fetching the catalog twice for VIC and WA layers.
-	let _waybackReleasesCache = null;
-
-	class WaybackLayerProvider extends LayerProvider {
-		constructor() {
-			super();
-			this._releases = null;
-			this._idx = 0;
-			this._fetching = false;
-			this._layerRef = null;
-		}
-
-		_tileUrl(releaseNum) {
-			return (
-				"https://wayback.maptiles.arcgis.com/arcgis/rest/services/" +
-				"World_Imagery/WMTS/1.0.0/default028mm/MapServer/tile/" +
-				releaseNum + "/{z}/{y}/{x}"
-			);
-		}
-
-		_fetchCatalog() {
-			if (this._fetching) return;
-			if (_waybackReleasesCache) {
-				this._releases = _waybackReleasesCache;
-				this._idx = 0;
-				if (this._layerRef) {
-					this._layerRef.setUrl(this._releases[0].url);
-					this._layerRef.fire("histchange");
-				}
-				return;
-			}
-			this._fetching = true;
-			GM_xmlhttpRequest({
-				method: "GET",
-				url: CFG.WAYBACK_CONFIG_URL,
-				onload: (r) => {
-					this._fetching = false;
-					try {
-						if (r.status === 200) {
-							const data = JSON.parse(r.responseText);
-							const releases = Object.entries(data)
-								.filter(([, item]) => item.itemTitle)
-								.map(([key, item]) => {
-									const releaseNum = parseInt(key, 10);
-									const label = item.itemTitle.replace(/^World Imagery \(Wayback /, "").replace(/\)$/, "");
-									return { label, releaseNum, url: this._tileUrl(releaseNum) };
-								});
-							releases.sort((a, b) => (a.label < b.label ? 1 : a.label > b.label ? -1 : 0));
-							_waybackReleasesCache = releases;
-							this._releases = releases;
-							console.info("[CustomTiles] Wayback:", releases.length, "releases loaded");
-						} else {
-							console.warn("[CustomTiles] Wayback catalog HTTP", r.status);
-						}
-					} catch (e) {
-						console.error("[CustomTiles] Wayback catalog parse:", e.message);
-					}
-					this._idx = 0;
-					if (this._releases && this._layerRef) {
-						this._layerRef.setUrl(this._releases[0].url);
-						this._layerRef.fire("histchange");
-					}
-				},
-				onerror: () => {
-					this._fetching = false;
-					console.error("[CustomTiles] Wayback catalog network error");
-				},
-			});
-		}
-
-		create() {
-			const provider = this;
-			const layer = L.tileLayer(BLANK_TILE, {
-				maxNativeZoom: 19,
-				maxZoom: 25,
-				tileSize: 256,
-				attribution: "&copy; Esri, Maxar, Earthstar Geographics",
-			});
-			this._layerRef = layer;
-
-			layer.getHistCount = () => (provider._releases ? provider._releases.length : 0);
-			layer.getHistIdx   = () => provider._idx;
-			layer.getHistLabel = (i) => {
-				if (!provider._releases) return null;
-				return (provider._releases[i ?? provider._idx] || {}).label || null;
-			};
-			layer.setHistIdx   = (i) => {
-				if (!provider._releases) return;
-				if (i < 0 || i >= provider._releases.length || i === provider._idx) return;
-				provider._idx = i;
-				layer.setUrl(provider._releases[i].url);
-				layer.fire("histchange");
-			};
-
-			layer.on("add", function () {
-				if (!provider._releases && !provider._fetching) {
-					provider._fetchCatalog();
-				}
-			});
-
-			return layer;
-		}
-	}
-
-	// -- VIC Imagery -------------------------------------------------------
-
-	// The Vicmap WMTS uses zero-padded two-digit TileMatrix IDs ("00".."20"),
-	// so we override getTileUrl rather than using a plain template string.
-	// VicWmtsTileLayer is defined lazily inside each create() so that
-	// L.TileLayer.extend is never called before Leaflet is loaded.
-	function _makeVicWmtsTileLayer() {
-		return L.TileLayer.extend({
-			getTileUrl(coords) {
-				const z = String(coords.z).padStart(2, "0");
-				return (
-					"https://base.maps.vic.gov.au/service" +
-					"?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile" +
-					"&LAYER=" + this.options.vicLayer +
-					"&STYLE=default&FORMAT=image%2Fpng" +
-					"&TILEMATRIXSET=EPSG%3A3857%3A256" +
-					"&TILEMATRIX=" + z +
-					"&TILEROW=" + coords.y +
-					"&TILECOL=" + coords.x
-				);
-			},
-		});
-	}
-
-	class VicImageryLayerProvider extends LayerProvider {
-		create() {
-			return new (_makeVicWmtsTileLayer())("", {
-				vicLayer: "AERIAL_WM_256",
-				maxNativeZoom: 20,
-				maxZoom: 25,
-				tileSize: 256,
-				crossOrigin: true,
-				attribution: "&copy; State of Victoria (Department of Transport and Planning)",
-			});
-		}
-	}
-
-	class VicLabelsLayerProvider extends LayerProvider {
-		create() {
-			return new (_makeVicWmtsTileLayer())("", {
-				vicLayer: "CARTO_OVERLAY_WM_256",
-				maxNativeZoom: 20,
-				maxZoom: 25,
-				tileSize: 256,
-				crossOrigin: true,
-				opacity: 1,
-				pane: "dwLabelsPane",
-				attribution: "&copy; State of Victoria (Department of Transport and Planning)",
-			});
-		}
-	}
-
-	// -- NT Imagery & Labels ---------------------------------------------
-
-	// NT NRMaps exposes a bbox/POST image API (not a tile service), so we use
-	// GridLayer and compute the tile bbox ourselves.
-	function _makeNtGrid(apiUrl, layers, pane) {
-		const MERC_ORIGIN = 20037508.342789244;
-		const MERC_FULL = 2 * MERC_ORIGIN;
-		const TILE_PX = 256;
-		const clientId = CFG.NT_CLIENT_ID;
-
-		const NtGrid = L.GridLayer.extend({
-			createTile(coords, done) {
-				const img = document.createElement("img");
-				img.setAttribute("role", "presentation");
-				const n = Math.pow(2, coords.z);
-				const tw = MERC_FULL / n;
-				const minx = -MERC_ORIGIN + coords.x * tw;
-				const maxx = minx + tw;
-				const maxy = MERC_ORIGIN - coords.y * tw;
-				const miny = maxy - tw;
-				const resolution = tw / TILE_PX;
-				GM_xmlhttpRequest({
-					method: "POST",
-					url: apiUrl + "?x_client_id=" + clientId,
-					headers: {
-						"Content-Type": "application/json",
-						"Accept": "image/png,*/*",
-						"X-Client-ID": clientId,
-						"Origin": "https://nrmaps.nt.gov.au",
-						"Referer": "https://nrmaps.nt.gov.au/nrmaps2_lite/main.html",
-					},
-					data: JSON.stringify({
-						view: { crs: "EPSG:3857", minx, miny, maxx, maxy,
-							resolution, dpi: 96, width: TILE_PX, height: TILE_PX },
-						layers,
-					}),
-					responseType: "arraybuffer",
-					onload: (r) => {
-						if (r.status === 200) {
-							const blob = new Blob([r.response], { type: "image/png" });
-							const objUrl = URL.createObjectURL(blob);
-							img.onload = () => { URL.revokeObjectURL(objUrl); done(null, img); };
-							img.onerror = () => { URL.revokeObjectURL(objUrl); done(new Error("NT tile decode failed"), img); };
-							img.src = objUrl;
-						} else {
-							done(new Error("NT HTTP " + r.status), img);
-						}
-					},
-					onerror: () => done(new Error("NT tile network error"), img),
-				});
-				return img;
-			},
-		});
-
-		const opts = {
-			tileSize: TILE_PX,
-			maxNativeZoom: 19,
-			maxZoom: 25,
-			attribution: "&copy; Northern Territory Government",
-		};
-		if (pane) { opts.pane = pane; opts.opacity = 1; }
-		return new NtGrid(opts);
-	}
-
-	class NtImageryLayerProvider extends LayerProvider {
-		create() {
-			return _makeNtGrid(
-				CFG.NT_IMAGERY_URL,
-				[{ id: "NTLISGoogleEarth" }],
-			);
-		}
-	}
-
-	class NtLabelsLayerProvider extends LayerProvider {
-		create() {
-			return _makeNtGrid(
-				CFG.NT_LABELS_URL,
-				[
-					{ id: "ntlis:CADASTRE", style: "cadastre_boundary_black" },
-					{ id: "ntlis:PARCEL_NUMBERS", style: "Parcel_Numbers" },
-					{ id: "ntlis:RAILWAYS" },
-					{ id: "ntlis:ROAD_CENTRELINES" },
-					{ id: "ntlis:ROAD_LABELS" },
-				],
-				"dwLabelsPane",
-			);
-		}
-	}
 
 	// -- Strava Heatmap (anonymous tiles only) ----------------------------
 
@@ -2096,11 +1944,11 @@
 	class CustomTilesApp {
 		constructor() {
 			this.qldToken = new QldTokenManager();
+			this.appleToken = new AppleTokenManager();
 			this.layers = {};
 			this.injected = false;
 			this.histCompass = null;
-			this.vicHistControl = null;
-			this.waHistControl = null;
+			this.waybackHistControl = null;
 
 			// Wire token refresh callbacks so the managers don't need layer references.
 			this.qldToken.onRefresh = (token) => {
@@ -2108,6 +1956,10 @@
 				const roads = this.layers[CFG.LAYER_ROADS];
 				if (qld) qld.setUrl(CFG.QLD_TILE_TPL + (token ? "?token=" + token : ""));
 				if (roads) roads.redraw();
+			};
+			this.appleToken.onRefresh = (accessKey, version) => {
+				const apple = this.layers[CFG.LAYER_APPLE];
+				if (apple) apple.setUrl(AppleMapsLayerProvider.tileUrl(accessKey, version));
 			};
 		}
 
@@ -2119,7 +1971,16 @@
 			} else {
 				this.qldToken.get((err) => {
 					if (err)
-						console.warn("[CustomTiles] Initial token fetch:", err.message);
+						console.warn("[CustomTiles] Initial QLD token fetch:", err.message);
+				});
+			}
+
+			if (this.appleToken.isValid()) {
+				this.appleToken.scheduleRefresh();
+			} else {
+				this.appleToken.get((err) => {
+					if (err)
+						console.warn("[CustomTiles] Initial Apple token fetch:", err.message);
 				});
 			}
 
@@ -2196,36 +2057,36 @@
 
 			try {
 				this.layers[CFG.LAYER_GOOGLE] = new GoogleHybridLayerProvider().create();
+				this.layers[CFG.LAYER_APPLE] = new AppleMapsLayerProvider(this.appleToken).create();
+				this.layers[CFG.LAYER_STAMEN_TONER] = new StamenTonerLayerProvider().create();
+				this.layers[CFG.LAYER_WAYBACK] = new WaybackLayerProvider().create();
+				const wayLyr = this.layers[CFG.LAYER_WAYBACK];
+				this.waybackHistControl = this._makeHistoryBar({
+					layer: wayLyr,
+					event: "histchange",
+					getCount: () => wayLyr.getHistCount(),
+					getIdx:   () => wayLyr.getHistIdx(),
+					setIdx:   (i) => wayLyr.setHistIdx(i),
+					getLabel: (i) => wayLyr.getHistLabel(i),
+				});
 				this.layers[CFG.LAYER_QLD] = new QldGlobeLayerProvider(this.qldToken).create();
 				this.layers[CFG.LAYER_HIST] = new QldHistoricalLayerProvider(this.qldToken).create();
-				this.histCompass = this._makeHistoryControl(
-					this.layers[CFG.LAYER_HIST],
-				);
+				const qldLyr = this.layers[CFG.LAYER_HIST];
+				this.histCompass = this._makeHistoryBar({
+					layer: qldLyr,
+					event: "capturechange",
+					getCount: () => qldLyr.getCaptureCount(),
+					getIdx:   () => qldLyr.getCaptureIdx(),
+					setIdx:   (i) => qldLyr.setCapture(i),
+					getLabel: (i) => qldLyr.getCaptureDate(i),
+				});
 
 				ctrl.addBaseLayer(this.layers[CFG.LAYER_GOOGLE], CFG.LAYER_GOOGLE);
+				ctrl.addBaseLayer(this.layers[CFG.LAYER_APPLE], CFG.LAYER_APPLE);
+				ctrl.addBaseLayer(this.layers[CFG.LAYER_STAMEN_TONER], CFG.LAYER_STAMEN_TONER);
+				ctrl.addBaseLayer(this.layers[CFG.LAYER_WAYBACK], CFG.LAYER_WAYBACK);
 				ctrl.addBaseLayer(this.layers[CFG.LAYER_QLD], CFG.LAYER_QLD);
 				ctrl.addBaseLayer(this.layers[CFG.LAYER_HIST], CFG.LAYER_HIST);
-
-				this.layers[CFG.LAYER_NSW] = new NswImageryLayerProvider().create();
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_NSW], CFG.LAYER_NSW);
-
-				this.layers[CFG.LAYER_NSW_HIST] = new NswHistoricalLayerProvider().create();
-				this.nswHistControl = this._makeNswHistControl(this.layers[CFG.LAYER_NSW_HIST]);
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_NSW_HIST], CFG.LAYER_NSW_HIST);
-
-				this.layers[CFG.LAYER_VIC] = new VicImageryLayerProvider().create();
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_VIC], CFG.LAYER_VIC);
-
-				this.layers[CFG.LAYER_VIC_HIST] = new WaybackLayerProvider().create();
-				this.vicHistControl = this._makeNswHistControl(this.layers[CFG.LAYER_VIC_HIST]);
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_VIC_HIST], CFG.LAYER_VIC_HIST);
-
-				this.layers[CFG.LAYER_WA_HIST] = new WaybackLayerProvider().create();
-				this.waHistControl = this._makeNswHistControl(this.layers[CFG.LAYER_WA_HIST]);
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_WA_HIST], CFG.LAYER_WA_HIST);
-
-				this.layers[CFG.LAYER_NT] = new NtImageryLayerProvider().create();
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_NT], CFG.LAYER_NT);
 
 				this._injectGroupHeaders(ctrl);
 
@@ -2284,35 +2145,23 @@
 
 				this.layers[CFG.LAYER_ROADS] = new QldRoadsLayerProvider(this.qldToken).create();
 				this.layers[CFG.LAYER_LABELS] = new QldLabelsLayerProvider().create();
-				this.layers[CFG.LAYER_VIC_LABELS] = new VicLabelsLayerProvider().create();
-				this.layers[CFG.LAYER_NSW_LABELS] = new NswLabelsLayerProvider().create();
-				this.layers[CFG.LAYER_NT_LABELS] = new NtLabelsLayerProvider().create();
 
 				map.on("baselayerchange", () => {
 					this._syncLabelsLayer(map);
 					this._syncHistCompass(map);
-					this._syncNswHistControl(map);
-					this._syncVicHistControl(map);
-					this._syncWaHistControl(map);
+					this._syncWaybackHistControl(map);
 					this._syncZoomLevel(map);
 				});
 				map.on("layeradd", (e) => {
 					if (
 						e.layer === this.layers[CFG.LAYER_QLD] ||
 						e.layer === this.layers[CFG.LAYER_GOOGLE] ||
-						e.layer === this.layers[CFG.LAYER_NSW] ||
-						e.layer === this.layers[CFG.LAYER_NSW_HIST] ||
-						e.layer === this.layers[CFG.LAYER_VIC] ||
-						e.layer === this.layers[CFG.LAYER_VIC_HIST] ||
-						e.layer === this.layers[CFG.LAYER_WA_HIST] ||
-						e.layer === this.layers[CFG.LAYER_NT] ||
-						e.layer === this.layers[CFG.LAYER_HIST]
+						e.layer === this.layers[CFG.LAYER_HIST] ||
+						e.layer === this.layers[CFG.LAYER_WAYBACK]
 					) {
 						this._syncLabelsLayer(map);
 						this._syncHistCompass(map);
-						this._syncNswHistControl(map);
-						this._syncVicHistControl(map);
-						this._syncWaHistControl(map);
+						this._syncWaybackHistControl(map);
 						this._syncZoomLevel(map);
 					}
 				});
@@ -2330,53 +2179,11 @@
 
 		_syncLabelsLayer(map) {
 			const isQld = map.hasLayer(this.layers[CFG.LAYER_QLD]) || map.hasLayer(this.layers[CFG.LAYER_HIST]);
-			const isNsw = map.hasLayer(this.layers[CFG.LAYER_NSW]) || map.hasLayer(this.layers[CFG.LAYER_NSW_HIST]);
-			const isVic = map.hasLayer(this.layers[CFG.LAYER_VIC]) || map.hasLayer(this.layers[CFG.LAYER_VIC_HIST]);
-			const isNt = map.hasLayer(this.layers[CFG.LAYER_NT]);
 			for (const lyr of [this.layers[CFG.LAYER_ROADS], this.layers[CFG.LAYER_LABELS]]) {
 				if (!lyr) continue;
 				if (isQld) { if (!map.hasLayer(lyr)) map.addLayer(lyr); }
 				else { if (map.hasLayer(lyr)) map.removeLayer(lyr); }
 			}
-			const nswLabels = this.layers[CFG.LAYER_NSW_LABELS];
-			if (nswLabels) {
-				if (isNsw) { if (!map.hasLayer(nswLabels)) map.addLayer(nswLabels); }
-				else { if (map.hasLayer(nswLabels)) map.removeLayer(nswLabels); }
-			}
-			const vicLabels = this.layers[CFG.LAYER_VIC_LABELS];
-			if (vicLabels) {
-				if (isVic) { if (!map.hasLayer(vicLabels)) map.addLayer(vicLabels); }
-				else { if (map.hasLayer(vicLabels)) map.removeLayer(vicLabels); }
-			}
-			const ntLabels = this.layers[CFG.LAYER_NT_LABELS];
-			if (ntLabels) {
-				if (isNt) { if (!map.hasLayer(ntLabels)) map.addLayer(ntLabels); }
-				else { if (map.hasLayer(ntLabels)) map.removeLayer(ntLabels); }
-			}
-		}
-
-		_syncNswHistControl(map) {
-			const ctrl = this.nswHistControl;
-			if (!ctrl) return;
-			const isNswHist = !!(this.layers[CFG.LAYER_NSW_HIST] && map.hasLayer(this.layers[CFG.LAYER_NSW_HIST]));
-			if (isNswHist && !ctrl._map) ctrl.addTo(map);
-			else if (!isNswHist && ctrl._map) map.removeControl(ctrl);
-		}
-
-		_syncVicHistControl(map) {
-			const ctrl = this.vicHistControl;
-			if (!ctrl) return;
-			const active = !!(this.layers[CFG.LAYER_VIC_HIST] && map.hasLayer(this.layers[CFG.LAYER_VIC_HIST]));
-			if (active && !ctrl._map) ctrl.addTo(map);
-			else if (!active && ctrl._map) map.removeControl(ctrl);
-		}
-
-		_syncWaHistControl(map) {
-			const ctrl = this.waHistControl;
-			if (!ctrl) return;
-			const active = !!(this.layers[CFG.LAYER_WA_HIST] && map.hasLayer(this.layers[CFG.LAYER_WA_HIST]));
-			if (active && !ctrl._map) ctrl.addTo(map);
-			else if (!active && ctrl._map) map.removeControl(ctrl);
 		}
 
 		_syncHistCompass(map) {
@@ -2387,19 +2194,25 @@
 				map.hasLayer(this.layers[CFG.LAYER_HIST])
 			);
 			if (isHist && !hist._map) hist.addTo(map);
-			else if (!isHist && hist._map) map.removeControl(hist);
+			else if (!isHist && hist._map) hist.remove();
+		}
+
+		_syncWaybackHistControl(map) {
+			const ctrl = this.waybackHistControl;
+			if (!ctrl) return;
+			const active = !!(
+				this.layers[CFG.LAYER_WAYBACK] &&
+				map.hasLayer(this.layers[CFG.LAYER_WAYBACK])
+			);
+			if (active && !ctrl._map) ctrl.addTo(map);
+			else if (!active && ctrl._map) ctrl.remove();
 		}
 
 		_syncZoomLevel(map) {
 			const isDeep =
 				map.hasLayer(this.layers[CFG.LAYER_QLD]) ||
-				map.hasLayer(this.layers[CFG.LAYER_NSW]) ||
-				map.hasLayer(this.layers[CFG.LAYER_NSW_HIST]) ||
-				map.hasLayer(this.layers[CFG.LAYER_VIC]) ||
-				map.hasLayer(this.layers[CFG.LAYER_VIC_HIST]) ||
-				map.hasLayer(this.layers[CFG.LAYER_WA_HIST]) ||
-				map.hasLayer(this.layers[CFG.LAYER_NT]) ||
-				map.hasLayer(this.layers[CFG.LAYER_HIST]);
+				map.hasLayer(this.layers[CFG.LAYER_HIST]) ||
+				map.hasLayer(this.layers[CFG.LAYER_WAYBACK]);
 			const newMax = isDeep ? 25 : 22;
 			map.setMaxZoom(newMax);
 			if (map.getZoom() > newMax) map.setZoom(newMax);
@@ -2549,57 +2362,6 @@
 			doInject();
 		}
 
-		_makeNswHistControl(layer) {
-			const NswHistControl = L.Control.extend({
-				options: { position: "topright" },
-
-				onAdd() {
-					const c = L.DomUtil.create("div", "dw-capture-history");
-					L.DomEvent.disableClickPropagation(c);
-
-					this._prev = L.DomUtil.create("a", "dw-vxh-btn", c);
-					this._prev.href = "#";
-					this._prev.title = "Older map";
-					this._prev.innerHTML = "&#9664;";
-
-					this._label = L.DomUtil.create("span", "dw-vxh-label", c);
-
-					this._next = L.DomUtil.create("a", "dw-vxh-btn", c);
-					this._next.href = "#";
-					this._next.title = "Newer map";
-					this._next.innerHTML = "&#9654;";
-
-					L.DomEvent.on(this._prev, "click", (e) => {
-						L.DomEvent.preventDefault(e);
-						layer.setHistIdx(layer.getHistIdx() + 1);
-					});
-					L.DomEvent.on(this._next, "click", (e) => {
-						L.DomEvent.preventDefault(e);
-						layer.setHistIdx(layer.getHistIdx() - 1);
-					});
-
-					this._onHistChange = () => this._update();
-					layer.on("histchange", this._onHistChange);
-					this._update();
-					return c;
-				},
-
-				onRemove() {
-					layer.off("histchange", this._onHistChange);
-				},
-
-				_update() {
-					const count = layer.getHistCount();
-					const idx   = layer.getHistIdx();
-					const label = layer.getHistLabel();
-					this._label.textContent = count > 1 ? `${label}  ${idx + 1}/${count}` : (label || "");
-					this._prev.classList.toggle("dw-vxh-disabled", idx >= count - 1);
-					this._next.classList.toggle("dw-vxh-disabled", idx <= 0);
-				},
-			});
-			return new NswHistControl();
-		}
-
 		_makeHistoryControl(layer) {
 			const CaptureHistory = L.Control.extend({
 				options: { position: "topright" },
@@ -2657,6 +2419,63 @@
 			});
 
 			return new CaptureHistory();
+		}
+
+		// Prev/next compass for layers exposing get/setHistIdx + histchange event
+		// (Wayback releases; ready for other catalog-driven layers).
+		_makeHistControl(layer) {
+			const HistControl = L.Control.extend({
+				options: { position: "topright" },
+
+				onAdd() {
+					const c = L.DomUtil.create("div", "dw-capture-history");
+					L.DomEvent.disableClickPropagation(c);
+
+					this._prev = L.DomUtil.create("a", "dw-vxh-btn", c);
+					this._prev.href = "#";
+					this._prev.title = "Older release";
+					this._prev.innerHTML = "&#9664;";
+
+					this._label = L.DomUtil.create("span", "dw-vxh-label", c);
+
+					this._next = L.DomUtil.create("a", "dw-vxh-btn", c);
+					this._next.href = "#";
+					this._next.title = "Newer release";
+					this._next.innerHTML = "&#9654;";
+
+					L.DomEvent.on(this._prev, "click", (e) => {
+						L.DomEvent.preventDefault(e);
+						layer.setHistIdx(layer.getHistIdx() + 1);
+					});
+					L.DomEvent.on(this._next, "click", (e) => {
+						L.DomEvent.preventDefault(e);
+						layer.setHistIdx(layer.getHistIdx() - 1);
+					});
+
+					this._onHistChange = () => this._update();
+					layer.on("histchange", this._onHistChange);
+					this._update();
+					return c;
+				},
+
+				onRemove() {
+					layer.off("histchange", this._onHistChange);
+				},
+
+				_update() {
+					const count = layer.getHistCount();
+					const idx   = layer.getHistIdx();
+					const label = layer.getHistLabel();
+					if (!count) {
+						this._label.textContent = "Loading…";
+					} else {
+						this._label.textContent = count > 1 ? `${label}  ${idx + 1}/${count}` : (label || "");
+					}
+					this._prev.classList.toggle("dw-vxh-disabled", idx >= count - 1);
+					this._next.classList.toggle("dw-vxh-disabled", idx <= 0);
+				},
+			});
+			return new HistControl();
 		}
 
 		// -- Styles -------------------------------------------------------
