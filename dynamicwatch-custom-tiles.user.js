@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         dynamicWatch – Queensland Globe, Google Hybrid & Layer Manager
 // @namespace    https://dynamic.watch
-// @version      7.1.0
+// @version      7.2.0
 // @description  Adds QLD Globe aerial imagery (auto-refreshed token), Google Hybrid, and QLD Historical tiles to the dynamicWatch planner.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -23,6 +23,8 @@
 // @connect      www.marinetraffic.com
 // @connect      overpass.kumi.systems
 // @connect      spatial.infrastructure.gov.au
+// @connect      tiles.openseamap.org
+// @connect      www2.lightpollutionmap.info
 // @run-at       document-start
 // ==/UserScript==
 
@@ -103,9 +105,45 @@
 		LAYER_UW:       "Unity Water",
 		LAYER_FLIGHTS:  "Live Flights",
 		LAYER_MARINE:   "Marine Vessels",
-		LAYER_WRECKS:   "Shipwrecks",
 		LAYER_MOBILE:   "Mobile Coverage",
+		LAYER_SEAMARKS: "OpenSeaMap",
+		LAYER_INFRA:    "Power Infrastructure",
+		LAYER_PARKS:    "National Parks",
+		LAYER_LIGHTPOL: "Light Pollution",
+		LAYER_CADASTRE: "QLD Cadastre",
+		LAYER_QPWS:     "QPWS Estate",
 		UW_FS_BASE: "https://services2.arcgis.com/tQg86iShPXJPWQWw",
+
+		// QLD Digital Cadastral Database via Planning Cadastre MapServer.
+		// Layer 1 is the parent "Land Parcels" group — service handles
+		// scale-dependent sub-layer selection (full parcels close-in,
+		// generalised >10ha groupings further out).
+		QLD_CADASTRE_SERVICE:
+			"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+			"PlanningCadastre/LandParcelPropertyFramework/MapServer",
+		QLD_CADASTRE_LAYER_ID: 1,
+		// Identify against this specific sublayer (Base Parcels Only) — gives
+		// real lot/plan/tenure attributes rather than road-segment metadata.
+		QLD_CADASTRE_IDENTIFY_LAYER: 8,
+		QLD_CADASTRE_HOVER_MIN_ZOOM: 14,
+
+		// QPWS estate: protected-area polygons + tracks/trails of all kinds.
+		// Layer IDs in the source service:
+		//   10 = Protected areas and forests   5 = Walking track
+		//    6 = Great walk                    7 = Horse trail
+		//    8 = Mountain bike trail           9 = Trail bike trail
+		// Rendered server-side so we inherit official QPWS symbology.
+		QLD_QPWS_SERVICE:
+			"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+			"Environment/ParksTerrestrialProtectedAreas/MapServer",
+		QLD_QPWS_LAYER_IDS: "10,5,6,7,8,9",
+
+		// lightpollutionmap.info GeoServer (WMS via GWC tile cache).
+		// LAYERS=PostGIS:SB_2025 = sky brightness, latest published edition.
+		// STYLES=WA = "World Atlas" colour ramp matching the official site.
+		LIGHTPOL_WMS_BASE: "https://www2.lightpollutionmap.info/geoserver/gwc/service/wms",
+		LIGHTPOL_WMS_LAYER: "PostGIS:SB_2025",
+		LIGHTPOL_WMS_STYLE: "WA",
 	};
 
 	const BLANK_TILE =
@@ -121,9 +159,17 @@
 	/* -- QLD Token Manager ------------------------------------------------- */
 
 	class QldTokenManager {
-		constructor() {
-			this.token = GM_getValue("qld_token", null);
-			this.expires = GM_getValue("qld_token_expires", 0);
+		// opts: { serviceUrl, storageKey, label }
+		// Each QLD ImageServer (LatestStateProgram, HistoricalAerialPhoto, …)
+		// has its own access policy, so the token request must be scoped to
+		// the right service URL and tokens must be cached independently.
+		constructor(opts) {
+			opts = opts || {};
+			this._serviceUrl = opts.serviceUrl || CFG.QLD_SERVICE;
+			this._storageKey = opts.storageKey || "qld_token";
+			this._label = opts.label || "QLD";
+			this.token = GM_getValue(this._storageKey, null);
+			this.expires = GM_getValue(this._storageKey + "_expires", 0);
 			this.fetching = false;
 			this.pending = [];
 			this.refreshScheduled = false;
@@ -139,8 +185,8 @@
 		save(token, expiresMs) {
 			this.token = token;
 			this.expires = expiresMs;
-			GM_setValue("qld_token", token);
-			GM_setValue("qld_token_expires", expiresMs);
+			GM_setValue(this._storageKey, token);
+			GM_setValue(this._storageKey + "_expires", expiresMs);
 		}
 
 		get(cb) {
@@ -185,7 +231,7 @@
 						QldTokenManager._csrfFromHtml(r.responseText);
 					if (!csrf) {
 						done(
-							new Error("[QLD] CSRF token not found in Set-Cookie or HTML"),
+							new Error(`[${this._label}] CSRF token not found in Set-Cookie or HTML`),
 							null,
 						);
 						return;
@@ -194,7 +240,7 @@
 				},
 				onerror: () =>
 					done(
-						new Error("[QLD] GET qldglobe.information.qld.gov.au failed"),
+						new Error(`[${this._label}] GET qldglobe.information.qld.gov.au failed`),
 						null,
 					),
 			});
@@ -211,7 +257,7 @@
 					"Referer": CFG.QLD_ORIGIN + "/",
 				},
 				data: JSON.stringify({
-					url: CFG.QLD_SERVICE,
+					url: this._serviceUrl,
 					location: {
 						href: CFG.QLD_ORIGIN + "/",
 						origin: CFG.QLD_ORIGIN,
@@ -230,7 +276,7 @@
 					if (r.status < 200 || r.status >= 300) {
 						done(
 							new Error(
-								`[QLD] Token endpoint HTTP ${r.status}: ${r.responseText.slice(0, 160)}`,
+								`[${this._label}] Token endpoint HTTP ${r.status}: ${r.responseText.slice(0, 160)}`,
 							),
 							null,
 						);
@@ -246,15 +292,15 @@
 							: Date.now() + CFG.DEFAULT_TTL;
 						this.save(data.token, exp);
 						console.info(
-							"[CustomTiles] QLD token acquired, expires",
+							`[CustomTiles] ${this._label} token acquired, expires`,
 							new Date(exp).toISOString(),
 						);
 						done(null, data.token);
 					} catch (e) {
-						done(new Error(`[QLD] Parse error: ${e.message}`), null);
+						done(new Error(`[${this._label}] Parse error: ${e.message}`), null);
 					}
 				},
-				onerror: () => done(new Error("[QLD] Token POST network error"), null),
+				onerror: () => done(new Error(`[${this._label}] Token POST network error`), null),
 			});
 		}
 
@@ -275,7 +321,7 @@
 						);
 						this.retryCount++;
 						console.warn(
-							"[CustomTiles] Token refresh failed:",
+							`[CustomTiles] ${this._label} token refresh failed:`,
 							err.message,
 							"– retry in",
 							Math.round(delay / 60000),
@@ -891,23 +937,58 @@
 				},
 			});
 
-			// Query 2: HistoricalAerialPhoto (requires token)
+			// Query 2: HistoricalAerialPhoto (requires token — holds the
+			// 1930s–1990s scanned aerial photos). Silent empty result here is
+			// why Brisbane appeared to start in 1994 (the AerialOrtho program's
+			// earliest capture). Verbose logging makes auth/pagination issues
+			// visible in the console so we can tell ortho-only fallback apart
+			// from a real "no coverage" result.
 			const doPhotosQuery = (tok) => {
 				const tokenParam = tok ? "&token=" + encodeURIComponent(tok) : "";
 				GM_xmlhttpRequest({
 					method: "GET",
 					url: CFG.QLD_HIST_PHOTOS_SERVICE + "/query" + geomParam + "&where=1%3D1" + tokenParam,
-					headers: { Origin: "https://qldglobe.information.qld.gov.au" },
+					headers: {
+						Origin: "https://qldglobe.information.qld.gov.au",
+						Referer: "https://qldglobe.information.qld.gov.au/",
+					},
 					onload: (r) => {
-						if (r.status === 200) {
-							photosCaptures = parseCaptures(r.responseText, CFG.QLD_HIST_PHOTOS_SERVICE, !!tok, null);
-						} else {
-							// 499 = no token; silently fall back to ortho-only
+						if (r.status !== 200) {
+							console.warn(
+								"[CustomTiles] QLD Historical photos HTTP", r.status,
+								tok ? "(token sent)" : "(no token)",
+								r.responseText.slice(0, 200),
+							);
+							photosCaptures = [];
+							tryFinish();
+							return;
+						}
+						try {
+							const data = JSON.parse(r.responseText);
+							if (data.error) {
+								console.warn(
+									"[CustomTiles] QLD Historical photos service error:",
+									data.error.code, data.error.message,
+									tok ? "(token sent — may be expired or wrong scope)" : "(no token)",
+								);
+								photosCaptures = [];
+							} else {
+								photosCaptures = parseCaptures(r.responseText, CFG.QLD_HIST_PHOTOS_SERVICE, !!tok, null);
+								const total = (data.features || []).length;
+								const limited = !!data.exceededTransferLimit;
+								console.info(
+									"[CustomTiles] QLD Historical photos:", total, "features",
+									limited ? "(LIMITED — older captures cut off, see maxRecordCount)" : "",
+								);
+							}
+						} catch (e) {
+							console.error("[CustomTiles] QLD Historical photos parse:", e.message);
 							photosCaptures = [];
 						}
 						tryFinish();
 					},
 					onerror: () => {
+						console.error("[CustomTiles] QLD Historical photos network error");
 						photosCaptures = [];
 						tryFinish();
 					},
@@ -1549,136 +1630,6 @@
 		}
 	}
 
-	/* -- Shipwrecks Layer -------------------------------------------------- */
-
-	class ShipwrecksLayerProvider extends LayerProvider {
-		create() {
-			const L        = pageWin.L;
-			const OVERPASS = "https://overpass.kumi.systems/api/interpreter";
-			const MIN_ZOOM = 8;
-
-			function wreckColor(category) {
-				if (!category) return "#888";
-				if (category === "dangerous")    return "#D9534F";
-				if (category === "hull_showing") return "#F0A500";
-				if (category === "hull_visible") return "#5B9BD5";
-				return "#888";
-			}
-
-			const WreckLayer = L.Layer.extend({
-				initialize() {
-					this._group    = null;
-					this._debounce = null;
-					this._lastBbox = null;
-				},
-
-				onAdd(map) {
-					if (!map.getPane("dwWrecksPane")) {
-						map.createPane("dwWrecksPane");
-						map.getPane("dwWrecksPane").style.zIndex = "420";
-					}
-					this._group = L.layerGroup().addTo(map);
-					this._fetch();
-					map.on("moveend zoomend", this._onViewChange, this);
-				},
-
-				onRemove(map) {
-					clearTimeout(this._debounce);
-					this._debounce = null;
-					map.off("moveend zoomend", this._onViewChange, this);
-					if (this._group) { this._group.remove(); this._group = null; }
-				},
-
-				_onViewChange() {
-					clearTimeout(this._debounce);
-					this._debounce = setTimeout(() => this._fetch(), 400);
-				},
-
-				_fetch() {
-					const map = this._map;
-					if (!map || !this._group) return;
-					if (map.getZoom() < MIN_ZOOM) { this._group.clearLayers(); return; }
-
-					const b    = map.getBounds().pad(0.1);
-					const bbox = `${b.getSouth().toFixed(4)},${b.getWest().toFixed(4)},${b.getNorth().toFixed(4)},${b.getEast().toFixed(4)}`;
-					if (bbox === this._lastBbox) return;
-					this._lastBbox = bbox;
-
-					const q = `[out:json][timeout:20];(node[historic=wreck](${bbox});way[historic=wreck](${bbox}););out center tags;`;
-					GM_xmlhttpRequest({
-						method:  "POST",
-						url:     OVERPASS,
-						headers: { "Content-Type": "application/x-www-form-urlencoded" },
-						data:    "data=" + encodeURIComponent(q),
-						timeout: 60000,
-						onload:  (r) => {
-							if (r.status !== 200) return;
-							try {
-								const json = JSON.parse(r.responseText);
-								if (this._group) this._render(json.elements || []);
-							} catch (e) {
-								console.warn("[CustomTiles] Overpass parse error", e);
-							}
-						},
-						onerror: (e) => console.warn("[CustomTiles] Overpass request error", e),
-					});
-				},
-
-				_render(elements) {
-					if (!this._group) return;
-					this._group.clearLayers();
-					for (const el of elements) {
-						let lat, lon;
-						if (el.type === "node") {
-							lat = el.lat;
-							lon = el.lon;
-						} else if (el.center) {
-							lat = el.center.lat;
-							lon = el.center.lon;
-						} else {
-							continue;
-						}
-						if (!isFinite(lat) || !isFinite(lon)) continue;
-
-						const tags     = el.tags || {};
-						const name     = tags.name || "";
-						const category = tags["seamark:wreck:category"] || "";
-						const dateSunk = tags["wreck:date_sunk"] || "";
-						const fill     = wreckColor(category);
-						const catLabel = category.replace(/_/g, " ") || "unknown";
-
-						const svg =
-							`<svg viewBox="0 0 16 16" width="16" height="16" xmlns="http://www.w3.org/2000/svg">` +
-							`<circle cx="8" cy="8" r="6" fill="${fill}" stroke="#333" stroke-width="1.2" opacity="0.9"/>` +
-							`<text x="8" y="12" text-anchor="middle" font-size="9" font-family="sans-serif" fill="#fff">\u2693</text>` +
-							`</svg>`;
-
-						const icon = L.divIcon({
-							className: "dw-wreck-icon",
-							html:      svg,
-							iconSize:   [16, 16],
-							iconAnchor: [8, 8],
-						});
-
-						let tip = name ? `<b>${name}</b><br>` : "";
-						tip += `Category: ${catLabel}`;
-						if (dateSunk) tip += `<br>Sunk: ${dateSunk}`;
-
-						L.marker([lat, lon], { icon, pane: "dwWrecksPane", interactive: true })
-							.bindTooltip(tip, { className: "dw-wreck-tip", sticky: true })
-							.addTo(this._group);
-					}
-				},
-
-				getAttribution() {
-					return "Wrecks \u00a9 <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\" rel=\"noreferrer\">OpenStreetMap</a> contributors";
-				},
-			});
-
-			return new WreckLayer();
-		}
-	}
-
 	/* -- Mobile Coverage Layer --------------------------------------------- */
 
 	class MobileCoverageLayerProvider extends LayerProvider {
@@ -1734,6 +1685,580 @@
 				maxZoom:     18,
 				tileSize:    256,
 				pane:        "dwMobilePane",
+			});
+		}
+	}
+
+	/* -- QLD Cadastre (Digital Cadastral Database) ------------------------ */
+
+	// Property/parcel boundaries from the QLD Planning Cadastre MapServer.
+	// Same export-endpoint pattern as MobileCoverage — convert Leaflet
+	// (z,x,y) → EPSG:4326 bbox, request a transparent 256×256 PNG.
+	//
+	// Hover behaviour: above HOVER_MIN_ZOOM, mousemove triggers a debounced
+	// /identify call against layer 8 (Base Parcels Only) and shows a tooltip
+	// with Lot/Plan, tenure, area, locality. Stale responses are dropped via
+	// a generation counter so fast cursor movement doesn't flicker.
+	class QldCadastreLayerProvider extends LayerProvider {
+		create() {
+			const L = pageWin.L;
+			const BASE = CFG.QLD_CADASTRE_SERVICE;
+			const LAYER_ID = CFG.QLD_CADASTRE_LAYER_ID;
+			const IDENTIFY_LAYER = CFG.QLD_CADASTRE_IDENTIFY_LAYER;
+			const HOVER_MIN_ZOOM = CFG.QLD_CADASTRE_HOVER_MIN_ZOOM;
+
+			function tileToBBox(z, x, y) {
+				const n    = Math.pow(2, z);
+				const lon1 = x / n * 360 - 180;
+				const lon2 = (x + 1) / n * 360 - 180;
+				const lat1 = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)))       * 180 / Math.PI;
+				const lat2 = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n))) * 180 / Math.PI;
+				return { minLon: lon1, minLat: lat2, maxLon: lon2, maxLat: lat1 };
+			}
+
+			function formatTooltip(attrs) {
+				const lotPlan = attrs["Lot/plan"] || (attrs.Lot && attrs.Plan ? attrs.Lot + attrs.Plan : "");
+				const lines = [];
+				if (lotPlan && lotPlan !== "Null") lines.push(`<b>${lotPlan}</b>`);
+				const bits = [];
+				if (attrs.Tenure && attrs.Tenure !== "Null") bits.push(attrs.Tenure);
+				const area = parseFloat(attrs["Lot area (m²)"]);
+				if (isFinite(area) && area > 0) {
+					bits.push(area >= 10000 ? (area / 10000).toFixed(2) + " ha" : Math.round(area) + " m²");
+				}
+				if (bits.length) lines.push(bits.join(" · "));
+				if (attrs.Locality && attrs.Locality !== "Null") lines.push(attrs.Locality);
+				if (attrs["Local authority"] && attrs["Local authority"] !== "Null") {
+					lines.push(`<span class="dw-cad-sub">${attrs["Local authority"]}</span>`);
+				}
+				return lines.join("<br>") || "Parcel";
+			}
+
+			const CadastreTileLayer = L.TileLayer.extend({
+				onAdd(map) {
+					if (!map.getPane("dwCadastrePane")) {
+						map.createPane("dwCadastrePane");
+						map.getPane("dwCadastrePane").style.zIndex = "385";
+						map.getPane("dwCadastrePane").style.pointerEvents = "none";
+					}
+					L.TileLayer.prototype.onAdd.call(this, map);
+
+					this._tooltip = L.tooltip({ sticky: true, opacity: 0.95, className: "dw-cad-tip", direction: "right", offset: [12, 0] });
+					this._lastOid  = null;
+					this._debounce = null;
+					this._gen      = 0;
+					this._onMove   = this._onMove.bind(this);
+					this._onLeave  = this._onLeave.bind(this);
+					map.on("mousemove", this._onMove);
+					map.on("mouseout",  this._onLeave);
+				},
+
+				onRemove(map) {
+					clearTimeout(this._debounce);
+					this._debounce = null;
+					this._gen++;
+					map.off("mousemove", this._onMove);
+					map.off("mouseout",  this._onLeave);
+					if (this._tooltip && this._tooltip._map) this._tooltip.remove();
+					this._tooltip = null;
+					L.TileLayer.prototype.onRemove.call(this, map);
+				},
+
+				_onLeave() {
+					clearTimeout(this._debounce);
+					this._gen++;
+					if (this._tooltip && this._tooltip._map) this._tooltip.remove();
+					this._lastOid = null;
+				},
+
+				_onMove(e) {
+					const map = this._map;
+					if (!map || map.getZoom() < HOVER_MIN_ZOOM) {
+						if (this._tooltip && this._tooltip._map) this._tooltip.remove();
+						this._lastOid = null;
+						return;
+					}
+					clearTimeout(this._debounce);
+					const latlng = e.latlng;
+					this._debounce = setTimeout(() => this._identify(latlng), 180);
+				},
+
+				_identify(latlng) {
+					const map = this._map;
+					if (!map) return;
+					const size = map.getSize();
+					const b = map.getBounds();
+					const mapExtent = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(",");
+					const imageDisplay = `${size.x},${size.y},96`;
+					const geometry = encodeURIComponent(JSON.stringify({
+						x: latlng.lng, y: latlng.lat,
+						spatialReference: { wkid: 4326 },
+					}));
+					const myGen = ++this._gen;
+					const url =
+						`${BASE}/identify` +
+						`?geometry=${geometry}` +
+						`&geometryType=esriGeometryPoint&sr=4326` +
+						`&layers=all%3A${IDENTIFY_LAYER}` +
+						`&tolerance=3` +
+						`&mapExtent=${mapExtent}` +
+						`&imageDisplay=${imageDisplay}` +
+						`&returnGeometry=false` +
+						`&f=json`;
+					GM_xmlhttpRequest({
+						method: "GET",
+						url,
+						onload: (r) => {
+							if (myGen !== this._gen || !this._map) return;
+							if (r.status !== 200) return;
+							try {
+								const data = JSON.parse(r.responseText);
+								const feat = (data.results || [])[0];
+								this._show(latlng, feat || null);
+							} catch (_) {}
+						},
+						onerror: () => {},
+					});
+				},
+
+				_show(latlng, feat) {
+					if (!this._map || !this._tooltip) return;
+					if (!feat) {
+						if (this._tooltip._map) this._tooltip.remove();
+						this._lastOid = null;
+						return;
+					}
+					const attrs = feat.attributes || {};
+					const oid = attrs["Object ID"] || attrs.OBJECTID || JSON.stringify(attrs);
+					if (oid === this._lastOid && this._tooltip._map) {
+						this._tooltip.setLatLng(latlng);
+						return;
+					}
+					this._lastOid = oid;
+					this._tooltip
+						.setLatLng(latlng)
+						.setContent(formatTooltip(attrs));
+					if (!this._tooltip._map) this._tooltip.addTo(this._map);
+				},
+			});
+
+			return new CadastreTileLayer("", {
+				opacity:     0.75,
+				attribution:
+					"Cadastre &copy; <a href=\"https://www.qld.gov.au/dnrme\" target=\"_blank\" rel=\"noreferrer\">State of Queensland (DCDB)</a>",
+				minZoom:     11,
+				maxZoom:     22,
+				tileSize:    256,
+				pane:        "dwCadastrePane",
+			});
+		}
+	}
+
+	/* -- QPWS Estate (QLD Parks & Wildlife) ------------------------------- */
+
+	// Server-rendered tile overlay covering protected areas, walking tracks,
+	// great walks, horse/MTB/trail-bike trails. Same ArcGIS export pattern as
+	// Cadastre/MobileCoverage. Suppressed below zoom 9 — the polygons
+	// dominate the view at small scales and the trails aren't visible
+	// anyway.
+	class QpwsLayerProvider extends LayerProvider {
+		create() {
+			const L = pageWin.L;
+			const BASE = CFG.QLD_QPWS_SERVICE;
+			const LAYERS = CFG.QLD_QPWS_LAYER_IDS;
+
+			function tileToBBox(z, x, y) {
+				const n    = Math.pow(2, z);
+				const lon1 = x / n * 360 - 180;
+				const lon2 = (x + 1) / n * 360 - 180;
+				const lat1 = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)))       * 180 / Math.PI;
+				const lat2 = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n))) * 180 / Math.PI;
+				return { minLon: lon1, minLat: lat2, maxLon: lon2, maxLat: lat1 };
+			}
+
+			const QpwsTileLayer = L.TileLayer.extend({
+				onAdd(map) {
+					if (!map.getPane("dwQpwsPane")) {
+						map.createPane("dwQpwsPane");
+						map.getPane("dwQpwsPane").style.zIndex = "396";
+						map.getPane("dwQpwsPane").style.pointerEvents = "none";
+					}
+					L.TileLayer.prototype.onAdd.call(this, map);
+				},
+
+				getTileUrl(coords) {
+					const { z, x, y } = coords;
+					const bb = tileToBBox(z, x, y);
+					return (
+						`${BASE}/export?` +
+						`bbox=${bb.minLon},${bb.minLat},${bb.maxLon},${bb.maxLat}` +
+						`&bboxSR=4326&imageSR=4326` +
+						`&layers=show:${LAYERS}` +
+						`&size=256,256` +
+						`&format=png32` +
+						`&transparent=true` +
+						`&f=image`
+					);
+				},
+			});
+
+			return new QpwsTileLayer("", {
+				opacity:     0.85,
+				attribution:
+					"QPWS &copy; <a href=\"https://parks.qld.gov.au/\" target=\"_blank\" rel=\"noreferrer\">State of Queensland (DETSI)</a>",
+				minZoom:     9,
+				maxZoom:     22,
+				tileSize:    256,
+				pane:        "dwQpwsPane",
+			});
+		}
+	}
+
+	/* -- OpenSeaMap -------------------------------------------------------- */
+
+	// Public transparent overlay tiles — nautical seamarks (buoys, lights,
+	// lanes, harbour features). No key required, polite to cache.
+	class OpenSeaMapLayerProvider extends LayerProvider {
+		create() {
+			return L.tileLayer(
+				"https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
+				{
+					tileSize: 256,
+					maxNativeZoom: 18,
+					maxZoom: 22,
+					opacity: 1,
+					attribution:
+						"&copy; <a href=\"https://www.openseamap.org/\" target=\"_blank\" rel=\"noreferrer\">OpenSeaMap</a> contributors",
+				},
+			);
+		}
+	}
+
+	/* -- Power Infrastructure (OSM via Overpass) -------------------------- */
+
+	// Mirrors what OpenInfraMap renders: transmission/distribution lines,
+	// substations, power plants, wind generators. Queried per visible bbox
+	// because the dataset is too sparse for a worldwide tile preload to be
+	// worth the bandwidth.
+	class PowerInfraLayerProvider extends LayerProvider {
+		create() {
+			const L        = pageWin.L;
+			const OVERPASS = "https://overpass.kumi.systems/api/interpreter";
+			const MIN_ZOOM = 11;
+
+			function lineColor(voltageStr) {
+				const v = parseInt(voltageStr, 10) || 0;
+				if (v >= 300000) return "#D9534F";   // ≥300 kV: transmission
+				if (v >= 100000) return "#F0A500";   // 100–299 kV: sub-transmission
+				if (v >=  33000) return "#FFD93D";   // 33–99 kV: HV distribution
+				if (v >    0)    return "#9CCC65";   // <33 kV: LV distribution
+				return "#888";                       // unknown
+			}
+
+			const InfraLayer = L.Layer.extend({
+				initialize() {
+					this._group    = null;
+					this._debounce = null;
+					this._lastBbox = null;
+				},
+
+				onAdd(map) {
+					if (!map.getPane("dwInfraPane")) {
+						map.createPane("dwInfraPane");
+						map.getPane("dwInfraPane").style.zIndex = "410";
+					}
+					this._group = L.layerGroup().addTo(map);
+					this._fetch();
+					map.on("moveend zoomend", this._onViewChange, this);
+				},
+
+				onRemove(map) {
+					clearTimeout(this._debounce);
+					this._debounce = null;
+					map.off("moveend zoomend", this._onViewChange, this);
+					if (this._group) { this._group.remove(); this._group = null; }
+				},
+
+				_onViewChange() {
+					clearTimeout(this._debounce);
+					this._debounce = setTimeout(() => this._fetch(), 400);
+				},
+
+				_fetch() {
+					const map = this._map;
+					if (!map || !this._group) return;
+					if (map.getZoom() < MIN_ZOOM) { this._group.clearLayers(); return; }
+
+					const b    = map.getBounds().pad(0.1);
+					const bbox = `${b.getSouth().toFixed(4)},${b.getWest().toFixed(4)},${b.getNorth().toFixed(4)},${b.getEast().toFixed(4)}`;
+					if (bbox === this._lastBbox) return;
+					this._lastBbox = bbox;
+
+					const q =
+						`[out:json][timeout:25];(` +
+						`way[power=line](${bbox});` +
+						`way[power=minor_line](${bbox});` +
+						`way[power=substation](${bbox});` +
+						`node[power=substation](${bbox});` +
+						`way[power=plant](${bbox});` +
+						`node[power=plant](${bbox});` +
+						`node[power=generator][\"generator:source\"=wind](${bbox});` +
+						`);out geom tags;`;
+
+					GM_xmlhttpRequest({
+						method:  "POST",
+						url:     OVERPASS,
+						headers: { "Content-Type": "application/x-www-form-urlencoded" },
+						data:    "data=" + encodeURIComponent(q),
+						timeout: 60000,
+						onload:  (r) => {
+							if (r.status !== 200) return;
+							try {
+								const json = JSON.parse(r.responseText);
+								if (this._group) this._render(json.elements || []);
+							} catch (e) {
+								console.warn("[CustomTiles] OpenInfra parse error", e);
+							}
+						},
+						onerror: (e) => console.warn("[CustomTiles] OpenInfra request error", e),
+					});
+				},
+
+				_render(elements) {
+					if (!this._group) return;
+					this._group.clearLayers();
+					for (const el of elements) {
+						const tags = el.tags || {};
+						const power = tags.power;
+						if (!power) continue;
+
+						if (el.type === "way" && el.geometry && (power === "line" || power === "minor_line")) {
+							const latlngs = el.geometry.map(g => [g.lat, g.lon]);
+							const color = lineColor(tags.voltage);
+							L.polyline(latlngs, {
+								pane: "dwInfraPane",
+								color,
+								weight: power === "line" ? 2.2 : 1.4,
+								opacity: 0.85,
+							}).bindTooltip(
+								`<b>${tags.voltage ? tags.voltage + " V" : "Power " + power}</b>` +
+								(tags.operator ? `<br>${tags.operator}` : "") +
+								(tags.ref ? `<br>Ref: ${tags.ref}` : ""),
+								{ className: "dw-infra-tip", sticky: true },
+							).addTo(this._group);
+							continue;
+						}
+
+						let lat, lon;
+						if (el.type === "node") { lat = el.lat; lon = el.lon; }
+						else if (el.geometry && el.geometry.length) {
+							let sLat = 0, sLon = 0;
+							for (const g of el.geometry) { sLat += g.lat; sLon += g.lon; }
+							lat = sLat / el.geometry.length;
+							lon = sLon / el.geometry.length;
+						} else { continue; }
+						if (!isFinite(lat) || !isFinite(lon)) continue;
+
+						let glyph = "⚡", fill = "#F0A500";   // ⚡ substation
+						if (power === "plant")     { glyph = "■"; fill = "#9B59B6"; }   // ■ plant
+						else if (power === "generator") { glyph = "❁"; fill = "#5B9BD5"; }   // ❁ wind turbine
+
+						const svg =
+							`<svg viewBox="0 0 16 16" width="16" height="16" xmlns="http://www.w3.org/2000/svg">` +
+							`<circle cx="8" cy="8" r="6.5" fill="${fill}" stroke="#333" stroke-width="1" opacity="0.9"/>` +
+							`<text x="8" y="11.5" text-anchor="middle" font-size="9.5" font-family="sans-serif" fill="#fff">${glyph}</text>` +
+							`</svg>`;
+
+						const icon = L.divIcon({
+							className: "dw-infra-icon",
+							html: svg,
+							iconSize:   [16, 16],
+							iconAnchor: [8, 8],
+						});
+
+						let tip = `<b>${tags.name || ("Power " + power)}</b>`;
+						if (tags.voltage)  tip += `<br>Voltage: ${tags.voltage} V`;
+						if (tags.operator) tip += `<br>Operator: ${tags.operator}`;
+
+						L.marker([lat, lon], { icon, pane: "dwInfraPane", interactive: true })
+							.bindTooltip(tip, { className: "dw-infra-tip", sticky: true })
+							.addTo(this._group);
+					}
+				},
+
+				getAttribution() {
+					return "Infrastructure © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\" rel=\"noreferrer\">OpenStreetMap</a> contributors";
+				},
+			});
+
+			return new InfraLayer();
+		}
+	}
+
+	/* -- National Parks / Protected Areas (OSM via Overpass) -------------- */
+
+	// Polygons for OSM-tagged national parks and protected areas. Bumped to
+	// min zoom 9 so we don't pull continent-scale geometry on world view.
+	class NationalParksLayerProvider extends LayerProvider {
+		create() {
+			const L        = pageWin.L;
+			const OVERPASS = "https://overpass.kumi.systems/api/interpreter";
+			const MIN_ZOOM = 9;
+
+			const ParksLayer = L.Layer.extend({
+				initialize() {
+					this._group    = null;
+					this._debounce = null;
+					this._lastBbox = null;
+				},
+
+				onAdd(map) {
+					if (!map.getPane("dwParksPane")) {
+						map.createPane("dwParksPane");
+						map.getPane("dwParksPane").style.zIndex = "395";
+						map.getPane("dwParksPane").style.pointerEvents = "none";
+					}
+					this._group = L.layerGroup().addTo(map);
+					this._fetch();
+					map.on("moveend zoomend", this._onViewChange, this);
+				},
+
+				onRemove(map) {
+					clearTimeout(this._debounce);
+					this._debounce = null;
+					map.off("moveend zoomend", this._onViewChange, this);
+					if (this._group) { this._group.remove(); this._group = null; }
+				},
+
+				_onViewChange() {
+					clearTimeout(this._debounce);
+					this._debounce = setTimeout(() => this._fetch(), 500);
+				},
+
+				_fetch() {
+					const map = this._map;
+					if (!map || !this._group) return;
+					if (map.getZoom() < MIN_ZOOM) { this._group.clearLayers(); return; }
+
+					const b    = map.getBounds();
+					const bbox = `${b.getSouth().toFixed(4)},${b.getWest().toFixed(4)},${b.getNorth().toFixed(4)},${b.getEast().toFixed(4)}`;
+					if (bbox === this._lastBbox) return;
+					this._lastBbox = bbox;
+
+					// `boundary=national_park` is the strict tag; `protected_area`
+					// with protect_class 1–4 covers most reserves people care about
+					// (strict reserves, wilderness, national parks, habitat areas).
+					const q =
+						`[out:json][timeout:25];(` +
+						`way[boundary=national_park](${bbox});` +
+						`relation[boundary=national_park](${bbox});` +
+						`way[boundary=protected_area][\"protect_class\"~\"^[1-4]$\"](${bbox});` +
+						`relation[boundary=protected_area][\"protect_class\"~\"^[1-4]$\"](${bbox});` +
+						`);out geom tags;`;
+
+					GM_xmlhttpRequest({
+						method:  "POST",
+						url:     OVERPASS,
+						headers: { "Content-Type": "application/x-www-form-urlencoded" },
+						data:    "data=" + encodeURIComponent(q),
+						timeout: 90000,
+						onload:  (r) => {
+							if (r.status !== 200) return;
+							try {
+								const json = JSON.parse(r.responseText);
+								if (this._group) this._render(json.elements || []);
+							} catch (e) {
+								console.warn("[CustomTiles] National Parks parse error", e);
+							}
+						},
+						onerror: (e) => console.warn("[CustomTiles] National Parks request error", e),
+					});
+				},
+
+				_render(elements) {
+					if (!this._group) return;
+					this._group.clearLayers();
+					for (const el of elements) {
+						const tags = el.tags || {};
+						const name = tags.name || "Protected area";
+						const isNP = tags.boundary === "national_park";
+						const style = {
+							pane: "dwParksPane",
+							color:       isNP ? "#1B5E20" : "#33691E",
+							weight:      1.5,
+							opacity:     0.85,
+							fillColor:   isNP ? "#43A047" : "#7CB342",
+							fillOpacity: 0.18,
+						};
+
+						if (el.type === "way" && el.geometry) {
+							const latlngs = el.geometry.map(g => [g.lat, g.lon]);
+							L.polygon(latlngs, style)
+								.bindTooltip(name, { className: "dw-park-tip", sticky: true })
+								.addTo(this._group);
+						} else if (el.type === "relation" && el.members) {
+							const rings = [];
+							for (const m of el.members) {
+								if (m.type !== "way" || !m.geometry) continue;
+								if (m.role && m.role !== "outer" && m.role !== "inner") continue;
+								rings.push(m.geometry.map(g => [g.lat, g.lon]));
+							}
+							if (!rings.length) continue;
+							L.polygon(rings, style)
+								.bindTooltip(name, { className: "dw-park-tip", sticky: true })
+								.addTo(this._group);
+						}
+					}
+				},
+
+				getAttribution() {
+					return "Parks © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\" rel=\"noreferrer\">OpenStreetMap</a> contributors";
+				},
+			});
+
+			return new ParksLayer();
+		}
+	}
+
+	/* -- Light Pollution (lightpollutionmap.info WMS) --------------------- */
+
+	// WMS GetMap served via GeoServer's GWC tile cache. We compute the
+	// EPSG:3857 bbox per Leaflet tile (z/x/y) and slot it into the WMS
+	// request — the cache hits for tile-aligned bboxes, so this is fast.
+	class LightPollutionLayerProvider extends LayerProvider {
+		create() {
+			const MERC_ORIGIN = 20037508.3428;
+			const MERC_FULL = 2 * MERC_ORIGIN;
+			const TILE_PX = 256;
+			const wmsParams =
+				"?REQUEST=GetMap&SERVICE=WMS&VERSION=1.3.0&FORMAT=image%2Fpng" +
+				"&STYLES=" + encodeURIComponent(CFG.LIGHTPOL_WMS_STYLE) +
+				"&TRANSPARENT=TRUE" +
+				"&LAYERS=" + encodeURIComponent(CFG.LIGHTPOL_WMS_LAYER) +
+				"&TILED=true&SRS=EPSG%3A3857&CRS=EPSG%3A3857" +
+				"&WIDTH=" + TILE_PX + "&HEIGHT=" + TILE_PX;
+
+			const LightPolWmsLayer = L.TileLayer.extend({
+				getTileUrl(coords) {
+					const n = Math.pow(2, coords.z);
+					const tw = MERC_FULL / n;
+					const west = -MERC_ORIGIN + coords.x * tw;
+					const east = west + tw;
+					const north = MERC_ORIGIN - coords.y * tw;
+					const south = north - tw;
+					return CFG.LIGHTPOL_WMS_BASE + wmsParams +
+						"&BBOX=" + west + "," + south + "," + east + "," + north;
+				},
+			});
+
+			return new LightPolWmsLayer("", {
+				tileSize:    TILE_PX,
+				minZoom:     0,
+				maxNativeZoom: 12,
+				maxZoom:     22,
+				opacity:     0.65,
+				attribution:
+					"Light pollution © <a href=\"https://www.lightpollutionmap.info/\" target=\"_blank\" rel=\"noreferrer\">lightpollutionmap.info</a>",
 			});
 		}
 	}
@@ -1943,7 +2468,19 @@
 
 	class CustomTilesApp {
 		constructor() {
-			this.qldToken = new QldTokenManager();
+			this.qldToken = new QldTokenManager({
+				serviceUrl: CFG.QLD_SERVICE,
+				storageKey: "qld_token",
+				label: "QLD Globe",
+			});
+			// Separate manager scoped to the QImagery service; the public-token
+			// endpoint scopes by the `url` it's POSTed with, and the Globe token
+			// gets 403s on QImagery (historical aerial photos).
+			this.qldPhotosToken = new QldTokenManager({
+				serviceUrl: CFG.QLD_HIST_PHOTOS_SERVICE,
+				storageKey: "qld_photos_token",
+				label: "QLD Photos",
+			});
 			this.appleToken = new AppleTokenManager();
 			this.layers = {};
 			this.injected = false;
@@ -2070,7 +2607,7 @@
 					getLabel: (i) => wayLyr.getHistLabel(i),
 				});
 				this.layers[CFG.LAYER_QLD] = new QldGlobeLayerProvider(this.qldToken).create();
-				this.layers[CFG.LAYER_HIST] = new QldHistoricalLayerProvider(this.qldToken).create();
+				this.layers[CFG.LAYER_HIST] = new QldHistoricalLayerProvider(this.qldPhotosToken).create();
 				const qldLyr = this.layers[CFG.LAYER_HIST];
 				this.histCompass = this._makeHistoryBar({
 					layer: qldLyr,
@@ -2129,8 +2666,23 @@
 				this.layers[CFG.LAYER_MOBILE] = new MobileCoverageLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_MOBILE], CFG.LAYER_MOBILE);
 
-				this.layers[CFG.LAYER_WRECKS] = new ShipwrecksLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_WRECKS], CFG.LAYER_WRECKS);
+				this.layers[CFG.LAYER_SEAMARKS] = new OpenSeaMapLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_SEAMARKS], CFG.LAYER_SEAMARKS);
+
+				this.layers[CFG.LAYER_INFRA] = new PowerInfraLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_INFRA], CFG.LAYER_INFRA);
+
+				this.layers[CFG.LAYER_PARKS] = new NationalParksLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_PARKS], CFG.LAYER_PARKS);
+
+				this.layers[CFG.LAYER_LIGHTPOL] = new LightPollutionLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_LIGHTPOL], CFG.LAYER_LIGHTPOL);
+
+				this.layers[CFG.LAYER_CADASTRE] = new QldCadastreLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_CADASTRE], CFG.LAYER_CADASTRE);
+
+				this.layers[CFG.LAYER_QPWS] = new QpwsLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_QPWS], CFG.LAYER_QPWS);
 
 				if (!map.getPane("dwRoadsPane")) {
 					map.createPane("dwRoadsPane");
@@ -2362,120 +2914,117 @@
 			doInject();
 		}
 
-		_makeHistoryControl(layer) {
-			const CaptureHistory = L.Control.extend({
-				options: { position: "topright" },
+		// Horizontal scrubber bar for historical-layer time travel.
+		// Renders an absolute-positioned bar at the top-centre of the map with
+		// prev/next arrows, a range slider for rapid scrubbing, and a date
+		// label. Slider drags are debounced so tile servers aren't hammered.
+		//
+		// adapter shape: { layer, event, getCount(), getIdx(), setIdx(i), getLabel(i) }
+		// idx convention: 0 = newest, count-1 = oldest. Slider visually
+		// reverses that (left = old, right = new).
+		_makeHistoryBar(adapter) {
+			const bar = document.createElement("div");
+			bar.className = "dw-history-bar";
 
-				onAdd() {
-					const c = L.DomUtil.create("div", "dw-capture-history");
-					L.DomEvent.disableClickPropagation(c);
+			const prev = document.createElement("a");
+			prev.className = "dw-vxh-btn";
+			prev.href = "#";
+			prev.title = "Older";
+			prev.innerHTML = "&#9664;";
+			bar.appendChild(prev);
 
-					this._prev = L.DomUtil.create("a", "dw-vxh-btn", c);
-					this._prev.href = "#";
-					this._prev.title = "Older capture";
-					this._prev.innerHTML = "&#9664;";
+			const slider = document.createElement("input");
+			slider.type = "range";
+			slider.className = "dw-history-slider";
+			slider.min = "0";
+			slider.max = "0";
+			slider.value = "0";
+			bar.appendChild(slider);
 
-					this._label = L.DomUtil.create("span", "dw-vxh-label", c);
+			const next = document.createElement("a");
+			next.className = "dw-vxh-btn";
+			next.href = "#";
+			next.title = "Newer";
+			next.innerHTML = "&#9654;";
+			bar.appendChild(next);
 
-					this._next = L.DomUtil.create("a", "dw-vxh-btn", c);
-					this._next.href = "#";
-					this._next.title = "Newer capture";
-					this._next.innerHTML = "&#9654;";
+			const label = document.createElement("span");
+			label.className = "dw-history-bar-label";
+			bar.appendChild(label);
 
-					L.DomEvent.on(this._prev, "click", (e) => {
-						L.DomEvent.preventDefault(e);
-						layer.setCapture(layer.getCaptureIdx() + 1);
-					});
-					L.DomEvent.on(this._next, "click", (e) => {
-						L.DomEvent.preventDefault(e);
-						layer.setCapture(layer.getCaptureIdx() - 1);
-					});
+			L.DomEvent.disableClickPropagation(bar);
+			L.DomEvent.disableScrollPropagation(bar);
 
-					this._onCapture = () => this._update();
-					layer.on("capturechange", this._onCapture);
-					this._update();
-					return c;
-				},
+			const formatLabel = (lab, idx, count) => {
+				if (!count) return "Loading\u2026";
+				const s = lab ? String(lab) : "?";
+				const trimmed = s.length > 10 && /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
+				return count > 1 ? `${trimmed}  ${idx + 1}/${count}` : trimmed;
+			};
 
-				onRemove() {
-					layer.off("capturechange", this._onCapture);
-				},
+			const update = () => {
+				const count = adapter.getCount();
+				const idx = adapter.getIdx();
+				slider.max = String(Math.max(0, count - 1));
+				slider.value = String(Math.max(0, count - 1 - idx));
+				slider.disabled = count <= 1;
+				label.textContent = formatLabel(adapter.getLabel(idx), idx, count);
+				prev.classList.toggle("dw-vxh-disabled", idx >= count - 1);
+				next.classList.toggle("dw-vxh-disabled", idx <= 0);
+			};
 
-				_update() {
-					const count = layer.getCaptureCount();
-					const idx = layer.getCaptureIdx();
-					const date = layer.getCaptureDate();
-					if (!count) {
-						this._label.textContent = "Loading\u2026";
-					} else {
-						const d = date ? date.slice(0, 10) : "Unknown date";
-						this._label.textContent = count > 1 ? `${d}  ${idx + 1}/${count}` : d;
-					}
-					const canPrev = idx < count - 1;
-					const canNext = idx > 0;
-					this._prev.classList.toggle("dw-vxh-disabled", !canPrev);
-					this._next.classList.toggle("dw-vxh-disabled", !canNext);
-				},
+			let debounce = null;
+			const applyIdx = (i, immediate) => {
+				if (debounce) { clearTimeout(debounce); debounce = null; }
+				if (immediate) {
+					adapter.setIdx(i);
+				} else {
+					debounce = setTimeout(() => {
+						debounce = null;
+						adapter.setIdx(i);
+					}, 200);
+				}
+			};
+
+			L.DomEvent.on(prev, "click", (e) => {
+				L.DomEvent.preventDefault(e);
+				applyIdx(adapter.getIdx() + 1, true);
+			});
+			L.DomEvent.on(next, "click", (e) => {
+				L.DomEvent.preventDefault(e);
+				applyIdx(adapter.getIdx() - 1, true);
+			});
+			slider.addEventListener("input", () => {
+				const count = adapter.getCount();
+				const newIdx = Math.max(0, count - 1 - parseInt(slider.value, 10));
+				label.textContent = formatLabel(adapter.getLabel(newIdx), newIdx, count);
+				applyIdx(newIdx, false);
+			});
+			slider.addEventListener("change", () => {
+				const count = adapter.getCount();
+				const newIdx = Math.max(0, count - 1 - parseInt(slider.value, 10));
+				applyIdx(newIdx, true);
 			});
 
-			return new CaptureHistory();
-		}
+			let attachedMap = null;
+			const onChange = () => update();
 
-		// Prev/next compass for layers exposing get/setHistIdx + histchange event
-		// (Wayback releases; ready for other catalog-driven layers).
-		_makeHistControl(layer) {
-			const HistControl = L.Control.extend({
-				options: { position: "topright" },
-
-				onAdd() {
-					const c = L.DomUtil.create("div", "dw-capture-history");
-					L.DomEvent.disableClickPropagation(c);
-
-					this._prev = L.DomUtil.create("a", "dw-vxh-btn", c);
-					this._prev.href = "#";
-					this._prev.title = "Older release";
-					this._prev.innerHTML = "&#9664;";
-
-					this._label = L.DomUtil.create("span", "dw-vxh-label", c);
-
-					this._next = L.DomUtil.create("a", "dw-vxh-btn", c);
-					this._next.href = "#";
-					this._next.title = "Newer release";
-					this._next.innerHTML = "&#9654;";
-
-					L.DomEvent.on(this._prev, "click", (e) => {
-						L.DomEvent.preventDefault(e);
-						layer.setHistIdx(layer.getHistIdx() + 1);
-					});
-					L.DomEvent.on(this._next, "click", (e) => {
-						L.DomEvent.preventDefault(e);
-						layer.setHistIdx(layer.getHistIdx() - 1);
-					});
-
-					this._onHistChange = () => this._update();
-					layer.on("histchange", this._onHistChange);
-					this._update();
-					return c;
+			return {
+				get _map() { return attachedMap; },
+				addTo(map) {
+					if (attachedMap === map) return;
+					attachedMap = map;
+					map.getContainer().appendChild(bar);
+					adapter.layer.on(adapter.event, onChange);
+					update();
 				},
-
-				onRemove() {
-					layer.off("histchange", this._onHistChange);
+				remove() {
+					if (!attachedMap) return;
+					adapter.layer.off(adapter.event, onChange);
+					if (bar.parentNode) bar.parentNode.removeChild(bar);
+					attachedMap = null;
 				},
-
-				_update() {
-					const count = layer.getHistCount();
-					const idx   = layer.getHistIdx();
-					const label = layer.getHistLabel();
-					if (!count) {
-						this._label.textContent = "Loading…";
-					} else {
-						this._label.textContent = count > 1 ? `${label}  ${idx + 1}/${count}` : (label || "");
-					}
-					this._prev.classList.toggle("dw-vxh-disabled", idx >= count - 1);
-					this._next.classList.toggle("dw-vxh-disabled", idx <= 0);
-				},
-			});
-			return new HistControl();
+			};
 		}
 
 		// -- Styles -------------------------------------------------------
@@ -2500,11 +3049,13 @@
 				".dw-back-link:hover { color: #333; text-decoration: underline; }",
 				".dw-opacity-wrap { padding: 2px 6px 4px; }",
 				".dw-opacity-slider { display: block; width: 100%; margin: 2px 0 0; cursor: pointer; accent-color: #4a8; }",
-				".dw-capture-history { display: flex; align-items: center; gap: 3px; padding: 3px 5px; background: rgba(255,255,255,0.92); border-radius: 5px; box-shadow: 0 1px 5px rgba(0,0,0,0.4); font-size: 11px; font-family: sans-serif; white-space: nowrap; }",
-				".dw-vxh-btn { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; background: #fff; border: 1px solid #bbb; border-radius: 3px; font-size: 10px; color: #444; text-decoration: none; cursor: pointer; }",
+				".dw-history-bar { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1000; display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: rgba(255,255,255,0.95); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); font-size: 11px; font-family: sans-serif; white-space: nowrap; pointer-events: auto; width: min(82vw, 720px); box-sizing: border-box; }",
+				".dw-history-slider { flex: 1; min-width: 0; margin: 0; accent-color: #4a8; cursor: pointer; }",
+				".dw-history-slider:disabled { cursor: not-allowed; opacity: 0.4; }",
+				".dw-history-bar-label { min-width: 130px; text-align: right; color: #333; font-variant-numeric: tabular-nums; }",
+				".dw-vxh-btn { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; background: #fff; border: 1px solid #bbb; border-radius: 3px; font-size: 11px; color: #444; text-decoration: none; cursor: pointer; flex-shrink: 0; }",
 				".dw-vxh-btn:hover:not(.dw-vxh-disabled) { background: #e8f0fb; color: #000; border-color: #888; }",
 				".dw-vxh-disabled { opacity: 0.3; cursor: default; pointer-events: none; }",
-				".dw-vxh-label { min-width: 85px; text-align: center; color: #333; }",
 				".dw-layer-group { margin: 1px 0; }",
 				".dw-layer-group-header { font-size: 10px; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 0.05em; padding: 5px 8px 1px; cursor: pointer; user-select: none; }",
 				".dw-layer-group:not(.dw-layer-group--closed) > .dw-layer-group-header::before { content: '\u25be  '; }",
@@ -2522,8 +3073,9 @@
 				".dw-flight-tip { font-size: 11px; line-height: 1.4; }",
 				".dw-marine-icon { background: none !important; border: none !important; }",
 				".dw-marine-tip { font-size: 11px; line-height: 1.4; }",
-				".dw-wreck-icon { background: none !important; border: none !important; }",
-				".dw-wreck-tip { font-size: 11px; line-height: 1.4; }",
+				".dw-cad-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
+				".dw-cad-tip b { font-weight: 700; }",
+				".dw-cad-tip .dw-cad-sub { color: #6b7280; }",
 			].join("\n");
 
 			const style = document.createElement("style");
