@@ -1,8 +1,8 @@
 ﻿// ==UserScript==
-// @name         dynamicWatch – Queensland Globe, Google Hybrid & Layer Manager
+// @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.2.0
-// @description  Adds QLD Globe aerial imagery (auto-refreshed token), Google Hybrid, and QLD Historical tiles to the dynamicWatch planner.
+// @version      7.8.0
+// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, National Parks, OpenSeaMap, Unity Water, QLD Relief. Includes overlay persistence, QPWS hover-identify, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
 // @grant        GM_xmlhttpRequest
@@ -25,6 +25,7 @@
 // @connect      spatial.infrastructure.gov.au
 // @connect      tiles.openseamap.org
 // @connect      www2.lightpollutionmap.info
+// @connect      www.onthehouse.com.au
 // @run-at       document-start
 // ==/UserScript==
 
@@ -42,7 +43,8 @@
 		LAYER_STAMEN_TONER: "Stamen Toner",
 		LAYER_WAYBACK: "Esri Wayback",
 
-		WAYBACK_CONFIG_URL: "https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json",
+		WAYBACK_CONFIG_URL:
+			"https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json",
 
 		// Apple MapKit raster tile endpoint (ti/tile). The vector endpoint
 		// (md/v1/vtile) returns protobuf and won't render in plain Leaflet.
@@ -102,16 +104,31 @@
 			"https://spatial-img.information.qld.gov.au/arcgis/rest/services/" +
 			"QImagery/HistoricalAerialPhoto_AllUsers/ImageServer",
 
-		LAYER_UW:       "Unity Water",
-		LAYER_FLIGHTS:  "Live Flights",
-		LAYER_MARINE:   "Marine Vessels",
-		LAYER_MOBILE:   "Mobile Coverage",
+		LAYER_UW: "Unity Water",
+		LAYER_FLIGHTS: "Live Flights",
+		LAYER_MARINE: "Marine Vessels",
+		LAYER_MOBILE: "Mobile Coverage",
 		LAYER_SEAMARKS: "OpenSeaMap",
-		LAYER_INFRA:    "Power Infrastructure",
-		LAYER_PARKS:    "National Parks",
+		LAYER_INFRA: "Power Infrastructure",
+		LAYER_PARKS: "National Parks",
 		LAYER_LIGHTPOL: "Light Pollution",
 		LAYER_CADASTRE: "QLD Cadastre",
-		LAYER_QPWS:     "QPWS Estate",
+		LAYER_QPWS:    "QPWS Estate",
+		LAYER_TOPO:    "QLD Topo",
+		LAYER_RELIEF:  "QLD Relief",
+		OVERLAY_STATE_KEY: "dw_active_overlays",
+
+		// QLD Topo and Relief tile caches — public, no token required.
+		QLD_TOPO_TILE:
+			"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+			"Basemaps/QldMap_Topo/MapServer/tile/{z}/{y}/{x}",
+		QLD_RELIEF_TILE:
+			"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+			"Basemaps/QldMap_Relief/MapServer/tile/{z}/{y}/{x}",
+
+		// Minimum zoom for QPWS hover-identify (below this, polygons too small).
+		QLD_QPWS_HOVER_MIN_ZOOM: 11,
+
 		UW_FS_BASE: "https://services2.arcgis.com/tQg86iShPXJPWQWw",
 
 		// QLD Digital Cadastral Database via Planning Cadastre MapServer.
@@ -127,6 +144,10 @@
 		QLD_CADASTRE_IDENTIFY_LAYER: 8,
 		QLD_CADASTRE_HOVER_MIN_ZOOM: 14,
 
+		// OnTheHouse (Cotality) base URL — used by fetchOthSales for the
+		// optional "Sales" lookup on the cadastre tooltip.
+		OTH_BASE: "https://www.onthehouse.com.au",
+
 		// QPWS estate: protected-area polygons + tracks/trails of all kinds.
 		// Layer IDs in the source service:
 		//   10 = Protected areas and forests   5 = Walking track
@@ -141,7 +162,8 @@
 		// lightpollutionmap.info GeoServer (WMS via GWC tile cache).
 		// LAYERS=PostGIS:SB_2025 = sky brightness, latest published edition.
 		// STYLES=WA = "World Atlas" colour ramp matching the official site.
-		LIGHTPOL_WMS_BASE: "https://www2.lightpollutionmap.info/geoserver/gwc/service/wms",
+		LIGHTPOL_WMS_BASE:
+			"https://www2.lightpollutionmap.info/geoserver/gwc/service/wms",
 		LIGHTPOL_WMS_LAYER: "PostGIS:SB_2025",
 		LIGHTPOL_WMS_STYLE: "WA",
 	};
@@ -149,58 +171,104 @@
 	const BLANK_TILE =
 		"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
-	// Layer groups for the picker and Manage Layers panel.
+	// Base-layer groups for the picker and Manage Layers panel.
 	// shortLabels strip the state prefix so labels are concise inside their group.
 	const DW_LAYER_GROUPS = [
-		{ header: "Global",     names: [CFG.LAYER_GOOGLE, CFG.LAYER_APPLE, CFG.LAYER_STAMEN_TONER, CFG.LAYER_WAYBACK] },
-		{ header: "Queensland", names: [CFG.LAYER_QLD, CFG.LAYER_HIST], shortLabels: { [CFG.LAYER_QLD]: "Current Imagery", [CFG.LAYER_HIST]: "Historical" } },
+		{
+			header: "Global",
+			names: [
+				CFG.LAYER_GOOGLE,
+				CFG.LAYER_APPLE,
+				CFG.LAYER_STAMEN_TONER,
+				CFG.LAYER_WAYBACK,
+			],
+		},
+		{
+			header: "Queensland",
+			names: [CFG.LAYER_QLD, CFG.LAYER_HIST, CFG.LAYER_TOPO],
+			shortLabels: {
+				[CFG.LAYER_QLD]:   "Current Imagery",
+				[CFG.LAYER_HIST]:  "Historical",
+				[CFG.LAYER_TOPO]:  "Topographic",
+			},
+		},
 	];
 
-	/* -- QLD Token Manager ------------------------------------------------- */
+	// Overlay groups, organised by what the user is *trying to see* rather
+	// than by data provider. Any overlay not listed here falls through to
+	// an "Other" group at the bottom (currently empty).
+	const DW_OVERLAY_GROUPS = [
+		{
+			header: "Property",
+			names:  [CFG.LAYER_CADASTRE, CFG.LAYER_QPWS, CFG.LAYER_RELIEF],
+		},
+		{
+			header: "Infrastructure",
+			names:  [CFG.LAYER_INFRA, CFG.LAYER_MOBILE, CFG.LAYER_UW],
+		},
+		{
+			header: "Environment",
+			names:  [CFG.LAYER_PARKS, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS],
+		},
+		{
+			header: "Live data",
+			names:  [CFG.LAYER_FLIGHTS, CFG.LAYER_MARINE],
+		},
+		{
+			header: "Heatmaps",
+			names:  [CFG.LAYER_STRAVA, CFG.LAYER_GARMIN],
+		},
+	];
 
-	class QldTokenManager {
-		// opts: { serviceUrl, storageKey, label }
-		// Each QLD ImageServer (LatestStateProgram, HistoricalAerialPhoto, …)
-		// has its own access policy, so the token request must be scoped to
-		// the right service URL and tokens must be cached independently.
+	/* -- Token Manager Base ----------------------------------------------- */
+
+	// Shared scheduling/retry/queue logic for short-lived access tokens.
+	// Subclasses own the actual token data and implement:
+	//   isValid()       — return true if cached token is still usable
+	//   _cached()       — return array of cached values to pass to callbacks
+	//   _fetch(done)    — fetch fresh token + save it, then call
+	//                     done(err)  or  done(null, ...resultArgs)
+	//                     where ...resultArgs are also passed to onRefresh
+	//
+	// Subclasses must also assign this.expires (epoch ms) when they save —
+	// the base reads it to schedule the next refresh.
+	class TokenManagerBase {
 		constructor(opts) {
 			opts = opts || {};
-			this._serviceUrl = opts.serviceUrl || CFG.QLD_SERVICE;
-			this._storageKey = opts.storageKey || "qld_token";
-			this._label = opts.label || "QLD";
-			this.token = GM_getValue(this._storageKey, null);
-			this.expires = GM_getValue(this._storageKey + "_expires", 0);
+			this._label = opts.label || "Token";
+			this._refreshMargin = opts.refreshMarginMs || CFG.REFRESH_MARGIN;
+			this.expires = 0;
 			this.fetching = false;
 			this.pending = [];
 			this.refreshScheduled = false;
 			this.retryCount = 0;
-			/** Set by CustomTilesApp; called with (token) after each successful refresh. */
+			/** Set by CustomTilesApp; called with subclass result args on refresh. */
 			this.onRefresh = null;
 		}
 
+		// Subclass must override.
 		isValid() {
-			return !!(this.token && this.expires - Date.now() > CFG.REFRESH_MARGIN);
+			return false;
 		}
-
-		save(token, expiresMs) {
-			this.token = token;
-			this.expires = expiresMs;
-			GM_setValue(this._storageKey, token);
-			GM_setValue(this._storageKey + "_expires", expiresMs);
+		_cached() {
+			return [];
+		}
+		_fetch(done) {
+			done(new Error(`${this._label} _fetch() not implemented`));
 		}
 
 		get(cb) {
 			if (this.isValid()) {
-				cb(null, this.token);
+				cb(null, ...this._cached());
 				return;
 			}
 			this.pending.push(cb);
 			if (this.fetching) return;
 			this.fetching = true;
-			this._doFetch((err, token) => {
+			this._fetch((err, ...result) => {
 				this.fetching = false;
 				const cbs = this.pending.splice(0);
-				cbs.forEach((fn) => fn(err, token));
+				cbs.forEach((fn) => fn(err, ...result));
 				if (!err) {
 					this.retryCount = 0;
 					this.scheduleRefresh();
@@ -215,7 +283,74 @@
 			});
 		}
 
-		_doFetch(done) {
+		scheduleRefresh() {
+			if (this.refreshScheduled) return;
+			this.refreshScheduled = true;
+			const wait = Math.max(
+				30000,
+				this.expires - Date.now() - this._refreshMargin,
+			);
+			setTimeout(() => {
+				this.refreshScheduled = false;
+				this._fetch((err, ...result) => {
+					if (err) {
+						const delay = Math.min(
+							CFG.RETRY_DELAY * Math.pow(2, this.retryCount),
+							CFG.RETRY_MAX_DELAY,
+						);
+						this.retryCount++;
+						console.warn(
+							`[CustomTiles] ${this._label} token refresh failed:`,
+							err.message,
+							"– retry in",
+							Math.round(delay / 60000),
+							"min",
+						);
+						setTimeout(() => this.scheduleRefresh(), delay);
+						return;
+					}
+					this.retryCount = 0;
+					if (this.onRefresh) this.onRefresh(...result);
+					this.scheduleRefresh();
+				});
+			}, wait);
+		}
+	}
+
+	/* -- QLD Token Manager ------------------------------------------------- */
+
+	class QldTokenManager extends TokenManagerBase {
+		// opts: { serviceUrl, storageKey, label }
+		// Each QLD ImageServer (LatestStateProgram, HistoricalAerialPhoto, …)
+		// has its own access policy, so the token request must be scoped to
+		// the right service URL and tokens must be cached independently.
+		constructor(opts) {
+			opts = opts || {};
+			super({ label: opts.label || "QLD" });
+			this._serviceUrl = opts.serviceUrl || CFG.QLD_SERVICE;
+			this._storageKey = opts.storageKey || "qld_token";
+			this.token = GM_getValue(this._storageKey, null);
+			this.expires = GM_getValue(this._storageKey + "_expires", 0);
+		}
+
+		isValid() {
+			return !!(this.token && this.expires - Date.now() > CFG.REFRESH_MARGIN);
+		}
+
+		_cached() {
+			return [this.token];
+		}
+
+		save(token, expiresMs) {
+			this.token = token;
+			this.expires = expiresMs;
+			GM_setValue(this._storageKey, token);
+			GM_setValue(this._storageKey + "_expires", expiresMs);
+		}
+
+		// Two-step: GET the QLD Globe homepage to harvest a CSRF token, then
+		// POST it to the token endpoint scoped to our service URL.
+		_fetch(done) {
 			GM_xmlhttpRequest({
 				method: "GET",
 				url: CFG.QLD_ORIGIN + "/",
@@ -231,8 +366,9 @@
 						QldTokenManager._csrfFromHtml(r.responseText);
 					if (!csrf) {
 						done(
-							new Error(`[${this._label}] CSRF token not found in Set-Cookie or HTML`),
-							null,
+							new Error(
+								`[${this._label}] CSRF token not found in Set-Cookie or HTML`,
+							),
 						);
 						return;
 					}
@@ -240,8 +376,9 @@
 				},
 				onerror: () =>
 					done(
-						new Error(`[${this._label}] GET qldglobe.information.qld.gov.au failed`),
-						null,
+						new Error(
+							`[${this._label}] GET qldglobe.information.qld.gov.au failed`,
+						),
 					),
 			});
 		}
@@ -300,41 +437,9 @@
 						done(new Error(`[${this._label}] Parse error: ${e.message}`), null);
 					}
 				},
-				onerror: () => done(new Error(`[${this._label}] Token POST network error`), null),
+				onerror: () =>
+					done(new Error(`[${this._label}] Token POST network error`)),
 			});
-		}
-
-		scheduleRefresh() {
-			if (this.refreshScheduled) return;
-			this.refreshScheduled = true;
-			const wait = Math.max(
-				30000,
-				this.expires - Date.now() - CFG.REFRESH_MARGIN,
-			);
-			setTimeout(() => {
-				this.refreshScheduled = false;
-				this._doFetch((err, token) => {
-					if (err) {
-						const delay = Math.min(
-							CFG.RETRY_DELAY * Math.pow(2, this.retryCount),
-							CFG.RETRY_MAX_DELAY,
-						);
-						this.retryCount++;
-						console.warn(
-							`[CustomTiles] ${this._label} token refresh failed:`,
-							err.message,
-							"– retry in",
-							Math.round(delay / 60000),
-							"min",
-						);
-						setTimeout(() => this.scheduleRefresh(), delay);
-						return;
-					}
-					this.retryCount = 0;
-					if (this.onRefresh) this.onRefresh(token);
-					this.scheduleRefresh();
-				});
-			}, wait);
 		}
 
 		static _xsrfFromSetCookie(rawHeaders) {
@@ -378,21 +483,22 @@
 	//      and Origin: https://duckduckgo.com  ->  JSON containing accessKey
 	//      (good for 30 min) and current tile-URL templates (where the `v`
 	//      build number lives).
-	class AppleTokenManager {
+	class AppleTokenManager extends TokenManagerBase {
 		constructor() {
+			super({ label: "Apple" });
 			this.accessKey = GM_getValue("apple_accesskey", null);
 			this.version = GM_getValue("apple_version", CFG.APPLE_DEFAULT_V);
 			this.expires = GM_getValue("apple_accesskey_expires", 0);
-			this.fetching = false;
-			this.pending = [];
-			this.refreshScheduled = false;
-			this.retryCount = 0;
-			/** Set by CustomTilesApp; called with (accessKey, version) on refresh. */
-			this.onRefresh = null;
 		}
 
 		isValid() {
-			return !!(this.accessKey && this.expires - Date.now() > CFG.REFRESH_MARGIN);
+			return !!(
+				this.accessKey && this.expires - Date.now() > CFG.REFRESH_MARGIN
+			);
+		}
+
+		_cached() {
+			return [this.accessKey, this.version];
 		}
 
 		save(accessKey, version, expiresMs) {
@@ -404,50 +510,29 @@
 			GM_setValue("apple_accesskey_expires", expiresMs);
 		}
 
-		get(cb) {
-			if (this.isValid()) { cb(null, this.accessKey, this.version); return; }
-			this.pending.push(cb);
-			if (this.fetching) return;
-			this.fetching = true;
-			this._doFetch((err, accessKey, version) => {
-				this.fetching = false;
-				const cbs = this.pending.splice(0);
-				cbs.forEach((fn) => fn(err, accessKey, version));
-				if (!err) {
-					this.retryCount = 0;
-					this.scheduleRefresh();
-				} else if (!this.refreshScheduled) {
-					const delay = Math.min(
-						CFG.RETRY_DELAY * Math.pow(2, this.retryCount),
-						CFG.RETRY_MAX_DELAY,
-					);
-					this.retryCount++;
-					setTimeout(() => this.scheduleRefresh(), delay);
-				}
-			});
-		}
-
-		_doFetch(done) {
+		// Two-step: pull a DDG-signed JWT, then exchange it at Apple's
+		// bootstrap endpoint for a 30-minute accessKey + current build `v`.
+		_fetch(done) {
 			GM_xmlhttpRequest({
 				method: "GET",
 				url: CFG.APPLE_DDG_TOKEN_URL,
 				headers: {
-					"Accept": "*/*",
-					"Referer": CFG.APPLE_DDG_ORIGIN + "/",
+					Accept: "*/*",
+					Referer: CFG.APPLE_DDG_ORIGIN + "/",
 				},
 				onload: (r) => {
 					if (r.status < 200 || r.status >= 300) {
-						done(new Error("[Apple] DDG token HTTP " + r.status), null);
+						done(new Error("[Apple] DDG token HTTP " + r.status));
 						return;
 					}
 					const jwt = (r.responseText || "").trim();
 					if (!/^[\w-]+\.[\w-]+\.[\w-]+$/.test(jwt)) {
-						done(new Error("[Apple] DDG returned invalid JWT"), null);
+						done(new Error("[Apple] DDG returned invalid JWT"));
 						return;
 					}
 					this._doBootstrap(jwt, done);
 				},
-				onerror: () => done(new Error("[Apple] DDG token network error"), null),
+				onerror: () => done(new Error("[Apple] DDG token network error")),
 			});
 		}
 
@@ -456,10 +541,10 @@
 				method: "GET",
 				url: CFG.APPLE_BOOTSTRAP_URL,
 				headers: {
-					"Accept": "*/*",
-					"Authorization": "Bearer " + jwt,
-					"Origin": CFG.APPLE_DDG_ORIGIN,
-					"Referer": CFG.APPLE_DDG_ORIGIN + "/",
+					Accept: "*/*",
+					Authorization: "Bearer " + jwt,
+					Origin: CFG.APPLE_DDG_ORIGIN,
+					Referer: CFG.APPLE_DDG_ORIGIN + "/",
 				},
 				onload: (r) => {
 					if (r.status < 200 || r.status >= 300) {
@@ -467,13 +552,13 @@
 							new Error(
 								`[Apple] Bootstrap HTTP ${r.status}: ${r.responseText.slice(0, 160)}`,
 							),
-							null,
 						);
 						return;
 					}
 					try {
 						const data = JSON.parse(r.responseText);
-						if (!data.accessKey) throw new Error("No accessKey in bootstrap response");
+						if (!data.accessKey)
+							throw new Error("No accessKey in bootstrap response");
 						// Pull the current `v` build number out of any tile-URL template
 						// in the response (tileSources, tileURLTemplate, etc.) so we
 						// don't drift onto a stale build.
@@ -482,50 +567,174 @@
 						const exp = Date.now() + CFG.APPLE_TOKEN_TTL;
 						this.save(data.accessKey, version, exp);
 						console.info(
-							"[CustomTiles] Apple accessKey acquired, v=" + version + ", expires",
+							"[CustomTiles] Apple accessKey acquired, v=" +
+								version +
+								", expires",
 							new Date(exp).toISOString(),
 						);
 						done(null, data.accessKey, version);
 					} catch (e) {
-						done(new Error("[Apple] Bootstrap parse: " + e.message), null);
+						done(new Error("[Apple] Bootstrap parse: " + e.message));
 					}
 				},
-				onerror: () => done(new Error("[Apple] Bootstrap network error"), null),
+				onerror: () => done(new Error("[Apple] Bootstrap network error")),
 			});
 		}
+	}
 
-		scheduleRefresh() {
-			if (this.refreshScheduled) return;
-			this.refreshScheduled = true;
-			const wait = Math.max(
-				30000,
-				this.expires - Date.now() - CFG.REFRESH_MARGIN,
-			);
-			setTimeout(() => {
-				this.refreshScheduled = false;
-				this._doFetch((err, accessKey, version) => {
-					if (err) {
-						const delay = Math.min(
-							CFG.RETRY_DELAY * Math.pow(2, this.retryCount),
-							CFG.RETRY_MAX_DELAY,
-						);
-						this.retryCount++;
-						console.warn(
-							"[CustomTiles] Apple token refresh failed:",
-							err.message,
-							"– retry in",
-							Math.round(delay / 60000),
-							"min",
-						);
-						setTimeout(() => this.scheduleRefresh(), delay);
-						return;
-					}
-					this.retryCount = 0;
-					if (this.onRefresh) this.onRefresh(accessKey, version);
-					this.scheduleRefresh();
-				});
-			}, wait);
+	/* -- HTTP + caching infrastructure ------------------------------------
+	 *
+	 *   gmGet(url, opts, cb)       — text/binary GET via GM_xmlhttpRequest
+	 *   gmJsonGet(url, opts, cb)   — same + JSON parse
+	 *   gmCancel(handle)           — abort an in-flight request
+	 *   gmCoalesce(key, fn)        — share results when multiple callers
+	 *                                kick off the same request concurrently
+	 *   cachedFetch(key, ttlMs, fetcher, cb)
+	 *                              — persistent (GM_setValue) cache with TTL
+	 *
+	 * These standardise what was ~12 ad-hoc GM_xmlhttpRequest call sites
+	 * with copy-pasted try/catch + timeout + header handling, eliminate
+	 * duplicate concurrent fetches for the same URL, and lift the address +
+	 * sales caches out of memory so they survive page reloads.
+	 */
+
+	function gmGet(url, opts, cb) {
+		if (typeof opts === "function") { cb = opts; opts = {}; }
+		opts = opts || {};
+		const handle = { aborted: false, _xhr: null };
+		const req = GM_xmlhttpRequest({
+			method: opts.method || "GET",
+			url,
+			headers: opts.headers || {},
+			data: opts.data,
+			responseType: opts.responseType,
+			timeout: opts.timeout || 25000,
+			onload: (r) => {
+				if (handle.aborted) return;
+				cb(null, r);
+			},
+			onerror: () => {
+				if (handle.aborted) return;
+				cb(new Error("network"), null);
+			},
+			ontimeout: () => {
+				if (handle.aborted) return;
+				cb(new Error("timeout"), null);
+			},
+		});
+		handle._xhr = req;
+		return handle;
+	}
+
+	function gmJsonGet(url, opts, cb) {
+		if (typeof opts === "function") { cb = opts; opts = {}; }
+		opts = opts || {};
+		const headers = Object.assign(
+			{ Accept: "application/json" }, opts.headers || {},
+		);
+		return gmGet(url, Object.assign({}, opts, { headers }), (err, r) => {
+			if (err) { cb(err, null, r); return; }
+			if (r.status < 200 || r.status >= 300) {
+				cb(new Error("http " + r.status), null, r);
+				return;
+			}
+			try { cb(null, JSON.parse(r.responseText), r); }
+			catch (e) { cb(new Error("parse: " + e.message), null, r); }
+		});
+	}
+
+	function gmCancel(handle) {
+		if (!handle || handle.aborted) return;
+		handle.aborted = true;
+		if (handle._xhr && typeof handle._xhr.abort === "function") {
+			try { handle._xhr.abort(); } catch (_) {}
 		}
+	}
+
+	// Coalesce concurrent fetchers by key. `fn(done)` is invoked once per
+	// key while a previous call is still pending; every caller's callback
+	// receives the same result. Used to dedupe e.g. address lookups when
+	// the user hovers fast across multiple parcels.
+	const _gmInflight = new Map();
+	function gmCoalesce(key, fn, cb) {
+		const existing = _gmInflight.get(key);
+		if (existing) { existing.push(cb); return; }
+		const waiters = [cb];
+		_gmInflight.set(key, waiters);
+		fn((err, value) => {
+			_gmInflight.delete(key);
+			for (const w of waiters) {
+				try { w(err, value); } catch (e) { console.error("[CustomTiles] cb error", e); }
+			}
+		});
+	}
+
+	// Persistent cache backed by GM_setValue. Entries are JSON-encoded
+	// `{ v, e }` where `e` is the absolute epoch-ms expiry (0 = never).
+	// `fetcher(done)` is called only on miss/expiry, with done(err, value).
+	// Cache writes are deduplicated via gmCoalesce so concurrent callers
+	// for the same key share one underlying fetch.
+	function cachedFetch(key, ttlMs, fetcher, cb) {
+		const storageKey = "dw_cache_" + key;
+		try {
+			const raw = GM_getValue(storageKey, null);
+			if (raw) {
+				const parsed = JSON.parse(raw);
+				if (parsed && (parsed.e === 0 || parsed.e > Date.now())) {
+					cb(null, parsed.v);
+					return;
+				}
+			}
+		} catch (_) {}
+		gmCoalesce(storageKey, fetcher, (err, value) => {
+			if (!err && value !== undefined) {
+				try {
+					const expires = ttlMs > 0 ? Date.now() + ttlMs : 0;
+					GM_setValue(storageKey, JSON.stringify({ v: value, e: expires }));
+				} catch (_) {}
+			}
+			cb(err, value);
+		});
+	}
+
+	// Common TTLs used across the script. Cadastre addresses essentially
+	// never change for a given lotplan, so 30 days is safe. Sales data
+	// updates monthly-ish, so 24 h is a reasonable middle ground.
+	const _CACHE_TTL = {
+		CAD_ADDRESS: 30 * 24 * 3600 * 1000,
+		OTH_LOCATIONS:  7 * 24 * 3600 * 1000,
+		OTH_PROPERTY:       6 * 3600 * 1000,
+		OTH_EVENTS:        24 * 3600 * 1000,
+	};
+
+	/* -- Tile geometry utilities ------------------------------------------ */
+
+	// Convert a Leaflet tile coordinate (z,x,y) into the geographic bbox the
+	// tile covers, in EPSG:4326 (lat/lng degrees). Used by every ArcGIS
+	// MapServer export-style provider.
+	function tileToBBox4326(z, x, y) {
+		const n = Math.pow(2, z);
+		const lon1 = (x / n) * 360 - 180;
+		const lon2 = ((x + 1) / n) * 360 - 180;
+		const lat1 =
+			(Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n))) * 180) / Math.PI;
+		const lat2 =
+			(Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 1)) / n))) * 180) / Math.PI;
+		return { minLon: lon1, minLat: lat2, maxLon: lon2, maxLat: lat1 };
+	}
+
+	// Same idea, but in EPSG:3857 Web Mercator metres — for WMS endpoints
+	// (and anything else that wants the bbox in metres).
+	const _MERC_ORIGIN = 20037508.3428;
+	const _MERC_FULL = 2 * _MERC_ORIGIN;
+	function tileToBBox3857(z, x, y) {
+		const n = Math.pow(2, z);
+		const tw = _MERC_FULL / n;
+		const west = -_MERC_ORIGIN + x * tw;
+		const east = west + tw;
+		const north = _MERC_ORIGIN - y * tw;
+		const south = north - tw;
+		return { west, south, east, north };
 	}
 
 	/* -- Layer Providers --------------------------------------------------- */
@@ -535,6 +744,204 @@
 		create() {
 			throw new Error(`${this.constructor.name}.create() not implemented`);
 		}
+	}
+
+	// Factory for the ArcGIS MapServer `export?` pattern shared by Mobile
+	// Coverage, QPWS, and Cadastre overlays. Renders a transparent PNG per
+	// Leaflet tile with the requested sublayers shown.
+	//
+	// opts: {
+	//   baseUrl:        MapServer URL (no trailing slash)
+	//   showLayers:     comma-separated sublayer IDs, e.g. "10,5,6"
+	//   pane:           Leaflet pane name to put tiles in
+	//   paneZIndex:     numeric z-index for the pane
+	//   opacity, minZoom, maxZoom, attribution, tileSize=256
+	//   clickThrough=true:  set pointer-events:none on the pane (so layers
+	//                       underneath still receive hover/click events)
+	//   onAdd, onRemove:    optional hooks receiving (layer, map) — used by
+	//                       Cadastre to attach hover-identify
+	// }
+	function makeArcgisExportTileLayer(opts) {
+		const tileSize = opts.tileSize || 256;
+		const clickThrough = opts.clickThrough !== false;
+
+		const Layer = L.TileLayer.extend({
+			onAdd(map) {
+				if (!map.getPane(opts.pane)) {
+					map.createPane(opts.pane);
+					const el = map.getPane(opts.pane);
+					el.style.zIndex = String(opts.paneZIndex);
+					if (clickThrough) el.style.pointerEvents = "none";
+				}
+				L.TileLayer.prototype.onAdd.call(this, map);
+				if (opts.onAdd) opts.onAdd(this, map);
+			},
+
+			onRemove(map) {
+				if (opts.onRemove) opts.onRemove(this, map);
+				L.TileLayer.prototype.onRemove.call(this, map);
+			},
+
+			getTileUrl(coords) {
+				const bb = tileToBBox4326(coords.z, coords.x, coords.y);
+				return (
+					`${opts.baseUrl}/export?` +
+					`bbox=${bb.minLon},${bb.minLat},${bb.maxLon},${bb.maxLat}` +
+					`&bboxSR=4326&imageSR=4326` +
+					(opts.showLayers != null ? `&layers=show:${opts.showLayers}` : "") +
+					`&size=${tileSize},${tileSize}` +
+					`&format=png32&transparent=true&f=image`
+				);
+			},
+		});
+
+		return new Layer("", {
+			opacity: opts.opacity,
+			attribution: opts.attribution,
+			minZoom: opts.minZoom,
+			maxZoom: opts.maxZoom,
+			tileSize,
+			pane: opts.pane,
+		});
+	}
+
+	// Global rate-limiter for Overpass API requests. Allows at most 2 concurrent
+	// fetches so Power Infrastructure and National Parks don't hammer the
+	// endpoint simultaneously when both are visible.
+	const _overpassQueue = (() => {
+		const MAX = 2;
+		let running = 0;
+		const pending = [];
+		function next() {
+			if (!pending.length || running >= MAX) return;
+			running++;
+			pending.shift()(function done() { running--; next(); });
+		}
+		return {
+			run(fn) { pending.push(fn); next(); },
+		};
+	})();
+
+	// Factory for OSM/Overpass-backed vector overlays (Power Infrastructure,
+	// National Parks, …). All such layers share the same skeleton: debounced
+	// per-bbox fetch, render into a layerGroup, clear-and-redraw on view
+	// change. A generation counter drops stale responses so fast panning
+	// can't paint old data on top of new.
+	//
+	// opts: {
+	//   label:        used in console warnings
+	//   pane:         Leaflet pane name
+	//   paneZIndex:   numeric z-index
+	//   minZoom:      below this, the group is cleared and no fetch fires
+	//   buildQuery(bbox):       returns the Overpass QL string
+	//   render(group, elements): paints features into group (already cleared)
+	//   attribution:  static attribution string
+	//   debounceMs=400, timeoutMs=60000, padBounds=0, clickThrough=true
+	// }
+	function makeOverpassLayer(opts) {
+		const OVERPASS = "https://overpass.kumi.systems/api/interpreter";
+		const debounceMs = opts.debounceMs || 400;
+		const timeoutMs = opts.timeoutMs || 60000;
+		const padBounds = opts.padBounds || 0;
+		const clickThrough = opts.clickThrough !== false;
+
+		const Layer = L.Layer.extend({
+			initialize() {
+				this._group = null;
+				this._debounce = null;
+				this._lastBbox = null;
+				this._gen = 0;
+			},
+
+			onAdd(map) {
+				if (!map.getPane(opts.pane)) {
+					map.createPane(opts.pane);
+					const el = map.getPane(opts.pane);
+					el.style.zIndex = String(opts.paneZIndex);
+					if (clickThrough) el.style.pointerEvents = "none";
+				}
+				this._group = L.layerGroup().addTo(map);
+				this._fetch();
+				map.on("moveend zoomend", this._onViewChange, this);
+			},
+
+			onRemove(map) {
+				clearTimeout(this._debounce);
+				this._debounce = null;
+				this._gen++; // invalidate any in-flight response
+				map.off("moveend zoomend", this._onViewChange, this);
+				if (this._group) {
+					this._group.remove();
+					this._group = null;
+				}
+			},
+
+			_onViewChange() {
+				clearTimeout(this._debounce);
+				this._debounce = setTimeout(() => this._fetch(), debounceMs);
+			},
+
+			_fetch() {
+				const map = this._map;
+				if (!map || !this._group) return;
+				if (map.getZoom() < opts.minZoom) {
+					this._group.clearLayers();
+					this._lastBbox = null;
+					return;
+				}
+
+				const b = padBounds ? map.getBounds().pad(padBounds) : map.getBounds();
+				const bbox = `${b.getSouth().toFixed(4)},${b.getWest().toFixed(4)},${b.getNorth().toFixed(4)},${b.getEast().toFixed(4)}`;
+				if (bbox === this._lastBbox) return;
+				this._lastBbox = bbox;
+
+				const myGen = ++this._gen;
+				const zoom  = map.getZoom();
+				_overpassQueue.run((done) => {
+					// Bail immediately if the view has already changed.
+					if (myGen !== this._gen) { done(); return; }
+					GM_xmlhttpRequest({
+						method:  "POST",
+						url:     OVERPASS,
+						headers: { "Content-Type": "application/x-www-form-urlencoded" },
+						data:    "data=" + encodeURIComponent(opts.buildQuery(bbox, zoom)),
+						timeout: timeoutMs,
+						onload: (r) => {
+							done();
+							if (myGen !== this._gen || !this._group) return;
+							if (r.status !== 200) return;
+							try {
+								const json = JSON.parse(r.responseText);
+								// Deduplicate by OSM type+id — ways belonging to a
+								// relation are returned twice by `out geom tags`.
+								const seen = new Set();
+								const elements = (json.elements || []).filter(el => {
+									const key = el.type + "/" + el.id;
+									if (seen.has(key)) return false;
+									seen.add(key);
+									return true;
+								});
+								this._group.clearLayers();
+								opts.render(this._group, elements, zoom);
+							} catch (e) {
+								console.warn(`[CustomTiles] ${opts.label} parse error`, e);
+							}
+						},
+						onerror: (e) => {
+							done();
+							if (myGen === this._gen)
+								console.warn(`[CustomTiles] ${opts.label} request error`, e);
+						},
+					});
+				});
+			},
+
+			getAttribution() {
+				return opts.attribution;
+			},
+		});
+
+		return new Layer();
 	}
 
 	// -- QLD Globe -----------------------------------------------------------
@@ -596,14 +1003,20 @@
 		}
 
 		static tileUrl(accessKey, version) {
-			return CFG.APPLE_TILE_BASE +
-				"&v=" + encodeURIComponent(version || CFG.APPLE_DEFAULT_V) +
-				(accessKey ? "&accessKey=" + encodeURIComponent(accessKey) : "");
+			return (
+				CFG.APPLE_TILE_BASE +
+				"&v=" +
+				encodeURIComponent(version || CFG.APPLE_DEFAULT_V) +
+				(accessKey ? "&accessKey=" + encodeURIComponent(accessKey) : "")
+			);
 		}
 
 		create() {
 			const url = this._token.isValid()
-				? AppleMapsLayerProvider.tileUrl(this._token.accessKey, this._token.version)
+				? AppleMapsLayerProvider.tileUrl(
+						this._token.accessKey,
+						this._token.version,
+					)
 				: BLANK_TILE;
 			const layer = L.tileLayer(url, {
 				maxNativeZoom: 19,
@@ -614,7 +1027,8 @@
 			});
 			if (!this._token.isValid()) {
 				this._token.get((err, accessKey, version) => {
-					if (!err) layer.setUrl(AppleMapsLayerProvider.tileUrl(accessKey, version));
+					if (!err)
+						layer.setUrl(AppleMapsLayerProvider.tileUrl(accessKey, version));
 				});
 			}
 			return layer;
@@ -635,19 +1049,26 @@
 					img.setAttribute("role", "presentation");
 					GM_xmlhttpRequest({
 						method: "GET",
-						url: TILE_BASE + coords.z + "/" + coords.x + "/" + coords.y + ".png",
+						url:
+							TILE_BASE + coords.z + "/" + coords.x + "/" + coords.y + ".png",
 						responseType: "arraybuffer",
 						headers: {
-							"Origin": spoofOrigin,
-							"Referer": spoofOrigin + "/",
-							"Accept": "image/png,image/*,*/*;q=0.8",
+							Origin: spoofOrigin,
+							Referer: spoofOrigin + "/",
+							Accept: "image/png,image/*,*/*;q=0.8",
 						},
 						onload: (r) => {
 							if (r.status === 200) {
 								const blob = new Blob([r.response], { type: "image/png" });
 								const objUrl = URL.createObjectURL(blob);
-								img.onload = () => { URL.revokeObjectURL(objUrl); done(null, img); };
-								img.onerror = () => { URL.revokeObjectURL(objUrl); done(new Error("Stamen decode failed"), img); };
+								img.onload = () => {
+									URL.revokeObjectURL(objUrl);
+									done(null, img);
+								};
+								img.onerror = () => {
+									URL.revokeObjectURL(objUrl);
+									done(new Error("Stamen decode failed"), img);
+								};
 								img.src = objUrl;
 							} else {
 								done(new Error("Stamen HTTP " + r.status), img);
@@ -689,7 +1110,8 @@
 			return (
 				"https://wayback.maptiles.arcgis.com/arcgis/rest/services/" +
 				"World_Imagery/WMTS/1.0.0/default028mm/MapServer/tile/" +
-				releaseNum + "/{z}/{y}/{x}"
+				releaseNum +
+				"/{z}/{y}/{x}"
 			);
 		}
 
@@ -708,12 +1130,20 @@
 								.filter(([, item]) => item.itemTitle)
 								.map(([key, item]) => {
 									const releaseNum = parseInt(key, 10);
-									const label = item.itemTitle.replace(/^World Imagery \(Wayback /, "").replace(/\)$/, "");
+									const label = item.itemTitle
+										.replace(/^World Imagery \(Wayback /, "")
+										.replace(/\)$/, "");
 									return { label, releaseNum, url: this._tileUrl(releaseNum) };
 								});
-							releases.sort((a, b) => (a.label < b.label ? 1 : a.label > b.label ? -1 : 0));
+							releases.sort((a, b) =>
+								a.label < b.label ? 1 : a.label > b.label ? -1 : 0,
+							);
 							this._releases = releases;
-							console.info("[CustomTiles] Wayback:", releases.length, "releases loaded");
+							console.info(
+								"[CustomTiles] Wayback:",
+								releases.length,
+								"releases loaded",
+							);
 						} else {
 							console.warn("[CustomTiles] Wayback catalog HTTP", r.status);
 						}
@@ -743,15 +1173,17 @@
 			});
 			this._layerRef = layer;
 
-			layer.getHistCount = () => (provider._releases ? provider._releases.length : 0);
-			layer.getHistIdx   = () => provider._idx;
+			layer.getHistCount = () =>
+				provider._releases ? provider._releases.length : 0;
+			layer.getHistIdx = () => provider._idx;
 			layer.getHistLabel = (i) => {
 				if (!provider._releases) return null;
 				return (provider._releases[i ?? provider._idx] || {}).label || null;
 			};
 			layer.setHistIdx = (i) => {
 				if (!provider._releases) return;
-				if (i < 0 || i >= provider._releases.length || i === provider._idx) return;
+				if (i < 0 || i >= provider._releases.length || i === provider._idx)
+					return;
 				provider._idx = i;
 				layer.setUrl(provider._releases[i].url);
 				layer.fire("histchange");
@@ -793,10 +1225,26 @@
 			const token = this._token;
 			const DYN_LAYERS = encodeURIComponent(
 				JSON.stringify([
-					{ id: 21, source: { type: "mapLayer", mapLayerId: 21 }, drawingInfo: { showLabels: true } },
-					{ id: 22, source: { type: "mapLayer", mapLayerId: 22 }, drawingInfo: { showLabels: true } },
-					{ id: 23, source: { type: "mapLayer", mapLayerId: 23 }, drawingInfo: { showLabels: true } },
-					{ id: 10, source: { type: "mapLayer", mapLayerId: 10 }, drawingInfo: { showLabels: true } },
+					{
+						id: 21,
+						source: { type: "mapLayer", mapLayerId: 21 },
+						drawingInfo: { showLabels: true },
+					},
+					{
+						id: 22,
+						source: { type: "mapLayer", mapLayerId: 22 },
+						drawingInfo: { showLabels: true },
+					},
+					{
+						id: 23,
+						source: { type: "mapLayer", mapLayerId: 23 },
+						drawingInfo: { showLabels: true },
+					},
+					{
+						id: 10,
+						source: { type: "mapLayer", mapLayerId: 10 },
+						drawingInfo: { showLabels: true },
+					},
 				]),
 			);
 
@@ -811,7 +1259,9 @@
 					const north = MERC_ORIGIN - coords.y * tw;
 					const south = north - tw;
 					const bbox = encodeURIComponent(`${west},${south},${east},${north}`);
-					const tok = token.token ? "&token=" + encodeURIComponent(token.token) : "";
+					const tok = token.token
+						? "&token=" + encodeURIComponent(token.token)
+						: "";
 					img.onload = () => done(null, img);
 					img.onerror = () => done(new Error("Roads tile failed"), img);
 					img.src =
@@ -834,7 +1284,6 @@
 		}
 	}
 
-
 	// -- QLD Historical -------------------------------------------------------
 
 	class QldHistoricalLayerProvider extends LayerProvider {
@@ -853,7 +1302,10 @@
 		}
 
 		_queryCatalog(map, cb) {
-			if (this._currentOid !== null) { cb(this._currentOid); return; }
+			if (this._currentOid !== null) {
+				cb(this._currentOid);
+				return;
+			}
 			this._fetchPending.push(cb);
 			if (this._fetching) return;
 			this._fetching = true;
@@ -862,21 +1314,38 @@
 			this._lastCenter = c;
 
 			const geomParam =
-				"?geometry=" + encodeURIComponent(JSON.stringify({ x: c.lng, y: c.lat, spatialReference: { wkid: 4326 } })) +
+				"?geometry=" +
+				encodeURIComponent(
+					JSON.stringify({
+						x: c.lng,
+						y: c.lat,
+						spatialReference: { wkid: 4326 },
+					}),
+				) +
 				"&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects" +
 				"&outFields=objectid,name,year,title,capturestart" +
 				"&returnGeometry=false&orderByFields=capturestart+DESC&f=json";
 
-			const parseCaptures = (responseText, service, needsToken, mosaicWhere) => {
+			const parseCaptures = (
+				responseText,
+				service,
+				needsToken,
+				mosaicWhere,
+			) => {
 				try {
 					const data = JSON.parse(responseText);
 					return (data.features || [])
 						.map((f) => ({
 							objectid: f.attributes.objectid,
-							title: f.attributes.title || f.attributes.name || String(f.attributes.year || ""),
+							title:
+								f.attributes.title ||
+								f.attributes.name ||
+								String(f.attributes.year || ""),
 							captureDate: f.attributes.capturestart
 								? new Date(f.attributes.capturestart).toISOString().slice(0, 10)
-								: (f.attributes.year ? String(f.attributes.year) : null),
+								: f.attributes.year
+									? String(f.attributes.year)
+									: null,
 							service,
 							needsToken,
 							mosaicWhere,
@@ -900,14 +1369,22 @@
 				});
 				this._captures = all;
 				if (this._captures.length) {
-					console.info("[CustomTiles] QLD Historical:", this._captures.length,
-						"captures, latest:", this._captures[0].captureDate || this._captures[0].title);
+					console.info(
+						"[CustomTiles] QLD Historical:",
+						this._captures.length,
+						"captures, latest:",
+						this._captures[0].captureDate || this._captures[0].title,
+					);
 				} else {
-					console.warn("[CustomTiles] QLD Historical: no coverage at",
-						c.lng.toFixed(4), c.lat.toFixed(4));
+					console.warn(
+						"[CustomTiles] QLD Historical: no coverage at",
+						c.lng.toFixed(4),
+						c.lat.toFixed(4),
+					);
 				}
 				this._captureIdx = 0;
-				this._currentOid = (this._captures[0] && this._captures[0].objectid) || null;
+				this._currentOid =
+					(this._captures[0] && this._captures[0].objectid) || null;
 				this._fetchPending.splice(0).forEach((fn) => fn(this._currentOid));
 				if (this._gridLayerRef) this._gridLayerRef.fire("capturechange");
 			};
@@ -919,19 +1396,30 @@
 			// Query 1: AerialOrtho (no token, public)
 			GM_xmlhttpRequest({
 				method: "GET",
-				url: CFG.QLD_HIST_SERVICE + "/query" + geomParam + "&where=category%3D1",
+				url:
+					CFG.QLD_HIST_SERVICE + "/query" + geomParam + "&where=category%3D1",
 				headers: { Origin: "https://qldglobe.information.qld.gov.au" },
 				onload: (r) => {
 					if (r.status === 200) {
-						orthoCaptures = parseCaptures(r.responseText, CFG.QLD_HIST_SERVICE, false, "category=1");
+						orthoCaptures = parseCaptures(
+							r.responseText,
+							CFG.QLD_HIST_SERVICE,
+							false,
+							"category=1",
+						);
 					} else {
-						console.error("[CustomTiles] QLD Historical ortho query HTTP", r.status);
+						console.error(
+							"[CustomTiles] QLD Historical ortho query HTTP",
+							r.status,
+						);
 						orthoCaptures = [];
 					}
 					tryFinish();
 				},
 				onerror: () => {
-					console.error("[CustomTiles] QLD Historical ortho query network error");
+					console.error(
+						"[CustomTiles] QLD Historical ortho query network error",
+					);
 					orthoCaptures = [];
 					tryFinish();
 				},
@@ -947,7 +1435,12 @@
 				const tokenParam = tok ? "&token=" + encodeURIComponent(tok) : "";
 				GM_xmlhttpRequest({
 					method: "GET",
-					url: CFG.QLD_HIST_PHOTOS_SERVICE + "/query" + geomParam + "&where=1%3D1" + tokenParam,
+					url:
+						CFG.QLD_HIST_PHOTOS_SERVICE +
+						"/query" +
+						geomParam +
+						"&where=1%3D1" +
+						tokenParam,
 					headers: {
 						Origin: "https://qldglobe.information.qld.gov.au",
 						Referer: "https://qldglobe.information.qld.gov.au/",
@@ -955,7 +1448,8 @@
 					onload: (r) => {
 						if (r.status !== 200) {
 							console.warn(
-								"[CustomTiles] QLD Historical photos HTTP", r.status,
+								"[CustomTiles] QLD Historical photos HTTP",
+								r.status,
 								tok ? "(token sent)" : "(no token)",
 								r.responseText.slice(0, 200),
 							);
@@ -968,21 +1462,36 @@
 							if (data.error) {
 								console.warn(
 									"[CustomTiles] QLD Historical photos service error:",
-									data.error.code, data.error.message,
-									tok ? "(token sent — may be expired or wrong scope)" : "(no token)",
+									data.error.code,
+									data.error.message,
+									tok
+										? "(token sent — may be expired or wrong scope)"
+										: "(no token)",
 								);
 								photosCaptures = [];
 							} else {
-								photosCaptures = parseCaptures(r.responseText, CFG.QLD_HIST_PHOTOS_SERVICE, !!tok, null);
+								photosCaptures = parseCaptures(
+									r.responseText,
+									CFG.QLD_HIST_PHOTOS_SERVICE,
+									!!tok,
+									null,
+								);
 								const total = (data.features || []).length;
 								const limited = !!data.exceededTransferLimit;
 								console.info(
-									"[CustomTiles] QLD Historical photos:", total, "features",
-									limited ? "(LIMITED — older captures cut off, see maxRecordCount)" : "",
+									"[CustomTiles] QLD Historical photos:",
+									total,
+									"features",
+									limited
+										? "(LIMITED — older captures cut off, see maxRecordCount)"
+										: "",
 								);
 							}
 						} catch (e) {
-							console.error("[CustomTiles] QLD Historical photos parse:", e.message);
+							console.error(
+								"[CustomTiles] QLD Historical photos parse:",
+								e.message,
+							);
 							photosCaptures = [];
 						}
 						tryFinish();
@@ -1019,34 +1528,48 @@
 					const east = west + tw;
 					const north = MERC_ORIGIN - coords.y * tw;
 					const south = north - tw;
-					const bbox = encodeURIComponent(west + "," + south + "," + east + "," + north);
+					const bbox = encodeURIComponent(
+						west + "," + south + "," + east + "," + north,
+					);
 
 					const myGen = provider._captureGeneration;
 					provider._queryCatalog(map, (oid) => {
-						if (!oid || provider._captureGeneration !== myGen) { done(null, img); return; }
+						if (!oid || provider._captureGeneration !== myGen) {
+							done(null, img);
+							return;
+						}
 						const cap = provider._captures[provider._captureIdx];
 						const svc = cap ? cap.service : CFG.QLD_HIST_SERVICE;
 						const mosaicWhere = cap ? cap.mosaicWhere : "category=1";
 						const needsToken = cap && cap.needsToken;
-						const tokenStr = needsToken && provider._qldToken && provider._qldToken.token
-							? "&token=" + encodeURIComponent(provider._qldToken.token)
-							: "";
+						const tokenStr =
+							needsToken && provider._qldToken && provider._qldToken.token
+								? "&token=" + encodeURIComponent(provider._qldToken.token)
+								: "";
 						const mosaicRuleObj = {
 							mosaicMethod: "esriMosaicLockRaster",
 							lockRasterIds: [oid],
 							ascending: true,
 						};
 						if (mosaicWhere) mosaicRuleObj.where = mosaicWhere;
-						const mosaicRule = encodeURIComponent(JSON.stringify(mosaicRuleObj));
+						const mosaicRule = encodeURIComponent(
+							JSON.stringify(mosaicRuleObj),
+						);
 						img.onload = () => done(null, img);
 						img.onerror = () => done(new Error("QLD Hist tile failed"), img);
 						img.src =
 							svc +
-							"/exportImage?bbox=" + bbox +
+							"/exportImage?bbox=" +
+							bbox +
 							"&bboxSR=102100&imageSR=102100" +
-							"&size=" + TILE_PX + "%2C" + TILE_PX +
-							"&format=jpg&mosaicRule=" + mosaicRule +
-							"&f=image" + tokenStr;
+							"&size=" +
+							TILE_PX +
+							"%2C" +
+							TILE_PX +
+							"&format=jpg&mosaicRule=" +
+							mosaicRule +
+							"&f=image" +
+							tokenStr;
 					});
 					return img;
 				},
@@ -1063,21 +1586,34 @@
 			});
 			this._gridLayerRef = gridLayer;
 
-			gridLayer.getCaptureCount = function () { return provider._captures.length; };
-			gridLayer.getCaptureIdx = function () { return provider._captureIdx; };
+			gridLayer.getCaptureCount = function () {
+				return provider._captures.length;
+			};
+			gridLayer.getCaptureIdx = function () {
+				return provider._captureIdx;
+			};
 			gridLayer.getCaptureDate = function (idx) {
-				const c = provider._captures[idx !== undefined ? idx : provider._captureIdx];
-				return c ? (c.captureDate || null) : null;
+				const c =
+					provider._captures[idx !== undefined ? idx : provider._captureIdx];
+				return c ? c.captureDate || null : null;
 			};
 			gridLayer.setCapture = function (idx) {
-				if (idx < 0 || idx >= provider._captures.length || idx === provider._captureIdx) return;
+				if (
+					idx < 0 ||
+					idx >= provider._captures.length ||
+					idx === provider._captureIdx
+				)
+					return;
 				provider._captureIdx = idx;
 				provider._currentOid = provider._captures[idx].objectid;
 				provider._captureGeneration++;
 				this.fire("capturechange");
 				if (provider._redrawTimer) clearTimeout(provider._redrawTimer);
 				const self = this;
-				provider._redrawTimer = setTimeout(() => { provider._redrawTimer = null; self.redraw(); }, 300);
+				provider._redrawTimer = setTimeout(() => {
+					provider._redrawTimer = null;
+					self.redraw();
+				}, 300);
 			};
 
 			gridLayer.on("add", function () {
@@ -1085,7 +1621,9 @@
 				const onMoveEnd = () => {
 					if (!provider._lastCenter) return;
 					const c = m.getCenter();
-					const dist = Math.abs(c.lng - provider._lastCenter.lng) + Math.abs(c.lat - provider._lastCenter.lat);
+					const dist =
+						Math.abs(c.lng - provider._lastCenter.lng) +
+						Math.abs(c.lat - provider._lastCenter.lat);
 					if (dist > 0.1) {
 						provider._currentOid = null;
 						provider._captures = [];
@@ -1106,7 +1644,6 @@
 			return gridLayer;
 		}
 	}
-
 
 	// -- Strava Heatmap (anonymous tiles only) ----------------------------
 
@@ -1129,7 +1666,13 @@
 
 	class GarminHeatmapLayerProvider extends LayerProvider {
 		create() {
-			const ACTIVITIES = ["RUNNING", "HIKING", "TRAIL_RUNNING", "ROAD_CYCLING", "MOUNTAIN_BIKING"];
+			const ACTIVITIES = [
+				"RUNNING",
+				"HIKING",
+				"TRAIL_RUNNING",
+				"ROAD_CYCLING",
+				"MOUNTAIN_BIKING",
+			];
 
 			const GarminHeatGrid = L.GridLayer.extend({
 				createTile(coords, done) {
@@ -1155,7 +1698,14 @@
 					for (const activity of ACTIVITIES) {
 						const url =
 							"https://connecttile.garmin.com/" +
-							activity + "/" + coords.z + "/" + coords.x + "/" + coords.y + ".png";
+							activity +
+							"/" +
+							coords.z +
+							"/" +
+							coords.x +
+							"/" +
+							coords.y +
+							".png";
 						GM_xmlhttpRequest({
 							method: "GET",
 							url: url,
@@ -1172,7 +1722,11 @@
 											URL.revokeObjectURL(objUrl);
 											finish();
 										};
-										img.onerror = () => { URL.revokeObjectURL(objUrl); failed++; finish(); };
+										img.onerror = () => {
+											URL.revokeObjectURL(objUrl);
+											failed++;
+											finish();
+										};
 										img.src = objUrl;
 									} catch (e) {
 										failed++;
@@ -1183,7 +1737,10 @@
 									finish();
 								}
 							},
-							onerror: () => { failed++; finish(); },
+							onerror: () => {
+								failed++;
+								finish();
+							},
 						});
 					}
 
@@ -1243,9 +1800,14 @@
 					clearTimeout(this._timer);
 					map.off("moveend", this._schedule, this);
 					map.off("zoomend", this._schedule, this);
-					this._guards.forEach(g => { g.dead = true; });
+					this._guards.forEach((g) => {
+						g.dead = true;
+					});
 					this._guards = [];
-					if (this._group) { this._group.remove(); this._group = null; }
+					if (this._group) {
+						this._group.remove();
+						this._group = null;
+					}
 				},
 
 				_schedule() {
@@ -1257,16 +1819,25 @@
 					const self = this;
 					const map = this._map;
 					if (!map || !this._group) return;
-					if (map.getZoom() < 13) { this._group.clearLayers(); return; }
+					if (map.getZoom() < 13) {
+						this._group.clearLayers();
+						return;
+					}
 
 					const b = map.getBounds();
-					const geomParam = encodeURIComponent(JSON.stringify({
-						xmin: b.getWest(), ymin: b.getSouth(),
-						xmax: b.getEast(), ymax: b.getNorth(),
-						spatialReference: { wkid: 4326 },
-					}));
+					const geomParam = encodeURIComponent(
+						JSON.stringify({
+							xmin: b.getWest(),
+							ymin: b.getSouth(),
+							xmax: b.getEast(),
+							ymax: b.getNorth(),
+							spatialReference: { wkid: 4326 },
+						}),
+					);
 
-					this._guards.forEach(g => { g.dead = true; });
+					this._guards.forEach((g) => {
+						g.dead = true;
+					});
 					const guards = this._cfgs.map(() => ({ dead: false }));
 					this._guards = guards;
 
@@ -1277,10 +1848,12 @@
 						const guard = guards[i];
 						const url =
 							cfg.url +
-							"/query?geometry=" + geomParam +
+							"/query?geometry=" +
+							geomParam +
 							"&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326" +
 							"&spatialRel=esriSpatialRelIntersects" +
-							"&outFields=" + encodeURIComponent(cfg.fields || "ObjectId") +
+							"&outFields=" +
+							encodeURIComponent(cfg.fields || "ObjectId") +
 							"&returnGeometry=true&f=geojson";
 
 						GM_xmlhttpRequest({
@@ -1288,7 +1861,9 @@
 							url: url,
 							onload(resp) {
 								if (guard.dead) return;
-								try { results[i] = { cfg, data: JSON.parse(resp.responseText) }; } catch (_) {}
+								try {
+									results[i] = { cfg, data: JSON.parse(resp.responseText) };
+								} catch (_) {}
 								if (--remaining === 0) self._render(results, guards);
 							},
 							onerror() {
@@ -1300,17 +1875,22 @@
 				},
 
 				_render(results, guards) {
-					if (!this._group || guards.some(g => g.dead)) return;
+					if (!this._group || guards.some((g) => g.dead)) return;
 					this._group.clearLayers();
 					for (const r of results) {
 						if (!r || !r.data || r.data.error || !r.data.features) continue;
 						const cfg = r.cfg;
 						L.geoJSON(r.data, {
 							pane: "dwUWPane",
-							style: typeof cfg.style === "function" ? cfg.style : () => cfg.style,
+							style:
+								typeof cfg.style === "function" ? cfg.style : () => cfg.style,
 							pointToLayer: (ft, ll) => {
-								const s = typeof cfg.style === "function" ? cfg.style(ft) : cfg.style;
-								return L.circleMarker(ll, Object.assign({ radius: 4, pane: "dwUWPane" }, s));
+								const s =
+									typeof cfg.style === "function" ? cfg.style(ft) : cfg.style;
+								return L.circleMarker(
+									ll,
+									Object.assign({ radius: 4, pane: "dwUWPane" }, s),
+								);
 							},
 						}).addTo(this._group);
 					}
@@ -1329,14 +1909,14 @@
 
 	class FlightsLayerProvider extends LayerProvider {
 		create() {
-			const POLL_MS  = 10000;
+			const POLL_MS = 10000;
 			const MIN_ZOOM = 1;
-			const OPENSKY  = "https://opensky-network.org/api/states/all";
+			const OPENSKY = "https://opensky-network.org/api/states/all";
 
 			const FlightsLayer = L.Layer.extend({
 				initialize() {
-					this._group    = null;
-					this._timer    = null;
+					this._group = null;
+					this._timer = null;
 					this._debounce = null;
 				},
 
@@ -1355,7 +1935,10 @@
 					clearTimeout(this._debounce);
 					this._timer = this._debounce = null;
 					map.off("moveend zoomend", this._onViewChange, this);
-					if (this._group) { this._group.remove(); this._group = null; }
+					if (this._group) {
+						this._group.remove();
+						this._group = null;
+					}
 				},
 
 				_startPoll() {
@@ -1374,20 +1957,29 @@
 				_fetch() {
 					const map = this._map;
 					if (!map || !this._group) return;
-					if (map.getZoom() < MIN_ZOOM) { this._group.clearLayers(); return; }
-					const b   = map.getBounds();
-					const url = OPENSKY +
-						"?lamin=" + b.getSouth().toFixed(3) +
-						"&lomin=" + b.getWest().toFixed(3) +
-						"&lamax=" + b.getNorth().toFixed(3) +
-						"&lomax=" + b.getEast().toFixed(3);
+					if (map.getZoom() < MIN_ZOOM) {
+						this._group.clearLayers();
+						return;
+					}
+					const b = map.getBounds();
+					const url =
+						OPENSKY +
+						"?lamin=" +
+						b.getSouth().toFixed(3) +
+						"&lomin=" +
+						b.getWest().toFixed(3) +
+						"&lamax=" +
+						b.getNorth().toFixed(3) +
+						"&lomax=" +
+						b.getEast().toFixed(3);
 					GM_xmlhttpRequest({
 						method: "GET",
 						url,
 						onload: (r) => {
 							if (r.status === 200 && this._group) {
-								try { this._render(JSON.parse(r.responseText).states || []); }
-								catch (_) {}
+								try {
+									this._render(JSON.parse(r.responseText).states || []);
+								} catch (_) {}
 							}
 						},
 						onerror: () => {},
@@ -1398,16 +1990,21 @@
 					if (!this._group) return;
 					this._group.clearLayers();
 					for (const s of states) {
-						const lon = s[5], lat = s[6];
+						const lon = s[5],
+							lat = s[6];
 						if (lon == null || lat == null) continue;
-						const callsign  = (s[1] || "").trim() || s[0];
-						const track     = s[10] || 0;
-						const onGround  = s[8];
-						const altM      = s[7];
-						const speedMs   = s[9];
-						const country   = s[2] || "";
-						const altStr    = altM    != null ? Math.round(altM)            + "\u202fm" : "\u2014";
-						const spdStr    = speedMs != null ? Math.round(speedMs * 1.944) + "\u202fkts" : "\u2014";
+						const callsign = (s[1] || "").trim() || s[0];
+						const track = s[10] || 0;
+						const onGround = s[8];
+						const altM = s[7];
+						const speedMs = s[9];
+						const country = s[2] || "";
+						const altStr =
+							altM != null ? Math.round(altM) + "\u202fm" : "\u2014";
+						const spdStr =
+							speedMs != null
+								? Math.round(speedMs * 1.944) + "\u202fkts"
+								: "\u2014";
 						const fill = onGround ? "#aaa" : "#FFE066";
 						const stroke = onGround ? "#666" : "#444";
 						const plane =
@@ -1420,20 +2017,24 @@
 						const icon = L.divIcon({
 							className: "dw-flight-icon",
 							html: plane,
-							iconSize:   [20, 20],
+							iconSize: [20, 20],
 							iconAnchor: [10, 10],
 						});
-						L.marker([lat, lon], { icon, pane: "dwFlightsPane", interactive: true })
+						L.marker([lat, lon], {
+							icon,
+							pane: "dwFlightsPane",
+							interactive: true,
+						})
 							.bindTooltip(
 								`<b>${callsign}</b><br>Alt: ${altStr}&nbsp; Speed: ${spdStr}<br>${country}`,
-								{ className: "dw-flight-tip", sticky: true }
+								{ className: "dw-flight-tip", sticky: true },
 							)
 							.addTo(this._group);
 					}
 				},
 
 				getAttribution() {
-					return "Flights \u00a9 <a href=\"https://opensky-network.org\" target=\"_blank\" rel=\"noreferrer\">OpenSky Network</a>";
+					return 'Flights \u00a9 <a href="https://opensky-network.org" target="_blank" rel="noreferrer">OpenSky Network</a>';
 				},
 			});
 
@@ -1445,43 +2046,48 @@
 
 	class MarineTrafficLayerProvider extends LayerProvider {
 		create() {
-			const POLL_MS   = 20000;
-			const MIN_ZOOM  = 1;
+			const POLL_MS = 20000;
+			const MIN_ZOOM = 1;
 			const MAX_TILES = 25;
-			const MT_BASE   = "https://www.marinetraffic.com/getData/get_data_json_4";
+			const MT_BASE = "https://www.marinetraffic.com/getData/get_data_json_4";
 
 			function latLonToTile(lat, lon, z) {
 				lat = Math.max(-85.0511, Math.min(85.0511, lat));
-				const n   = Math.pow(2, z);
-				const x   = Math.floor((lon + 180) / 360 * n);
-				const rad = lat * Math.PI / 180;
-				const y   = Math.floor((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * n);
-				return { x: Math.max(0, Math.min(n - 1, x)), y: Math.max(0, Math.min(n - 1, y)) };
+				const n = Math.pow(2, z);
+				const x = Math.floor(((lon + 180) / 360) * n);
+				const rad = (lat * Math.PI) / 180;
+				const y = Math.floor(
+					((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * n,
+				);
+				return {
+					x: Math.max(0, Math.min(n - 1, x)),
+					y: Math.max(0, Math.min(n - 1, y)),
+				};
 			}
 
 			function shipColor(type) {
 				const t = parseInt(type) || 0;
 				// MarineTraffic internal single-digit codes
-				if (t === 7) return "#5B9BD5";   // Cargo
-				if (t === 8) return "#D9534F";   // Tanker
-				if (t === 6) return "#9B59B6";   // Passenger
-				if (t === 4) return "#F0A500";   // High speed craft
-				if (t === 3) return "#2ECC71";   // Fishing / special
-				if (t === 5) return "#2980B9";   // Sailing / pleasure
+				if (t === 7) return "#5B9BD5"; // Cargo
+				if (t === 8) return "#D9534F"; // Tanker
+				if (t === 6) return "#9B59B6"; // Passenger
+				if (t === 4) return "#F0A500"; // High speed craft
+				if (t === 3) return "#2ECC71"; // Fishing / special
+				if (t === 5) return "#2980B9"; // Sailing / pleasure
 				// AIS standard codes (fallback)
-				if (t >= 70 && t < 80) return "#5B9BD5";  // Cargo
-				if (t >= 80 && t < 90) return "#D9534F";  // Tanker
-				if (t >= 60 && t < 70) return "#9B59B6";  // Passenger
-				if (t >= 40 && t < 50) return "#F0A500";  // High speed craft
-				if (t === 30)          return "#2ECC71";  // Fishing
+				if (t >= 70 && t < 80) return "#5B9BD5"; // Cargo
+				if (t >= 80 && t < 90) return "#D9534F"; // Tanker
+				if (t >= 60 && t < 70) return "#9B59B6"; // Passenger
+				if (t >= 40 && t < 50) return "#F0A500"; // High speed craft
+				if (t === 30) return "#2ECC71"; // Fishing
 				if (t >= 36 && t <= 37) return "#2980B9"; // Sailing / pleasure
-				return "#90A4AE";                          // Other / unknown
+				return "#90A4AE"; // Other / unknown
 			}
 
 			const MTLayer = L.Layer.extend({
 				initialize() {
-					this._group    = null;
-					this._timer    = null;
+					this._group = null;
+					this._timer = null;
 					this._debounce = null;
 				},
 
@@ -1500,7 +2106,10 @@
 					clearTimeout(this._debounce);
 					this._timer = this._debounce = null;
 					map.off("moveend zoomend", this._onViewChange, this);
-					if (this._group) { this._group.remove(); this._group = null; }
+					if (this._group) {
+						this._group.remove();
+						this._group = null;
+					}
 				},
 
 				_startPoll() {
@@ -1519,28 +2128,32 @@
 				_fetch() {
 					const map = this._map;
 					if (!map || !this._group) return;
-					if (map.getZoom() < MIN_ZOOM) { this._group.clearLayers(); return; }
+					if (map.getZoom() < MIN_ZOOM) {
+						this._group.clearLayers();
+						return;
+					}
 					// MT API z parameter is one more than the OSM tile zoom used for X/Y
-					const tileZ  = Math.max(4, Math.min(map.getZoom(), 8));
-					const apiZ   = tileZ + 1;
-					const b      = map.getBounds();
+					const tileZ = Math.max(4, Math.min(map.getZoom(), 8));
+					const apiZ = tileZ + 1;
+					const b = map.getBounds();
 					const center = map.getCenter();
-					const nw     = latLonToTile(b.getNorth(), b.getWest(), tileZ);
-					const se     = latLonToTile(b.getSouth(), b.getEast(), tileZ);
-					const tiles  = [];
+					const nw = latLonToTile(b.getNorth(), b.getWest(), tileZ);
+					const se = latLonToTile(b.getSouth(), b.getEast(), tileZ);
+					const tiles = [];
 					for (let y = nw.y; y <= se.y && tiles.length < MAX_TILES; y++) {
 						for (let x = nw.x; x <= se.x && tiles.length < MAX_TILES; x++) {
 							tiles.push({ x, y });
 						}
 					}
 					if (!tiles.length) return;
-					const vessels   = new Map();
-					let   remaining = tiles.length;
-					const referer   =
+					const vessels = new Map();
+					let remaining = tiles.length;
+					const referer =
 						`https://www.marinetraffic.com/en/ais/home` +
 						`/centerx:${center.lng.toFixed(1)}/centery:${center.lat.toFixed(1)}/zoom:${tileZ}`;
 					const done = () => {
-						if (--remaining === 0 && this._group) this._render([...vessels.values()]);
+						if (--remaining === 0 && this._group)
+							this._render([...vessels.values()]);
 					};
 					for (const { x, y } of tiles) {
 						GM_xmlhttpRequest({
@@ -1556,23 +2169,28 @@
 									try {
 										const parsed = JSON.parse(r.responseText);
 										// Format: { type, data: { rows: [...], areaShips: N } }
-										const raw = (parsed.data && parsed.data.rows) ||
-										            (Array.isArray(parsed.data) ? parsed.data : null) ||
-										            (Array.isArray(parsed) ? parsed : null);
+										const raw =
+											(parsed.data && parsed.data.rows) ||
+											(Array.isArray(parsed.data) ? parsed.data : null) ||
+											(Array.isArray(parsed) ? parsed : null);
 										if (!Array.isArray(raw)) return;
 										let rows = raw;
 										// Normalise array-of-arrays (first row = column headers)
 										if (rows.length && Array.isArray(rows[0])) {
 											const hdrs = rows[0];
-											rows = rows.slice(1).map(row => {
+											rows = rows.slice(1).map((row) => {
 												const obj = {};
-												hdrs.forEach((h, i) => { obj[h] = row[i]; });
+												hdrs.forEach((h, i) => {
+													obj[h] = row[i];
+												});
 												return obj;
 											});
 										}
 										for (const v of rows) {
-											const key = v.MMSI || v.mmsi ||
-												(String(v.LAT || v.lat) + "," + String(v.LON || v.lon));
+											const key =
+												v.MMSI ||
+												v.mmsi ||
+												String(v.LAT || v.lat) + "," + String(v.LON || v.lon);
 											if (key && !vessels.has(key)) vessels.set(key, v);
 										}
 									} catch (e) {
@@ -1590,17 +2208,31 @@
 					if (!this._group) return;
 					this._group.clearLayers();
 					for (const v of rows) {
-						const lat = parseFloat(v.LAT  || v.lat);
-						const lon = parseFloat(v.LON  || v.lon);
+						const lat = parseFloat(v.LAT || v.lat);
+						const lon = parseFloat(v.LON || v.lon);
 						if (!isFinite(lat) || !isFinite(lon)) continue;
-						const name   = (v.SHIPNAME || v.shipname || v.NAME || v.name || v.MMSI || "").trim() || "Unknown";
-						const mmsi   = v.MMSI  || v.mmsi  || "";
-						const type   = parseInt(v.SHIPTYPE || v.shiptype || v.TYPE || v.type || "0") || 0;
-						const hdg    = parseFloat(v.HEADING || v.heading || v.COURSE || v.course || "0") || 0;
-						const rawSpd = parseFloat(v.SPEED   || v.speed   || "0") || 0;
+						const name =
+							(
+								v.SHIPNAME ||
+								v.shipname ||
+								v.NAME ||
+								v.name ||
+								v.MMSI ||
+								""
+							).trim() || "Unknown";
+						const mmsi = v.MMSI || v.mmsi || "";
+						const type =
+							parseInt(v.SHIPTYPE || v.shiptype || v.TYPE || v.type || "0") ||
+							0;
+						const hdg =
+							parseFloat(
+								v.HEADING || v.heading || v.COURSE || v.course || "0",
+							) || 0;
+						const rawSpd = parseFloat(v.SPEED || v.speed || "0") || 0;
 						// AIS speed is in 1/10 knots; guard against pre-divided values
-						const spdKts = rawSpd > 102 ? (rawSpd / 10).toFixed(1) : rawSpd.toFixed(1);
-						const fill   = shipColor(type);
+						const spdKts =
+							rawSpd > 102 ? (rawSpd / 10).toFixed(1) : rawSpd.toFixed(1);
+						const fill = shipColor(type);
 						const svg =
 							`<svg viewBox="0 0 14 20" width="14" height="20" xmlns="http://www.w3.org/2000/svg">` +
 							`<g transform="translate(7,10) rotate(${hdg})">` +
@@ -1609,20 +2241,24 @@
 						const icon = L.divIcon({
 							className: "dw-marine-icon",
 							html: svg,
-							iconSize:   [14, 20],
+							iconSize: [14, 20],
 							iconAnchor: [7, 10],
 						});
-						L.marker([lat, lon], { icon, pane: "dwMarinePane", interactive: true })
+						L.marker([lat, lon], {
+							icon,
+							pane: "dwMarinePane",
+							interactive: true,
+						})
 							.bindTooltip(
 								`<b>${name}</b><br>MMSI: ${mmsi}<br>Speed: ${spdKts}\u202fkts\u2002Hdg: ${Math.round(hdg)}\u00b0`,
-								{ className: "dw-marine-tip", sticky: true }
+								{ className: "dw-marine-tip", sticky: true },
 							)
 							.addTo(this._group);
 					}
 				},
 
 				getAttribution() {
-					return "Vessels \u00a9 <a href=\"https://www.marinetraffic.com\" target=\"_blank\" rel=\"noreferrer\">MarineTraffic</a>";
+					return 'Vessels \u00a9 <a href="https://www.marinetraffic.com" target="_blank" rel="noreferrer">MarineTraffic</a>';
 				},
 			});
 
@@ -1632,229 +2268,791 @@
 
 	/* -- Mobile Coverage Layer --------------------------------------------- */
 
+	// ACCC Mobile Sites and Coverages (national AU). Sublayer 2 = "All
+	// Network Operators 4G Outdoor Mobile Coverage".
 	class MobileCoverageLayerProvider extends LayerProvider {
 		create() {
-			const L       = pageWin.L;
-			// ACCC Mobile Sites and Coverages (national AU, 2024)
-			// Layer 2 = All Network Operators 4G Outdoor Mobile Coverage ACCC 2024
-			const BASE    =
-				"https://spatial.infrastructure.gov.au/server/rest/services/" +
-				"ACCC_Mobile_Sites_and_Coverages/MapServer";
-			const LAYER_ID = 2;  // 4G All Operators
-
-			// Convert Leaflet tile (z,x,y) to geographic bbox (EPSG:4326)
-			function tileToBBox(z, x, y) {
-				const n    = Math.pow(2, z);
-				const lon1 = x / n * 360 - 180;
-				const lon2 = (x + 1) / n * 360 - 180;
-				const lat1 = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)))       * 180 / Math.PI;
-				const lat2 = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n))) * 180 / Math.PI;
-				return { minLon: lon1, minLat: lat2, maxLon: lon2, maxLat: lat1 };
-			}
-
-			const MobileTileLayer = L.TileLayer.extend({
-				onAdd(map) {
-					if (!map.getPane("dwMobilePane")) {
-						map.createPane("dwMobilePane");
-						map.getPane("dwMobilePane").style.zIndex = "380";
-						map.getPane("dwMobilePane").style.pointerEvents = "none";
-					}
-					L.TileLayer.prototype.onAdd.call(this, map);
-				},
-
-				getTileUrl(coords) {
-					const { z, x, y } = coords;
-					const bb = tileToBBox(z, x, y);
-					return (
-						`${BASE}/export?` +
-						`bbox=${bb.minLon},${bb.minLat},${bb.maxLon},${bb.maxLat}` +
-						`&bboxSR=4326&imageSR=4326` +
-						`&layers=show:${LAYER_ID}` +
-						`&size=256,256` +
-						`&format=png32` +
-						`&transparent=true` +
-						`&f=image`
-					);
-				},
-			});
-
-			return new MobileTileLayer("", {
-				opacity:     0.5,
-				attribution: "Mobile coverage \u00a9 <a href=\"https://data.gov.au\" target=\"_blank\" rel=\"noreferrer\">ACCC / Dept. of Infrastructure</a>",
-				minZoom:     5,
-				maxZoom:     18,
-				tileSize:    256,
-				pane:        "dwMobilePane",
+			return makeArcgisExportTileLayer({
+				baseUrl:
+					"https://spatial.infrastructure.gov.au/server/rest/services/" +
+					"ACCC_Mobile_Sites_and_Coverages/MapServer",
+				showLayers: "2",
+				pane: "dwMobilePane",
+				paneZIndex: 380,
+				opacity: 0.5,
+				minZoom: 5,
+				maxZoom: 18,
+				attribution:
+					'Mobile coverage \u00a9 <a href="https://data.gov.au" target="_blank" rel="noreferrer">ACCC / Dept. of Infrastructure</a>',
 			});
 		}
 	}
 
-	/* -- QLD Cadastre (Digital Cadastral Database) ------------------------ */
+	/* -- QLD Topo basemap ------------------------------------------------- */
 
-	// Property/parcel boundaries from the QLD Planning Cadastre MapServer.
-	// Same export-endpoint pattern as MobileCoverage — convert Leaflet
-	// (z,x,y) → EPSG:4326 bbox, request a transparent 256×256 PNG.
-	//
-	// Hover behaviour: above HOVER_MIN_ZOOM, mousemove triggers a debounced
-	// /identify call against layer 8 (Base Parcels Only) and shows a tooltip
-	// with Lot/Plan, tenure, area, locality. Stale responses are dropped via
-	// a generation counter so fast cursor movement doesn't flicker.
-	class QldCadastreLayerProvider extends LayerProvider {
+	class QldTopoLayerProvider extends LayerProvider {
 		create() {
-			const L = pageWin.L;
-			const BASE = CFG.QLD_CADASTRE_SERVICE;
-			const LAYER_ID = CFG.QLD_CADASTRE_LAYER_ID;
-			const IDENTIFY_LAYER = CFG.QLD_CADASTRE_IDENTIFY_LAYER;
-			const HOVER_MIN_ZOOM = CFG.QLD_CADASTRE_HOVER_MIN_ZOOM;
+			return L.tileLayer(CFG.QLD_TOPO_TILE, {
+				maxNativeZoom: 16,
+				maxZoom: 22,
+				tileSize: 256,
+				crossOrigin: true,
+				attribution: "&copy; State of Queensland (Department of Resources)",
+			});
+		}
+	}
 
-			function tileToBBox(z, x, y) {
-				const n    = Math.pow(2, z);
-				const lon1 = x / n * 360 - 180;
-				const lon2 = (x + 1) / n * 360 - 180;
-				const lat1 = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)))       * 180 / Math.PI;
-				const lat2 = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n))) * 180 / Math.PI;
-				return { minLon: lon1, minLat: lat2, maxLon: lon2, maxLat: lat1 };
-			}
+	/* -- QLD Relief overlay ----------------------------------------------- */
 
-			function formatTooltip(attrs) {
-				const lotPlan = attrs["Lot/plan"] || (attrs.Lot && attrs.Plan ? attrs.Lot + attrs.Plan : "");
-				const lines = [];
-				if (lotPlan && lotPlan !== "Null") lines.push(`<b>${lotPlan}</b>`);
-				const bits = [];
-				if (attrs.Tenure && attrs.Tenure !== "Null") bits.push(attrs.Tenure);
-				const area = parseFloat(attrs["Lot area (m²)"]);
-				if (isFinite(area) && area > 0) {
-					bits.push(area >= 10000 ? (area / 10000).toFixed(2) + " ha" : Math.round(area) + " m²");
-				}
-				if (bits.length) lines.push(bits.join(" · "));
-				if (attrs.Locality && attrs.Locality !== "Null") lines.push(attrs.Locality);
-				if (attrs["Local authority"] && attrs["Local authority"] !== "Null") {
-					lines.push(`<span class="dw-cad-sub">${attrs["Local authority"]}</span>`);
-				}
-				return lines.join("<br>") || "Parcel";
-			}
-
-			const CadastreTileLayer = L.TileLayer.extend({
+	// Hillshade layer served as a transparent overlay tile cache. Designed to
+	// sit on top of any base layer at ~40% opacity to add terrain context.
+	// Lives in its own pane (z=240) so it stacks above the basemap and roads
+	// but stays underneath QLD Labels (dwLabelsPane z=250).
+	class QldReliefLayerProvider extends LayerProvider {
+		create() {
+			const ReliefLayer = L.TileLayer.extend({
 				onAdd(map) {
-					if (!map.getPane("dwCadastrePane")) {
-						map.createPane("dwCadastrePane");
-						map.getPane("dwCadastrePane").style.zIndex = "385";
-						map.getPane("dwCadastrePane").style.pointerEvents = "none";
+					if (!map.getPane("dwReliefPane")) {
+						map.createPane("dwReliefPane");
+						map.getPane("dwReliefPane").style.zIndex = "240";
+						map.getPane("dwReliefPane").style.pointerEvents = "none";
 					}
 					L.TileLayer.prototype.onAdd.call(this, map);
-
-					this._tooltip = L.tooltip({ sticky: true, opacity: 0.95, className: "dw-cad-tip", direction: "right", offset: [12, 0] });
-					this._lastOid  = null;
-					this._debounce = null;
-					this._gen      = 0;
-					this._onMove   = this._onMove.bind(this);
-					this._onLeave  = this._onLeave.bind(this);
-					map.on("mousemove", this._onMove);
-					map.on("mouseout",  this._onLeave);
-				},
-
-				onRemove(map) {
-					clearTimeout(this._debounce);
-					this._debounce = null;
-					this._gen++;
-					map.off("mousemove", this._onMove);
-					map.off("mouseout",  this._onLeave);
-					if (this._tooltip && this._tooltip._map) this._tooltip.remove();
-					this._tooltip = null;
-					L.TileLayer.prototype.onRemove.call(this, map);
-				},
-
-				_onLeave() {
-					clearTimeout(this._debounce);
-					this._gen++;
-					if (this._tooltip && this._tooltip._map) this._tooltip.remove();
-					this._lastOid = null;
-				},
-
-				_onMove(e) {
-					const map = this._map;
-					if (!map || map.getZoom() < HOVER_MIN_ZOOM) {
-						if (this._tooltip && this._tooltip._map) this._tooltip.remove();
-						this._lastOid = null;
-						return;
-					}
-					clearTimeout(this._debounce);
-					const latlng = e.latlng;
-					this._debounce = setTimeout(() => this._identify(latlng), 180);
-				},
-
-				_identify(latlng) {
-					const map = this._map;
-					if (!map) return;
-					const size = map.getSize();
-					const b = map.getBounds();
-					const mapExtent = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(",");
-					const imageDisplay = `${size.x},${size.y},96`;
-					const geometry = encodeURIComponent(JSON.stringify({
-						x: latlng.lng, y: latlng.lat,
-						spatialReference: { wkid: 4326 },
-					}));
-					const myGen = ++this._gen;
-					const url =
-						`${BASE}/identify` +
-						`?geometry=${geometry}` +
-						`&geometryType=esriGeometryPoint&sr=4326` +
-						`&layers=all%3A${IDENTIFY_LAYER}` +
-						`&tolerance=3` +
-						`&mapExtent=${mapExtent}` +
-						`&imageDisplay=${imageDisplay}` +
-						`&returnGeometry=false` +
-						`&f=json`;
-					GM_xmlhttpRequest({
-						method: "GET",
-						url,
-						onload: (r) => {
-							if (myGen !== this._gen || !this._map) return;
-							if (r.status !== 200) return;
-							try {
-								const data = JSON.parse(r.responseText);
-								const feat = (data.results || [])[0];
-								this._show(latlng, feat || null);
-							} catch (_) {}
-						},
-						onerror: () => {},
-					});
-				},
-
-				_show(latlng, feat) {
-					if (!this._map || !this._tooltip) return;
-					if (!feat) {
-						if (this._tooltip._map) this._tooltip.remove();
-						this._lastOid = null;
-						return;
-					}
-					const attrs = feat.attributes || {};
-					const oid = attrs["Object ID"] || attrs.OBJECTID || JSON.stringify(attrs);
-					if (oid === this._lastOid && this._tooltip._map) {
-						this._tooltip.setLatLng(latlng);
-						return;
-					}
-					this._lastOid = oid;
-					this._tooltip
-						.setLatLng(latlng)
-						.setContent(formatTooltip(attrs));
-					if (!this._tooltip._map) this._tooltip.addTo(this._map);
 				},
 			});
+			return new ReliefLayer(CFG.QLD_RELIEF_TILE, {
+				maxNativeZoom: 14,
+				maxZoom: 22,
+				tileSize: 256,
+				crossOrigin: true,
+				opacity: 0.45,
+				pane: "dwReliefPane",
+				attribution: "&copy; State of Queensland (Department of Resources)",
+			});
+		}
+	}
 
-			return new CadastreTileLayer("", {
-				opacity:     0.75,
+	/* -- Hover-identify factory ------------------------------------------
+	 *
+	 * Both Cadastre and QPWS overlays share the same hover-identify shape:
+	 * debounced mousemove → ArcGIS /identify call → render attrs into a
+	 * Leaflet tooltip, drop stale callbacks via a generation counter, and
+	 * clear on map mouseout. This factory captures that pattern and lets
+	 * each layer plug in a custom tolerance, sublayer filter, formatter,
+	 * and (optionally) an `afterRender` hook for async enrichment (e.g.
+	 * Cadastre's address + Sales link).
+	 *
+	 * Returns: install(layer, map). Cleans up via layer._dwHoverOff.
+	 */
+	function makeHoverIdentify(opts) {
+		const debounceMs = opts.debounceMs || 200;
+		return function install(layer, map) {
+			const tooltip = L.tooltip({
+				sticky:    true,
+				opacity:   0.95,
+				className: opts.tipClass,
+				direction: "right",
+				offset:    [12, 0],
+			});
+			let lastOid = null;
+			let lastAttrs = null;
+			let debounce = null;
+			let gen = 0;
+
+			const clearTip = () => {
+				if (tooltip._map) tooltip.remove();
+				lastOid = null;
+				lastAttrs = null;
+			};
+
+			const identify = (latlng) => {
+				const size  = map.getSize();
+				const b     = map.getBounds();
+				const mapExtent    = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(",");
+				const imageDisplay = `${size.x},${size.y},96`;
+				const geometry = encodeURIComponent(JSON.stringify({
+					x: latlng.lng, y: latlng.lat, spatialReference: { wkid: 4326 },
+				}));
+				const myGen = ++gen;
+				const url =
+					`${opts.baseUrl}/identify` +
+					`?geometry=${geometry}` +
+					`&geometryType=esriGeometryPoint&sr=4326` +
+					`&layers=${opts.layers}` +
+					`&tolerance=${opts.tolerance || 3}` +
+					`&mapExtent=${mapExtent}` +
+					`&imageDisplay=${imageDisplay}` +
+					`&returnGeometry=false&f=json`;
+				gmJsonGet(url, (err, data) => {
+					if (err) return;
+					if (myGen !== gen) return;
+					const feat = (data.results || [])[0];
+					if (!feat) { clearTip(); return; }
+					const attrs = feat.attributes || {};
+					const oid =
+						attrs["Object ID"] || attrs.OBJECTID || JSON.stringify(attrs);
+					if (oid === lastOid && tooltip._map) {
+						tooltip.setLatLng(latlng);
+						return;
+					}
+					lastOid = oid;
+					lastAttrs = attrs;
+					tooltip.setLatLng(latlng).setContent(opts.formatTooltip(attrs));
+					if (!tooltip._map) tooltip.addTo(map);
+
+					if (opts.afterRender) {
+						opts.afterRender(attrs, {
+							// Guard so an async enrichment doesn't overwrite the
+							// tooltip after the user has moved to another parcel.
+							isCurrent: () =>
+								myGen === gen && !!tooltip._map && lastAttrs === attrs,
+							setContent: (html) => tooltip.setContent(html),
+						});
+					}
+				});
+			};
+
+			const onMove = (e) => {
+				if (map.getZoom() < opts.minZoom) { clearTip(); return; }
+				clearTimeout(debounce);
+				const latlng = e.latlng;
+				debounce = setTimeout(() => identify(latlng), debounceMs);
+			};
+			const onLeave = () => {
+				clearTimeout(debounce);
+				gen++;
+				clearTip();
+			};
+
+			map.on("mousemove", onMove);
+			map.on("mouseout",  onLeave);
+
+			layer._dwHoverOff = () => {
+				clearTimeout(debounce);
+				gen++;
+				map.off("mousemove", onMove);
+				map.off("mouseout",  onLeave);
+				clearTip();
+			};
+		};
+	}
+
+	/* -- QLD Cadastre (Digital Cadastral Database) ------------------------ */
+
+	// Property/parcel boundaries from the QLD Planning Cadastre MapServer,
+	// rendered via makeArcgisExportTileLayer plus a hover-identify hook.
+	//
+	// Hover behaviour: above CFG.QLD_CADASTRE_HOVER_MIN_ZOOM, mousemove
+	// triggers a debounced /identify call against layer 8 (Base Parcels Only)
+	// and shows a tooltip with Lot/Plan, tenure, area, locality. Stale
+	// responses are dropped via a generation counter.
+	// Filters out QLD's "Null" sentinel strings and genuinely empty values.
+	function _cadVal(v) {
+		if (v === null || v === undefined) return "";
+		const s = String(v).trim();
+		return s && s !== "Null" ? s : "";
+	}
+
+	// addressInfo is optional: { primary, extra } — primary is the headline
+	// address line, extra is a "+N more" hint when several addresses exist
+	// for the same lotplan (rural blocks with multiple dwellings, strata).
+	function _formatCadastreTooltip(attrs, addressInfo) {
+		const lotPlan =
+			_cadVal(attrs["Lot/plan"]) ||
+			(_cadVal(attrs.Lot) && _cadVal(attrs.Plan)
+				? attrs.Lot + attrs.Plan
+				: "");
+		const lines = [];
+		if (lotPlan) lines.push(`<b>${lotPlan}</b>`);
+
+		const name  = _cadVal(attrs.Name);
+		const alias = _cadVal(attrs.Alias);
+		if (name)                  lines.push(name);
+		else if (alias)            lines.push(alias);
+
+		if (addressInfo && addressInfo.primary) {
+			let addrLine = addressInfo.primary;
+			if (addressInfo.extra) addrLine += ` <span class="dw-cad-sub">${addressInfo.extra}</span>`;
+			lines.push(addrLine);
+		}
+
+		const bits = [];
+		const tenure = _cadVal(attrs.Tenure);
+		if (tenure) bits.push(tenure);
+		const parcelType = _cadVal(attrs["Parcel type"]);
+		// Skip the redundant "Lot" parcel type — tenure already implies it.
+		if (parcelType && parcelType.toLowerCase() !== "lot") bits.push(parcelType);
+		const area = parseFloat(attrs["Lot area (m²)"]);
+		if (isFinite(area) && area > 0) {
+			bits.push(
+				area >= 10000
+					? (area / 10000).toFixed(2) + " ha"
+					: Math.round(area) + " m²",
+			);
+		}
+		if (bits.length) lines.push(bits.join(" · "));
+
+		const locality = _cadVal(attrs.Locality);
+		const lga      = _cadVal(attrs["Local authority"]);
+		if (locality) lines.push(locality);
+		if (lga)      lines.push(`<span class="dw-cad-sub">${lga}</span>`);
+
+		const links = [];
+		const smis = _cadVal(attrs["SmartMap link"]);
+		if (smis && /^https?:\/\//i.test(smis)) {
+			links.push(
+				`<a class="dw-cad-link" href="${smis}" target="_blank" rel="noreferrer">SmartMap ↗</a>`,
+			);
+		}
+		// Only offer the OTH sales lookup once we have a numbered street
+		// address — OTH's /odin/api/locations search only resolves to a
+		// propertyId when we feed it both a street number and a street
+		// name. Lat/lon is also required so the popup can anchor.
+		if (
+			addressInfo &&
+			isFinite(addressInfo.lat) &&
+			isFinite(addressInfo.lon) &&
+			addressInfo.streetName &&
+			addressInfo.streetNumber
+		) {
+			links.push(
+				`<a class="dw-cad-link dw-cad-sales-link" href="#"` +
+				` data-lat="${addressInfo.lat}" data-lon="${addressInfo.lon}"` +
+				` data-lotplan="${(_cadVal(attrs["Lot/plan"]) || "").replace(/"/g, "&quot;")}"` +
+				`>Sales ↗</a>`,
+			);
+		}
+		if (links.length) lines.push(links.join(" &nbsp; "));
+
+		return lines.join("<br>") || "Parcel";
+	}
+
+	/* -- Sales popup orchestration ---------------------------------------- */
+
+	// One-time delegated click handler installed when the cadastre layer is
+	// first attached. Catches clicks on the tooltip's "Sales ↗" link and
+	// drives the two-stage OnTheHouse lookup, rendering results into a
+	// Leaflet popup at the parcel location.
+	let _dwSalesHookInstalled = false;
+	let _dwSalesMap = null;
+	let _dwSalesGen = 0;
+
+	function _escHtml(s) {
+		return String(s == null ? "" : s)
+			.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+			.replace(/"/g, "&quot;");
+	}
+
+	function _fmtPrice(n) {
+		if (!isFinite(n) || n <= 0) return "";
+		if (n >= 1e6) return "$" + (n / 1e6).toFixed(n % 1e6 ? 2 : 1) + "M";
+		if (n >= 1e3) return "$" + Math.round(n / 1e3) + "k";
+		return "$" + n;
+	}
+
+	function _fmtDate(s) {
+		if (!s) return "";
+		// "2021-07-21T..." → "Jul 2021"
+		const m = /^(\d{4})-(\d{2})/.exec(String(s));
+		if (!m) return String(s);
+		const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+		return months[parseInt(m[2], 10) - 1] + " " + m[1];
+	}
+
+	function _renderSalesContent(result) {
+		if (!result || !result.property) {
+			const fallback = result && result.fallbackUrl
+				? `<div class="dw-sales-row"><a href="${_escHtml(result.fallbackUrl)}" target="_blank" rel="noreferrer">Open OnTheHouse search ↗</a></div>`
+				: "";
+			return `<div class="dw-sales-pop">
+				<div class="dw-sales-err">${_escHtml((result && result.error) || "No sales data.")}</div>
+				${fallback}
+			</div>`;
+		}
+		const p = result.property;
+		const addr = p.address || {};
+		const sale = p.lastSale || {};
+		const guess = p.guesstimate || null;
+
+		const headerAddr = addr.shortAddress || addr.formattedAddress || "";
+
+		const stats = [];
+		if (p.beds != null) stats.push(`<b>${p.beds}</b> bd`);
+		if (p.baths != null) stats.push(`<b>${p.baths}</b> ba`);
+		if (p.carSpaces != null) stats.push(`<b>${p.carSpaces}</b> car`);
+		if (p.landSize) stats.push(`${p.landSize} m²`);
+		if (p.yearBuilt) stats.push(`built ${p.yearBuilt}`);
+		const statsLine = stats.length
+			? `<div class="dw-sales-stats">${stats.join(" · ")}${p.type ? ` <span class="dw-sales-sub">${_escHtml(p.type)}</span>` : ""}</div>`
+			: "";
+
+		let saleBlock = "";
+		if (sale.salePrice || sale.eventDate) {
+			const price = sale.salePrice ? _fmtPrice(sale.salePrice) : "";
+			const when = _fmtDate(sale.eventDate);
+			const ag = sale.sellingAgency && sale.sellingAgency.name;
+			saleBlock = `<div class="dw-sales-row"><span class="dw-sales-k">Last sale</span>
+				<span class="dw-sales-v"><b>${_escHtml(price || "—")}</b> · ${_escHtml(when || "?")}
+				${ag ? `<span class="dw-sales-sub">${_escHtml(ag)}</span>` : ""}</span></div>`;
+		}
+
+		let avmBlock = "";
+		if (guess && guess.price) {
+			const lo = guess.fromPrice ? _fmtPrice(guess.fromPrice) : "";
+			const hi = guess.toPrice ? _fmtPrice(guess.toPrice) : "";
+			const range = lo && hi ? ` <span class="dw-sales-sub">(${lo}–${hi})</span>` : "";
+			avmBlock = `<div class="dw-sales-row"><span class="dw-sales-k">Estimate</span>
+				<span class="dw-sales-v"><b>${_escHtml(_fmtPrice(guess.price))}</b>${range}</span></div>`;
+		}
+
+		// Sale events history (only "SoldEvent" type, last 6, oldest at bottom).
+		let eventsBlock = "";
+		const events = Array.isArray(p.events) ? p.events.filter((e) => e && e.type === "SoldEvent") : [];
+		if (events.length > 1) {
+			const rows = events.slice(0, 6).map((e) => {
+				const px = e.salePrice ? _fmtPrice(e.salePrice) : "—";
+				const dt = _fmtDate(e.eventDate);
+				const ag = e.agencyName || "";
+				return `<li><b>${_escHtml(px)}</b> <span class="dw-sales-sub">${_escHtml(dt)}${ag ? " · " + _escHtml(ag) : ""}</span></li>`;
+			}).join("");
+			eventsBlock = `<div class="dw-sales-row"><span class="dw-sales-k">History</span>
+				<ul class="dw-sales-events">${rows}</ul></div>`;
+		}
+
+		const lotplan = (p.legalAttributes && p.legalAttributes["Lot/Plan"]) || "";
+		const lotBlock = lotplan
+			? `<div class="dw-sales-row"><span class="dw-sales-k">Lot/Plan</span><span class="dw-sales-v">${_escHtml(lotplan)}</span></div>`
+			: "";
+
+		const sourceLink = result.sourceUrl
+			? `<a class="dw-sales-source" href="${_escHtml(result.sourceUrl)}" target="_blank" rel="noreferrer">Open on OnTheHouse ↗</a>`
+			: "";
+
+		return `<div class="dw-sales-pop">
+			<div class="dw-sales-hd">${_escHtml(headerAddr)}</div>
+			${statsLine}
+			${saleBlock}
+			${avmBlock}
+			${eventsBlock}
+			${lotBlock}
+			${sourceLink}
+		</div>`;
+	}
+
+	function _openSalesPopup(latlng, addrInfo, lotplan) {
+		if (!_dwSalesMap) return;
+		const map = _dwSalesMap;
+
+		const popup = L.popup({
+			minWidth: 280,
+			maxWidth: 360,
+			autoPan: true,
+			autoClose: true,
+			closeOnClick: false,
+			className: "dw-sales-pop-wrap",
+		})
+			.setLatLng(latlng)
+			.setContent(`<div class="dw-sales-pop"><div class="dw-sales-loading">Loading OnTheHouse data…</div></div>`)
+			.openOn(map);
+
+		const gen = ++_dwSalesGen;
+
+		const finish = (result) => {
+			if (gen !== _dwSalesGen) return;
+			if (!popup.isOpen()) return;
+			popup.setContent(_renderSalesContent(result));
+		};
+
+		// Cache the assembled popup model by lotplan in GM storage so a
+		// re-hover on the same parcel hours later renders instantly. The
+		// underlying OTH endpoints are themselves cached at finer grain
+		// (locations / property / events) — this is the user-facing layer.
+		if (!lotplan) { fetchOthSales(addrInfo, finish); return; }
+		cachedFetch(
+			"oth_sales_" + lotplan,
+			_CACHE_TTL.OTH_PROPERTY,
+			(done) => fetchOthSales(addrInfo, (result) => {
+				// Don't persist transient network failures — only cache
+				// definitive results (ok:true or ok:false with a structural
+				// reason like "address not indexed").
+				const persistable =
+					result && (result.ok === true ||
+					           (result.ok === false && !/rate-limit|status \d{3}/.test(result.error || "")));
+				done(null, persistable ? result : null);
+				if (!persistable) finish(result); // surface transient errors immediately
+			}),
+			(err, cached) => { if (cached) finish(cached); },
+		);
+	}
+
+	function _onSalesLinkClick(e) {
+		const a = e.target && e.target.closest && e.target.closest(".dw-cad-sales-link");
+		if (!a) return;
+		e.preventDefault();
+		e.stopPropagation();
+		const lat = parseFloat(a.dataset.lat);
+		const lon = parseFloat(a.dataset.lon);
+		const lotplan = a.dataset.lotplan || "";
+		if (!isFinite(lat) || !isFinite(lon)) return;
+
+		const cached = getCachedCadastreAddress(lotplan);
+		if (cached) {
+			_openSalesPopup(L.latLng(lat, lon), cached, lotplan);
+			return;
+		}
+		// Address wasn't pre-resolved by hover (user clicked too fast or
+		// the cache was wiped) — fetch on demand, then open the popup.
+		fetchCadastreAddress(lotplan, (info) => {
+			if (!info) return;
+			_openSalesPopup(L.latLng(lat, lon), info, lotplan);
+		});
+	}
+
+	function _ensureSalesHook(map) {
+		_dwSalesMap = map;
+		if (_dwSalesHookInstalled) return;
+		_dwSalesHookInstalled = true;
+		// Capture-phase so we intercept before the underlying map gets the
+		// click and tries to drop a waypoint at that location.
+		document.addEventListener("click", _onSalesLinkClick, true);
+	}
+
+	function _formatAddressLine(rec) {
+		if (!rec) return "";
+		// Query results are keyed by field name, not alias.
+		const unit = (rec.unit_number || "").trim();
+		const unitType = (rec.unit_type || "").trim();
+		const street = (rec.street_full || "").trim();
+		const propName = (rec.property_name || "").trim();
+		const parts = [];
+		if (unit) parts.push(unitType ? `${unitType} ${unit}` : unit);
+		if (street) parts.push(street);
+		let line = parts.join(" / ");
+		if (!line && propName) line = propName;
+		else if (propName && !line.toLowerCase().includes(propName.toLowerCase()))
+			line = line ? `${line} (${propName})` : propName;
+		return line;
+	}
+
+	function fetchCadastreAddress(lotplan, cb) {
+		if (!lotplan) { cb(null); return; }
+		cachedFetch(
+			"cad_addr_" + lotplan,
+			_CACHE_TTL.CAD_ADDRESS,
+			(done) => {
+				const url =
+					`${CFG.QLD_CADASTRE_SERVICE}/0/query` +
+					`?where=${encodeURIComponent(`lotplan='${lotplan.replace(/'/g, "''")}'`)}` +
+					`&outFields=street_full,unit_number,unit_type,property_name,` +
+						`street_number,street_name,street_type,locality,latitude,longitude` +
+					`&returnGeometry=false&f=json`;
+				gmJsonGet(url, (err, data) => {
+					if (err) { done(null, null); return; }
+					const feats = (data.features || []).map((f) => f.attributes || {});
+					const primaryRec =
+						feats.find((a) => (a.street_full || "").trim()) || feats[0];
+					const primary = _formatAddressLine(primaryRec);
+					if (!primary) { done(null, null); return; }
+					const extraCount = Math.max(0, feats.length - 1);
+					done(null, {
+						primary,
+						extra: extraCount ? `+${extraCount} more` : "",
+						// Structured bits the OnTheHouse lookup needs. Lat/lon
+						// also anchors the sales popup at the parcel point.
+						lat: parseFloat(primaryRec.latitude),
+						lon: parseFloat(primaryRec.longitude),
+						streetNumber: (primaryRec.street_number || "").trim(),
+						streetName: (primaryRec.street_name || "").trim(),
+						streetType: (primaryRec.street_type || "").trim(),
+						locality: (primaryRec.locality || "").trim(),
+					});
+				});
+			},
+			(err, info) => cb(err ? null : info),
+		);
+	}
+
+	// Public probe (no fetch) — used by the hover tooltip to render an
+	// address line synchronously if one was previously resolved.
+	function getCachedCadastreAddress(lotplan) {
+		if (!lotplan) return null;
+		try {
+			const raw = GM_getValue("dw_cache_cad_addr_" + lotplan, null);
+			if (!raw) return null;
+			const parsed = JSON.parse(raw);
+			if (!parsed || (parsed.e !== 0 && parsed.e <= Date.now())) return null;
+			return parsed.v || null;
+		} catch (_) { return null; }
+	}
+
+	/* -- OnTheHouse sales lookup (click-triggered from cadastre tooltip) ---
+	 *
+	 *  Stage 1: resolve the address → propertyId via OTH's address
+	 *           autocomplete endpoint `/odin/api/locations?query=…`. Tiny
+	 *           JSON response, cached for a week. Found in OTH's main.js
+	 *           as the `addressSearchSagas` target.
+	 *  Stage 2: pull `/odin/api/properties/{id}` (core attributes) and
+	 *           `/odin/api/properties/{id}/events` (sales timeline) in
+	 *           parallel — about 5 KB combined, vs ~5 MB for the SSR HTML
+	 *           we previously scraped. Cached per propertyId (6 h for core,
+	 *           24 h for events).
+	 *
+	 *  Caching uses the shared `cachedFetch` helper (GM_setValue-backed,
+	 *  with TTLs in _CACHE_TTL). The api-gateway-alb.*.corelogic.io
+	 *  endpoints these reach are CORS-locked from browser JS but reachable
+	 *  via GM_xmlhttpRequest's privileged bypass.
+	 */
+
+	// (Persistent sales-popup caching lives in cachedFetch — see _openSalesPopup.)
+
+	function _slugify(s) {
+		return String(s || "")
+			.toLowerCase()
+			.replace(/&/g, " and ")
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, "");
+	}
+
+	// Map QLD's long-form street types to OnTheHouse's short slug form.
+	// Unknown types pass through slugified — OTH's URL routing is lenient
+	// enough that a near-miss still returns the fallback list, which is
+	// all we need to discover the focal property's othPropertyId.
+	const _OTH_STREET_TYPE = {
+		STREET: "st", ROAD: "rd", AVENUE: "ave", DRIVE: "dr", LANE: "la",
+		CRESCENT: "cres", PLACE: "pl", TERRACE: "tce", COURT: "ct",
+		BOULEVARD: "bvd", BOULEVARDE: "bvd", CIRCUIT: "cct",
+		HIGHWAY: "hwy", PARADE: "pde", CLOSE: "cl", WAY: "way",
+		ESPLANADE: "esp", QUAY: "qy", CIRCLE: "cir", LINK: "lnk",
+		MEWS: "mews", SQUARE: "sq", WALK: "wlk", ARCADE: "arc",
+		ALLEY: "al", ROW: "row", VIEW: "vw", RIDGE: "rdge", RISE: "ri",
+		BEND: "bend", LOOP: "loop", TRACK: "trk", TRAIL: "trl",
+	};
+
+	function _othStreetTypeSlug(type) {
+		const up = String(type || "").trim().toUpperCase();
+		return _OTH_STREET_TYPE[up] || _slugify(type);
+	}
+
+	// Canonical OTH property URL — used only as the "Open on OnTheHouse ↗"
+	// link in the sales popup (we get the data itself via the JSON
+	// endpoints). Built from the locations API's authoritative fields so
+	// it always lands on a valid focal-property page. Example:
+	//   /property/qld/petrie-terrace-4000/256-petrie-tce-petrie-terrace-qld-4000-14995257
+	function _othCanonicalUrlFromLocation(loc) {
+		const suburbSlug = _slugify(loc.suburb);
+		const streetSlug = _slugify(
+			`${loc.streetNumber} ${loc.streetName} ${_othStreetTypeSlug(loc.streetType)}`,
+		);
+		const tail = `${streetSlug}-${suburbSlug}-qld-${loc.postCode}`;
+		return `${CFG.OTH_BASE}/property/qld/${suburbSlug}-${loc.postCode}/${tail}-${loc.propertyId}`;
+	}
+
+	// OTH's address autocomplete endpoint. Returns up to 10 candidates
+	// keyed by free-text query — discovered in OTH's main.js as the
+	// `addressSearchSagas` target. Street-level placeholder rows (like
+	// { propertyId: "NAMBOUR+QLD+4560+ERBACHER+RD", streetNumber: "" })
+	// share the response and are filtered out by callers that require a
+	// numeric propertyId. Cached for a week — autocomplete suggestions
+	// don't change meaningfully on shorter timescales.
+	function fetchOthLocations(query, cb) {
+		cachedFetch(
+			"oth_loc_" + query.toLowerCase().replace(/\s+/g, "_"),
+			_CACHE_TTL.OTH_LOCATIONS,
+			(done) => {
+				const url =
+					`${CFG.OTH_BASE}/odin/api/locations?query=` + encodeURIComponent(query);
+				gmJsonGet(url, (err, data, raw) => {
+					if (err) { done(null, { error: err.message, status: raw && raw.status }); return; }
+					done(null, { content: Array.isArray(data.content) ? data.content : [] });
+				});
+			},
+			(_err, result) => cb(result || { error: "cache miss" }),
+		);
+	}
+
+	// Resolve a parcel's address to an OTH property and pull its detail.
+	// Three API calls (each tiny JSON, cached aggressively):
+	//   1. /odin/api/locations?query=…       → candidate list with propertyIds
+	//   2. /odin/api/properties/{id}         → core attributes + lastSale
+	//   3. /odin/api/properties/{id}/events  → sales/listings history timeline
+	//
+	// Steps 2+3 fire in parallel. The combined object matches the shape
+	// `_renderSalesContent` expects (events merged into the property).
+	//
+	// Calls cb(result) with:
+	//   { ok: true,  property, sourceUrl }   — focal property data
+	//   { ok: false, error }                 — couldn't resolve
+	function fetchOthSales(addrInfo, cb) {
+		if (!addrInfo.streetNumber) {
+			cb({
+				ok: false,
+				error: "This parcel has no street number in QLD's cadastre — OnTheHouse can't look it up.",
+			});
+			return;
+		}
+
+		// Build the autocomplete query. Suburb + state disambiguate same-
+		// named streets in other states; postcode is harmless if present.
+		const qParts = [];
+		if (addrInfo.streetNumber) qParts.push(addrInfo.streetNumber);
+		if (addrInfo.streetName)   qParts.push(addrInfo.streetName);
+		if (addrInfo.streetType)   qParts.push(addrInfo.streetType);
+		if (addrInfo.locality)     qParts.push(addrInfo.locality);
+		qParts.push("QLD");
+		const query = qParts.join(" ").trim();
+
+		fetchOthLocations(query, (locResult) => {
+			if (locResult && locResult.error) {
+				cb({
+					ok: false,
+					error: locResult.status === 429
+						? "OnTheHouse is rate-limiting us — try again in a minute."
+						: `Couldn't reach OnTheHouse (${locResult.error}).`,
+				});
+				return;
+			}
+
+			// Filter to candidates with a numeric propertyId (real
+			// property, not the street-level "ERBACHER+RD+NAMBOUR"
+			// placeholder rows). Prefer exact street-number + name match.
+			const candidates = (locResult.content || []).filter(
+				(p) => p && /^\d+$/.test(String(p.propertyId || "")),
+			);
+			const wantNum  = String(addrInfo.streetNumber || "").toUpperCase();
+			const wantName = String(addrInfo.streetName   || "").toUpperCase();
+			const match =
+				candidates.find(
+					(p) =>
+						String(p.streetNumber || "").toUpperCase() === wantNum &&
+						String(p.streetName   || "").toUpperCase() === wantName,
+				) ||
+				candidates.find(
+					(p) => String(p.streetNumber || "").toUpperCase() === wantNum,
+				) ||
+				candidates[0];
+
+			if (!match) {
+				cb({
+					ok: false,
+					error: "OnTheHouse doesn't have a record for this address.",
+				});
+				return;
+			}
+
+			const pid = match.propertyId;
+			const sourceUrl = _othCanonicalUrlFromLocation(match);
+
+			// Stage 2: fetch property core + events in parallel.
+			let coreRes = null, eventsRes = null, done = false;
+			const finish = () => {
+				if (done) return;
+				if (coreRes === null || eventsRes === null) return;
+				done = true;
+				if (coreRes.error) {
+					cb({
+						ok: false,
+						error: "Couldn't fetch OnTheHouse property data.",
+						fallbackUrl: sourceUrl,
+					});
+					return;
+				}
+				const property = Object.assign({}, coreRes.data, {
+					events: (eventsRes.data && eventsRes.data.content) || [],
+				});
+				cb({ ok: true, property, sourceUrl });
+			};
+
+			cachedFetch(
+				"oth_prop_" + pid,
+				_CACHE_TTL.OTH_PROPERTY,
+				(d) => gmJsonGet(
+					`${CFG.OTH_BASE}/odin/api/properties/${pid}`,
+					(err, data) => d(null, err ? { error: err.message } : { data }),
+				),
+				(_e, r) => { coreRes = r || { error: "cache miss" }; finish(); },
+			);
+			cachedFetch(
+				"oth_evt_" + pid,
+				_CACHE_TTL.OTH_EVENTS,
+				(d) => gmJsonGet(
+					`${CFG.OTH_BASE}/odin/api/properties/${pid}/events`,
+					(err, data) => d(null, err ? { error: err.message } : { data }),
+				),
+				(_e, r) => { eventsRes = r || { error: "cache miss" }; finish(); },
+			);
+		});
+	}
+
+	const _installCadastreHoverInner = makeHoverIdentify({
+		baseUrl:    CFG.QLD_CADASTRE_SERVICE,
+		layers:     "all:" + CFG.QLD_CADASTRE_IDENTIFY_LAYER,
+		tolerance:  3,
+		minZoom:    CFG.QLD_CADASTRE_HOVER_MIN_ZOOM,
+		debounceMs: 180,
+		tipClass:   "dw-cad-tip",
+		formatTooltip: (attrs) => {
+			const lotplan = _cadVal(attrs["Lot/plan"]);
+			return _formatCadastreTooltip(attrs, getCachedCadastreAddress(lotplan));
+		},
+		afterRender: (attrs, ctx) => {
+			const lotplan = _cadVal(attrs["Lot/plan"]);
+			if (!lotplan) return;
+			if (getCachedCadastreAddress(lotplan)) return; // already rendered
+			fetchCadastreAddress(lotplan, (info) => {
+				if (!info || !ctx.isCurrent()) return;
+				ctx.setContent(_formatCadastreTooltip(attrs, info));
+			});
+		},
+	});
+
+	function installCadastreHover(layer, map) {
+		_ensureSalesHook(map);
+		_installCadastreHoverInner(layer, map);
+	}
+
+	class QldCadastreLayerProvider extends LayerProvider {
+		create() {
+			return makeArcgisExportTileLayer({
+				baseUrl: CFG.QLD_CADASTRE_SERVICE,
+				showLayers: String(CFG.QLD_CADASTRE_LAYER_ID),
+				pane: "dwCadastrePane",
+				paneZIndex: 385,
+				opacity: 0.75,
+				minZoom: 11,
+				maxZoom: 22,
 				attribution:
-					"Cadastre &copy; <a href=\"https://www.qld.gov.au/dnrme\" target=\"_blank\" rel=\"noreferrer\">State of Queensland (DCDB)</a>",
-				minZoom:     11,
-				maxZoom:     22,
-				tileSize:    256,
-				pane:        "dwCadastrePane",
+					'Cadastre &copy; <a href="https://www.qld.gov.au/dnrme" target="_blank" rel="noreferrer">State of Queensland (DCDB)</a>',
+				onAdd: (layer, map) => installCadastreHover(layer, map),
+				onRemove: (layer) => {
+					if (layer._dwHoverOff) {
+						layer._dwHoverOff();
+						layer._dwHoverOff = null;
+					}
+				},
 			});
 		}
 	}
 
 	/* -- QPWS Estate (QLD Parks & Wildlife) ------------------------------- */
+
+	// Hover-identify for QPWS — protected-area name + manage type from
+	// sublayer 10. Tooltip-only, no async enrichment, so the factory's
+	// afterRender hook is unused.
+	const installQpwsHover = makeHoverIdentify({
+		baseUrl:    CFG.QLD_QPWS_SERVICE,
+		layers:     "all:10",
+		tolerance:  5,
+		minZoom:    CFG.QLD_QPWS_HOVER_MIN_ZOOM,
+		tipClass:   "dw-qpws-tip",
+		formatTooltip: (a) => {
+			const name = a.NAME || a.name || a.PARK_NAME || a.park_name || "";
+			const type = a.FEAT_TYPE || a.feat_type || a.MANAGE_TYPE || a.manage_type || "";
+			const lines = [];
+			if (name) lines.push(`<b>${name}</b>`);
+			if (type) lines.push(type);
+			return lines.join("<br>") || "Protected area";
+		},
+	});
 
 	// Server-rendered tile overlay covering protected areas, walking tracks,
 	// great walks, horse/MTB/trail-bike trails. Same ArcGIS export pattern as
@@ -1863,53 +3061,19 @@
 	// anyway.
 	class QpwsLayerProvider extends LayerProvider {
 		create() {
-			const L = pageWin.L;
-			const BASE = CFG.QLD_QPWS_SERVICE;
-			const LAYERS = CFG.QLD_QPWS_LAYER_IDS;
-
-			function tileToBBox(z, x, y) {
-				const n    = Math.pow(2, z);
-				const lon1 = x / n * 360 - 180;
-				const lon2 = (x + 1) / n * 360 - 180;
-				const lat1 = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)))       * 180 / Math.PI;
-				const lat2 = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n))) * 180 / Math.PI;
-				return { minLon: lon1, minLat: lat2, maxLon: lon2, maxLat: lat1 };
-			}
-
-			const QpwsTileLayer = L.TileLayer.extend({
-				onAdd(map) {
-					if (!map.getPane("dwQpwsPane")) {
-						map.createPane("dwQpwsPane");
-						map.getPane("dwQpwsPane").style.zIndex = "396";
-						map.getPane("dwQpwsPane").style.pointerEvents = "none";
-					}
-					L.TileLayer.prototype.onAdd.call(this, map);
+			return makeArcgisExportTileLayer({
+				baseUrl:    CFG.QLD_QPWS_SERVICE,
+				showLayers: CFG.QLD_QPWS_LAYER_IDS,
+				pane:       "dwQpwsPane",
+				paneZIndex: 396,
+				opacity:    0.85,
+				minZoom:    9,
+				maxZoom:    22,
+				attribution: 'QPWS &copy; <a href="https://parks.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (DETSI)</a>',
+				onAdd:    (layer, map) => installQpwsHover(layer, map),
+				onRemove: (layer) => {
+					if (layer._dwHoverOff) { layer._dwHoverOff(); layer._dwHoverOff = null; }
 				},
-
-				getTileUrl(coords) {
-					const { z, x, y } = coords;
-					const bb = tileToBBox(z, x, y);
-					return (
-						`${BASE}/export?` +
-						`bbox=${bb.minLon},${bb.minLat},${bb.maxLon},${bb.maxLat}` +
-						`&bboxSR=4326&imageSR=4326` +
-						`&layers=show:${LAYERS}` +
-						`&size=256,256` +
-						`&format=png32` +
-						`&transparent=true` +
-						`&f=image`
-					);
-				},
-			});
-
-			return new QpwsTileLayer("", {
-				opacity:     0.85,
-				attribution:
-					"QPWS &copy; <a href=\"https://parks.qld.gov.au/\" target=\"_blank\" rel=\"noreferrer\">State of Queensland (DETSI)</a>",
-				minZoom:     9,
-				maxZoom:     22,
-				tileSize:    256,
-				pane:        "dwQpwsPane",
 			});
 		}
 	}
@@ -1928,7 +3092,7 @@
 					maxZoom: 22,
 					opacity: 1,
 					attribution:
-						"&copy; <a href=\"https://www.openseamap.org/\" target=\"_blank\" rel=\"noreferrer\">OpenSeaMap</a> contributors",
+						'&copy; <a href="https://www.openseamap.org/" target="_blank" rel="noreferrer">OpenSeaMap</a> contributors',
 				},
 			);
 		}
@@ -1942,156 +3106,179 @@
 	// worth the bandwidth.
 	class PowerInfraLayerProvider extends LayerProvider {
 		create() {
-			const L        = pageWin.L;
-			const OVERPASS = "https://overpass.kumi.systems/api/interpreter";
-			const MIN_ZOOM = 11;
+			// Format raw OSM voltage (stored in V) as human-readable kV/V.
+			function fmtVoltage(v) {
+				const n = parseInt(v, 10) || 0;
+				if (!n) return null;
+				if (n >= 1000) {
+					const kv = n / 1000;
+					return (Number.isInteger(kv) ? kv : kv.toFixed(1)) + " kV";
+				}
+				return n + " V";
+			}
 
 			function lineColor(voltageStr) {
 				const v = parseInt(voltageStr, 10) || 0;
-				if (v >= 300000) return "#D9534F";   // ≥300 kV: transmission
-				if (v >= 100000) return "#F0A500";   // 100–299 kV: sub-transmission
-				if (v >=  33000) return "#FFD93D";   // 33–99 kV: HV distribution
-				if (v >    0)    return "#9CCC65";   // <33 kV: LV distribution
-				return "#888";                       // unknown
+				if (v >= 300000) return "#D9534F";  // ≥300 kV: backbone transmission
+				if (v >= 100000) return "#F0A500";  // 100–299 kV: sub-transmission
+				if (v >=  33000) return "#FFD93D";  // 33–99 kV: HV distribution
+				if (v >       0) return "#9CCC65";  // <33 kV: LV distribution
+				return "#aaa";
 			}
 
-			const InfraLayer = L.Layer.extend({
-				initialize() {
-					this._group    = null;
-					this._debounce = null;
-					this._lastBbox = null;
-				},
+			function lineWeight(power, voltageStr) {
+				const v = parseInt(voltageStr, 10) || 0;
+				if (power === "line") return v >= 300000 ? 3 : v >= 100000 ? 2.5 : 2;
+				if (power === "cable") return 1.6;
+				return 1.2; // minor_line
+			}
 
-				onAdd(map) {
-					if (!map.getPane("dwInfraPane")) {
-						map.createPane("dwInfraPane");
-						map.getPane("dwInfraPane").style.zIndex = "410";
-					}
-					this._group = L.layerGroup().addTo(map);
-					this._fetch();
-					map.on("moveend zoomend", this._onViewChange, this);
-				},
+			function pointIcon(glyph, fill, size) {
+				size = size || 16;
+				return L.divIcon({
+					className: "dw-infra-icon",
+					html: `<svg viewBox="0 0 16 16" width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">` +
+					      `<circle cx="8" cy="8" r="6.5" fill="${fill}" stroke="#222" stroke-width="1" opacity="0.92"/>` +
+					      `<text x="8" y="11.5" text-anchor="middle" font-size="9" font-family="sans-serif" fill="#fff">${glyph}</text>` +
+					      `</svg>`,
+					iconSize:   [size, size],
+					iconAnchor: [size / 2, size / 2],
+				});
+			}
 
-				onRemove(map) {
-					clearTimeout(this._debounce);
-					this._debounce = null;
-					map.off("moveend zoomend", this._onViewChange, this);
-					if (this._group) { this._group.remove(); this._group = null; }
-				},
+			return makeOverpassLayer({
+				label:        "PowerInfra",
+				pane:         "dwInfraPane",
+				paneZIndex:   410,
+				minZoom:      9,   // show major transmission lines from z9
+				padBounds:    0.15,
+				clickThrough: false,
+				attribution:  'Infrastructure © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors',
 
-				_onViewChange() {
-					clearTimeout(this._debounce);
-					this._debounce = setTimeout(() => this._fetch(), 400);
-				},
-
-				_fetch() {
-					const map = this._map;
-					if (!map || !this._group) return;
-					if (map.getZoom() < MIN_ZOOM) { this._group.clearLayers(); return; }
-
-					const b    = map.getBounds().pad(0.1);
-					const bbox = `${b.getSouth().toFixed(4)},${b.getWest().toFixed(4)},${b.getNorth().toFixed(4)},${b.getEast().toFixed(4)}`;
-					if (bbox === this._lastBbox) return;
-					this._lastBbox = bbox;
-
-					const q =
-						`[out:json][timeout:25];(` +
+				// At low zooms only query major lines to keep payload small.
+				buildQuery: (bbox, zoom) => {
+					const full = zoom >= 12;
+					return (
+						`[out:json][timeout:30];(` +
 						`way[power=line](${bbox});` +
-						`way[power=minor_line](${bbox});` +
+						(full ? `way[power=minor_line](${bbox});` : "") +
+						(full ? `way[power=cable](${bbox});` : "") +
 						`way[power=substation](${bbox});` +
 						`node[power=substation](${bbox});` +
 						`way[power=plant](${bbox});` +
 						`node[power=plant](${bbox});` +
-						`node[power=generator][\"generator:source\"=wind](${bbox});` +
-						`);out geom tags;`;
-
-					GM_xmlhttpRequest({
-						method:  "POST",
-						url:     OVERPASS,
-						headers: { "Content-Type": "application/x-www-form-urlencoded" },
-						data:    "data=" + encodeURIComponent(q),
-						timeout: 60000,
-						onload:  (r) => {
-							if (r.status !== 200) return;
-							try {
-								const json = JSON.parse(r.responseText);
-								if (this._group) this._render(json.elements || []);
-							} catch (e) {
-								console.warn("[CustomTiles] OpenInfra parse error", e);
-							}
-						},
-						onerror: (e) => console.warn("[CustomTiles] OpenInfra request error", e),
-					});
+						(full ? `node[power=transformer](${bbox});` : "") +
+						`node[power=generator]["generator:source"=wind](${bbox});` +
+						`way[power=generator]["generator:source"=solar](${bbox});` +
+						`node[power=generator]["generator:source"=solar](${bbox});` +
+						`);out geom tags;`
+					);
 				},
 
-				_render(elements) {
-					if (!this._group) return;
-					this._group.clearLayers();
+				render: (group, elements, zoom) => {
 					for (const el of elements) {
-						const tags = el.tags || {};
+						const tags  = el.tags || {};
 						const power = tags.power;
 						if (!power) continue;
+						const geom  = el.geometry || [];
 
-						if (el.type === "way" && el.geometry && (power === "line" || power === "minor_line")) {
-							const latlngs = el.geometry.map(g => [g.lat, g.lon]);
-							const color = lineColor(tags.voltage);
-							L.polyline(latlngs, {
-								pane: "dwInfraPane",
-								color,
-								weight: power === "line" ? 2.2 : 1.4,
-								opacity: 0.85,
-							}).bindTooltip(
-								`<b>${tags.voltage ? tags.voltage + " V" : "Power " + power}</b>` +
+						// ----- overhead / underground lines -----
+						if (el.type === "way" && geom.length &&
+							(power === "line" || power === "minor_line" || power === "cable")) {
+							const latlngs = geom.map(g => [g.lat, g.lon]);
+							const color   = lineColor(tags.voltage);
+							const weight  = lineWeight(power, tags.voltage);
+							const vLabel  = fmtVoltage(tags.voltage);
+							const tip =
+								`<b>${vLabel || (power === "cable" ? "Underground cable" : "Power line")}</b>` +
+								(tags.name     ? `<br>${tags.name}` : "") +
 								(tags.operator ? `<br>${tags.operator}` : "") +
-								(tags.ref ? `<br>Ref: ${tags.ref}` : ""),
-								{ className: "dw-infra-tip", sticky: true },
-							).addTo(this._group);
+								(tags.ref      ? `<br>Ref: ${tags.ref}` : "");
+							// Dark casing first (non-interactive) for visibility on any basemap
+							L.polyline(latlngs, {
+								pane: "dwInfraPane", color: "#222",
+								weight: weight + 2.5, opacity: 0.35, interactive: false,
+							}).addTo(group);
+							L.polyline(latlngs, {
+								pane: "dwInfraPane", color,
+								weight, opacity: 0.92,
+								dashArray: power === "cable" ? "6 4" : null,
+							}).bindTooltip(tip, { className: "dw-infra-tip", sticky: true })
+							  .addTo(group);
 							continue;
 						}
 
+						// ----- substation / plant polygons -----
+						if (el.type === "way" && geom.length &&
+							(power === "substation" || power === "plant")) {
+							const latlngs = geom.map(g => [g.lat, g.lon]);
+							const isPlant = power === "plant";
+							const fill    = isPlant ? "#9B59B6" : "#F0A500";
+							const vLabel  = fmtVoltage(tags.voltage);
+							const tip =
+								`<b>${tags.name || (isPlant ? "Power plant" : "Substation")}</b>` +
+								(vLabel                           ? `<br>${vLabel}` : "") +
+								(tags.operator                    ? `<br>${tags.operator}` : "") +
+								(tags["plant:source"]             ? `<br>Source: ${tags["plant:source"]}` : "") +
+								(tags["plant:output:electricity"] ? `<br>Output: ${tags["plant:output:electricity"]}` : "");
+							L.polygon(latlngs, {
+								pane: "dwInfraPane", color: fill, weight: 1.5,
+								opacity: 0.9, fillColor: fill, fillOpacity: 0.2,
+							}).bindTooltip(tip, { className: "dw-infra-tip", sticky: true })
+							  .addTo(group);
+							continue;
+						}
+
+						// ----- solar farm polygons -----
+						if (el.type === "way" && geom.length &&
+							power === "generator" && tags["generator:source"] === "solar") {
+							const latlngs = geom.map(g => [g.lat, g.lon]);
+							const tip =
+								`<b>${tags.name || "Solar farm"}</b>` +
+								(tags["generator:output:electricity"] ? `<br>Output: ${tags["generator:output:electricity"]}` : "") +
+								(tags.operator                        ? `<br>${tags.operator}` : "");
+							L.polygon(latlngs, {
+								pane: "dwInfraPane", color: "#F6C90E", weight: 1.5,
+								opacity: 0.9, fillColor: "#F6C90E", fillOpacity: 0.25,
+							}).bindTooltip(tip, { className: "dw-infra-tip", sticky: true })
+							  .addTo(group);
+							continue;
+						}
+
+						// ----- point features -----
 						let lat, lon;
-						if (el.type === "node") { lat = el.lat; lon = el.lon; }
-						else if (el.geometry && el.geometry.length) {
+						if (el.type === "node") {
+							lat = el.lat; lon = el.lon;
+						} else if (geom.length) {
 							let sLat = 0, sLon = 0;
-							for (const g of el.geometry) { sLat += g.lat; sLon += g.lon; }
-							lat = sLat / el.geometry.length;
-							lon = sLon / el.geometry.length;
+							for (const g of geom) { sLat += g.lat; sLon += g.lon; }
+							lat = sLat / geom.length; lon = sLon / geom.length;
 						} else { continue; }
 						if (!isFinite(lat) || !isFinite(lon)) continue;
 
-						let glyph = "⚡", fill = "#F0A500";   // ⚡ substation
-						if (power === "plant")     { glyph = "■"; fill = "#9B59B6"; }   // ■ plant
-						else if (power === "generator") { glyph = "❁"; fill = "#5B9BD5"; }   // ❁ wind turbine
+						const src = tags["generator:source"] || "";
+						let glyph, fill, label;
+						if      (power === "substation")   { glyph = "⚡"; fill = "#F0A500"; label = tags.name || "Substation"; }
+						else if (power === "plant")        { glyph = "⚙"; fill = "#9B59B6"; label = tags.name || "Power plant"; }
+						else if (power === "transformer")  { glyph = "T";  fill = "#E67E22"; label = "Transformer"; }
+						else if (src   === "wind")         { glyph = "〇"; fill = "#5B9BD5"; label = tags.name || "Wind turbine"; }
+						else if (src   === "solar")        { glyph = "☀"; fill = "#F6C90E"; label = tags.name || "Solar generator"; }
+						else                               { glyph = "⚡"; fill = "#aaa";    label = tags.name || power; }
 
-						const svg =
-							`<svg viewBox="0 0 16 16" width="16" height="16" xmlns="http://www.w3.org/2000/svg">` +
-							`<circle cx="8" cy="8" r="6.5" fill="${fill}" stroke="#333" stroke-width="1" opacity="0.9"/>` +
-							`<text x="8" y="11.5" text-anchor="middle" font-size="9.5" font-family="sans-serif" fill="#fff">${glyph}</text>` +
-							`</svg>`;
+						const sz  = power === "transformer" ? 12 : 16;
+						const vLabel = fmtVoltage(tags.voltage);
+						let tip = `<b>${label}</b>`;
+						if (vLabel)                                   tip += `<br>${vLabel}`;
+						if (tags.operator)                            tip += `<br>${tags.operator}`;
+						if (tags["generator:output:electricity"])     tip += `<br>Output: ${tags["generator:output:electricity"]}`;
+						if (tags["plant:source"])                     tip += `<br>Source: ${tags["plant:source"]}`;
 
-						const icon = L.divIcon({
-							className: "dw-infra-icon",
-							html: svg,
-							iconSize:   [16, 16],
-							iconAnchor: [8, 8],
-						});
-
-						let tip = `<b>${tags.name || ("Power " + power)}</b>`;
-						if (tags.voltage)  tip += `<br>Voltage: ${tags.voltage} V`;
-						if (tags.operator) tip += `<br>Operator: ${tags.operator}`;
-
-						L.marker([lat, lon], { icon, pane: "dwInfraPane", interactive: true })
+						L.marker([lat, lon], { icon: pointIcon(glyph, fill, sz), pane: "dwInfraPane", interactive: true })
 							.bindTooltip(tip, { className: "dw-infra-tip", sticky: true })
-							.addTo(this._group);
+							.addTo(group);
 					}
 				},
-
-				getAttribution() {
-					return "Infrastructure © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\" rel=\"noreferrer\">OpenStreetMap</a> contributors";
-				},
 			});
-
-			return new InfraLayer();
 		}
 	}
 
@@ -2101,122 +3288,60 @@
 	// min zoom 9 so we don't pull continent-scale geometry on world view.
 	class NationalParksLayerProvider extends LayerProvider {
 		create() {
-			const L        = pageWin.L;
-			const OVERPASS = "https://overpass.kumi.systems/api/interpreter";
-			const MIN_ZOOM = 9;
-
-			const ParksLayer = L.Layer.extend({
-				initialize() {
-					this._group    = null;
-					this._debounce = null;
-					this._lastBbox = null;
-				},
-
-				onAdd(map) {
-					if (!map.getPane("dwParksPane")) {
-						map.createPane("dwParksPane");
-						map.getPane("dwParksPane").style.zIndex = "395";
-						map.getPane("dwParksPane").style.pointerEvents = "none";
-					}
-					this._group = L.layerGroup().addTo(map);
-					this._fetch();
-					map.on("moveend zoomend", this._onViewChange, this);
-				},
-
-				onRemove(map) {
-					clearTimeout(this._debounce);
-					this._debounce = null;
-					map.off("moveend zoomend", this._onViewChange, this);
-					if (this._group) { this._group.remove(); this._group = null; }
-				},
-
-				_onViewChange() {
-					clearTimeout(this._debounce);
-					this._debounce = setTimeout(() => this._fetch(), 500);
-				},
-
-				_fetch() {
-					const map = this._map;
-					if (!map || !this._group) return;
-					if (map.getZoom() < MIN_ZOOM) { this._group.clearLayers(); return; }
-
-					const b    = map.getBounds();
-					const bbox = `${b.getSouth().toFixed(4)},${b.getWest().toFixed(4)},${b.getNorth().toFixed(4)},${b.getEast().toFixed(4)}`;
-					if (bbox === this._lastBbox) return;
-					this._lastBbox = bbox;
-
-					// `boundary=national_park` is the strict tag; `protected_area`
-					// with protect_class 1–4 covers most reserves people care about
-					// (strict reserves, wilderness, national parks, habitat areas).
-					const q =
-						`[out:json][timeout:25];(` +
-						`way[boundary=national_park](${bbox});` +
-						`relation[boundary=national_park](${bbox});` +
-						`way[boundary=protected_area][\"protect_class\"~\"^[1-4]$\"](${bbox});` +
-						`relation[boundary=protected_area][\"protect_class\"~\"^[1-4]$\"](${bbox});` +
-						`);out geom tags;`;
-
-					GM_xmlhttpRequest({
-						method:  "POST",
-						url:     OVERPASS,
-						headers: { "Content-Type": "application/x-www-form-urlencoded" },
-						data:    "data=" + encodeURIComponent(q),
-						timeout: 90000,
-						onload:  (r) => {
-							if (r.status !== 200) return;
-							try {
-								const json = JSON.parse(r.responseText);
-								if (this._group) this._render(json.elements || []);
-							} catch (e) {
-								console.warn("[CustomTiles] National Parks parse error", e);
-							}
-						},
-						onerror: (e) => console.warn("[CustomTiles] National Parks request error", e),
-					});
-				},
-
-				_render(elements) {
-					if (!this._group) return;
-					this._group.clearLayers();
+			return makeOverpassLayer({
+				label: "National Parks",
+				pane: "dwParksPane",
+				paneZIndex: 395,
+				minZoom: 9,
+				debounceMs: 500,
+				timeoutMs: 90000,
+				attribution:
+					'Parks © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors',
+				// `boundary=national_park` is the strict tag; `protected_area`
+				// with protect_class 1–4 covers most reserves people care
+				// about (strict reserves, wilderness, national parks, habitat).
+				buildQuery: (bbox) =>
+					`[out:json][timeout:25];(` +
+					`way[boundary=national_park](${bbox});` +
+					`relation[boundary=national_park](${bbox});` +
+					`way[boundary=protected_area]["protect_class"~"^[1-4]$"](${bbox});` +
+					`relation[boundary=protected_area]["protect_class"~"^[1-4]$"](${bbox});` +
+					`);out geom tags;`,
+				render: (group, elements) => {
 					for (const el of elements) {
 						const tags = el.tags || {};
 						const name = tags.name || "Protected area";
 						const isNP = tags.boundary === "national_park";
 						const style = {
 							pane: "dwParksPane",
-							color:       isNP ? "#1B5E20" : "#33691E",
-							weight:      1.5,
-							opacity:     0.85,
-							fillColor:   isNP ? "#43A047" : "#7CB342",
+							color: isNP ? "#1B5E20" : "#33691E",
+							weight: 1.5,
+							opacity: 0.85,
+							fillColor: isNP ? "#43A047" : "#7CB342",
 							fillOpacity: 0.18,
 						};
 
 						if (el.type === "way" && el.geometry) {
-							const latlngs = el.geometry.map(g => [g.lat, g.lon]);
+							const latlngs = el.geometry.map((g) => [g.lat, g.lon]);
 							L.polygon(latlngs, style)
 								.bindTooltip(name, { className: "dw-park-tip", sticky: true })
-								.addTo(this._group);
+								.addTo(group);
 						} else if (el.type === "relation" && el.members) {
 							const rings = [];
 							for (const m of el.members) {
 								if (m.type !== "way" || !m.geometry) continue;
-								if (m.role && m.role !== "outer" && m.role !== "inner") continue;
-								rings.push(m.geometry.map(g => [g.lat, g.lon]));
+								if (m.role && m.role !== "outer" && m.role !== "inner")
+									continue;
+								rings.push(m.geometry.map((g) => [g.lat, g.lon]));
 							}
 							if (!rings.length) continue;
 							L.polygon(rings, style)
 								.bindTooltip(name, { className: "dw-park-tip", sticky: true })
-								.addTo(this._group);
+								.addTo(group);
 						}
 					}
 				},
-
-				getAttribution() {
-					return "Parks © <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\" rel=\"noreferrer\">OpenStreetMap</a> contributors";
-				},
 			});
-
-			return new ParksLayer();
 		}
 	}
 
@@ -2227,38 +3352,46 @@
 	// request — the cache hits for tile-aligned bboxes, so this is fast.
 	class LightPollutionLayerProvider extends LayerProvider {
 		create() {
-			const MERC_ORIGIN = 20037508.3428;
-			const MERC_FULL = 2 * MERC_ORIGIN;
 			const TILE_PX = 256;
 			const wmsParams =
 				"?REQUEST=GetMap&SERVICE=WMS&VERSION=1.3.0&FORMAT=image%2Fpng" +
-				"&STYLES=" + encodeURIComponent(CFG.LIGHTPOL_WMS_STYLE) +
+				"&STYLES=" +
+				encodeURIComponent(CFG.LIGHTPOL_WMS_STYLE) +
 				"&TRANSPARENT=TRUE" +
-				"&LAYERS=" + encodeURIComponent(CFG.LIGHTPOL_WMS_LAYER) +
+				"&LAYERS=" +
+				encodeURIComponent(CFG.LIGHTPOL_WMS_LAYER) +
 				"&TILED=true&SRS=EPSG%3A3857&CRS=EPSG%3A3857" +
-				"&WIDTH=" + TILE_PX + "&HEIGHT=" + TILE_PX;
+				"&WIDTH=" +
+				TILE_PX +
+				"&HEIGHT=" +
+				TILE_PX;
 
 			const LightPolWmsLayer = L.TileLayer.extend({
 				getTileUrl(coords) {
-					const n = Math.pow(2, coords.z);
-					const tw = MERC_FULL / n;
-					const west = -MERC_ORIGIN + coords.x * tw;
-					const east = west + tw;
-					const north = MERC_ORIGIN - coords.y * tw;
-					const south = north - tw;
-					return CFG.LIGHTPOL_WMS_BASE + wmsParams +
-						"&BBOX=" + west + "," + south + "," + east + "," + north;
+					const bb = tileToBBox3857(coords.z, coords.x, coords.y);
+					return (
+						CFG.LIGHTPOL_WMS_BASE +
+						wmsParams +
+						"&BBOX=" +
+						bb.west +
+						"," +
+						bb.south +
+						"," +
+						bb.east +
+						"," +
+						bb.north
+					);
 				},
 			});
 
 			return new LightPolWmsLayer("", {
-				tileSize:    TILE_PX,
-				minZoom:     0,
+				tileSize: TILE_PX,
+				minZoom: 0,
 				maxNativeZoom: 12,
-				maxZoom:     22,
-				opacity:     0.65,
+				maxZoom: 22,
+				opacity: 0.65,
 				attribution:
-					"Light pollution © <a href=\"https://www.lightpollutionmap.info/\" target=\"_blank\" rel=\"noreferrer\">lightpollutionmap.info</a>",
+					'Light pollution © <a href="https://www.lightpollutionmap.info/" target="_blank" rel="noreferrer">lightpollutionmap.info</a>',
 			});
 		}
 	}
@@ -2341,7 +3474,10 @@
 			if (!base) return;
 			for (const grp of base.querySelectorAll(".dw-layer-group")) {
 				const all = [...grp.querySelectorAll("label")];
-				grp.style.display = all.length && all.every((l) => l.style.display === "none") ? "none" : "";
+				grp.style.display =
+					all.length && all.every((l) => l.style.display === "none")
+						? "none"
+						: "";
 			}
 		}
 
@@ -2392,7 +3528,9 @@
 					`<input type="checkbox" id="${LayerManagerUI.escHtml(chkId)}"` +
 					` data-name="${LayerManagerUI.escHtml(item.name)}"` +
 					(checked ? " checked" : "") +
-					(isActive ? ' disabled title="Switch to another layer before archiving this one"' : "") +
+					(isActive
+						? ' disabled title="Switch to another layer before archiving this one"'
+						: "") +
 					`><span class="dw-manager-name">${LayerManagerUI.escHtml(displayName || item.name)}</span>` +
 					(isActive ? '<span class="dw-badge">active</span>' : "") +
 					"</label>"
@@ -2491,12 +3629,14 @@
 			this.qldToken.onRefresh = (token) => {
 				const qld = this.layers[CFG.LAYER_QLD];
 				const roads = this.layers[CFG.LAYER_ROADS];
-				if (qld) qld.setUrl(CFG.QLD_TILE_TPL + (token ? "?token=" + token : ""));
+				if (qld)
+					qld.setUrl(CFG.QLD_TILE_TPL + (token ? "?token=" + token : ""));
 				if (roads) roads.redraw();
 			};
 			this.appleToken.onRefresh = (accessKey, version) => {
 				const apple = this.layers[CFG.LAYER_APPLE];
-				if (apple) apple.setUrl(AppleMapsLayerProvider.tileUrl(accessKey, version));
+				if (apple)
+					apple.setUrl(AppleMapsLayerProvider.tileUrl(accessKey, version));
 			};
 		}
 
@@ -2517,7 +3657,10 @@
 			} else {
 				this.appleToken.get((err) => {
 					if (err)
-						console.warn("[CustomTiles] Initial Apple token fetch:", err.message);
+						console.warn(
+							"[CustomTiles] Initial Apple token fetch:",
+							err.message,
+						);
 				});
 			}
 
@@ -2593,64 +3736,87 @@
 			this.injected = true;
 
 			try {
-				this.layers[CFG.LAYER_GOOGLE] = new GoogleHybridLayerProvider().create();
-				this.layers[CFG.LAYER_APPLE] = new AppleMapsLayerProvider(this.appleToken).create();
-				this.layers[CFG.LAYER_STAMEN_TONER] = new StamenTonerLayerProvider().create();
+				this.layers[CFG.LAYER_GOOGLE] =
+					new GoogleHybridLayerProvider().create();
+				this.layers[CFG.LAYER_APPLE] = new AppleMapsLayerProvider(
+					this.appleToken,
+				).create();
+				this.layers[CFG.LAYER_STAMEN_TONER] =
+					new StamenTonerLayerProvider().create();
 				this.layers[CFG.LAYER_WAYBACK] = new WaybackLayerProvider().create();
 				const wayLyr = this.layers[CFG.LAYER_WAYBACK];
 				this.waybackHistControl = this._makeHistoryBar({
 					layer: wayLyr,
 					event: "histchange",
 					getCount: () => wayLyr.getHistCount(),
-					getIdx:   () => wayLyr.getHistIdx(),
-					setIdx:   (i) => wayLyr.setHistIdx(i),
+					getIdx: () => wayLyr.getHistIdx(),
+					setIdx: (i) => wayLyr.setHistIdx(i),
 					getLabel: (i) => wayLyr.getHistLabel(i),
 				});
-				this.layers[CFG.LAYER_QLD] = new QldGlobeLayerProvider(this.qldToken).create();
-				this.layers[CFG.LAYER_HIST] = new QldHistoricalLayerProvider(this.qldPhotosToken).create();
+				this.layers[CFG.LAYER_QLD] = new QldGlobeLayerProvider(
+					this.qldToken,
+				).create();
+				this.layers[CFG.LAYER_HIST] = new QldHistoricalLayerProvider(
+					this.qldPhotosToken,
+				).create();
 				const qldLyr = this.layers[CFG.LAYER_HIST];
 				this.histCompass = this._makeHistoryBar({
 					layer: qldLyr,
 					event: "capturechange",
 					getCount: () => qldLyr.getCaptureCount(),
-					getIdx:   () => qldLyr.getCaptureIdx(),
-					setIdx:   (i) => qldLyr.setCapture(i),
+					getIdx: () => qldLyr.getCaptureIdx(),
+					setIdx: (i) => qldLyr.setCapture(i),
 					getLabel: (i) => qldLyr.getCaptureDate(i),
 				});
 
 				ctrl.addBaseLayer(this.layers[CFG.LAYER_GOOGLE], CFG.LAYER_GOOGLE);
 				ctrl.addBaseLayer(this.layers[CFG.LAYER_APPLE], CFG.LAYER_APPLE);
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_STAMEN_TONER], CFG.LAYER_STAMEN_TONER);
+				ctrl.addBaseLayer(
+					this.layers[CFG.LAYER_STAMEN_TONER],
+					CFG.LAYER_STAMEN_TONER,
+				);
 				ctrl.addBaseLayer(this.layers[CFG.LAYER_WAYBACK], CFG.LAYER_WAYBACK);
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_QLD], CFG.LAYER_QLD);
+				ctrl.addBaseLayer(this.layers[CFG.LAYER_QLD],  CFG.LAYER_QLD);
 				ctrl.addBaseLayer(this.layers[CFG.LAYER_HIST], CFG.LAYER_HIST);
+				this.layers[CFG.LAYER_TOPO] = new QldTopoLayerProvider().create();
+				ctrl.addBaseLayer(this.layers[CFG.LAYER_TOPO], CFG.LAYER_TOPO);
 
 				this._injectGroupHeaders(ctrl);
 
-				this.layers[CFG.LAYER_STRAVA] = new StravaHeatmapLayerProvider().create();
+				this.layers[CFG.LAYER_STRAVA] =
+					new StravaHeatmapLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_STRAVA], CFG.LAYER_STRAVA);
 
-				this.layers[CFG.LAYER_GARMIN] = new GarminHeatmapLayerProvider().create();
+				this.layers[CFG.LAYER_GARMIN] =
+					new GarminHeatmapLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_GARMIN], CFG.LAYER_GARMIN);
 
 				this.layers[CFG.LAYER_UW] = new UnityWaterLayerProvider([
 					{
-						url: CFG.UW_FS_BASE + "/ArcGIS/rest/services/UWPublicAccessWaterInfrastructureLayers/FeatureServer/10",
+						url:
+							CFG.UW_FS_BASE +
+							"/ArcGIS/rest/services/UWPublicAccessWaterInfrastructureLayers/FeatureServer/10",
 						fields: "SubtypeCD",
 						style: (f) => {
 							const s = f.properties && f.properties.SubtypeCD;
-							return s === 11101 ? { color: "#005ce6", weight: 3,   opacity: 0.85 }
-							     : s === 11102 ? { color: "#00c5ff", weight: 2.5, opacity: 0.85 }
-							     :               { color: "#73b2ff", weight: 1.5, opacity: 0.85 };
+							return s === 11101
+								? { color: "#005ce6", weight: 3, opacity: 0.85 }
+								: s === 11102
+									? { color: "#00c5ff", weight: 2.5, opacity: 0.85 }
+									: { color: "#73b2ff", weight: 1.5, opacity: 0.85 };
 						},
 					},
 					{
-						url: CFG.UW_FS_BASE + "/ArcGIS/rest/services/UWPublicAccessSewerInfrastructureLayers/FeatureServer/11",
+						url:
+							CFG.UW_FS_BASE +
+							"/ArcGIS/rest/services/UWPublicAccessSewerInfrastructureLayers/FeatureServer/11",
 						fields: "NominalDiameter",
 						style: { color: "#734c00", weight: 1.5, opacity: 0.85 },
 					},
 					{
-						url: CFG.UW_FS_BASE + "/ArcGIS/rest/services/UWPublicAccessSewerInfrastructureLayers/FeatureServer/12",
+						url:
+							CFG.UW_FS_BASE +
+							"/ArcGIS/rest/services/UWPublicAccessSewerInfrastructureLayers/FeatureServer/12",
 						fields: "NominalDiameter",
 						style: { color: "#df3c00", weight: 2, opacity: 0.85 },
 					},
@@ -2660,29 +3826,38 @@
 				this.layers[CFG.LAYER_FLIGHTS] = new FlightsLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_FLIGHTS], CFG.LAYER_FLIGHTS);
 
-				this.layers[CFG.LAYER_MARINE] = new MarineTrafficLayerProvider().create();
+				this.layers[CFG.LAYER_MARINE] =
+					new MarineTrafficLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_MARINE], CFG.LAYER_MARINE);
 
-				this.layers[CFG.LAYER_MOBILE] = new MobileCoverageLayerProvider().create();
+				this.layers[CFG.LAYER_MOBILE] =
+					new MobileCoverageLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_MOBILE], CFG.LAYER_MOBILE);
 
-				this.layers[CFG.LAYER_SEAMARKS] = new OpenSeaMapLayerProvider().create();
+				this.layers[CFG.LAYER_SEAMARKS] =
+					new OpenSeaMapLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_SEAMARKS], CFG.LAYER_SEAMARKS);
 
 				this.layers[CFG.LAYER_INFRA] = new PowerInfraLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_INFRA], CFG.LAYER_INFRA);
 
-				this.layers[CFG.LAYER_PARKS] = new NationalParksLayerProvider().create();
+				this.layers[CFG.LAYER_PARKS] =
+					new NationalParksLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_PARKS], CFG.LAYER_PARKS);
 
-				this.layers[CFG.LAYER_LIGHTPOL] = new LightPollutionLayerProvider().create();
+				this.layers[CFG.LAYER_LIGHTPOL] =
+					new LightPollutionLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_LIGHTPOL], CFG.LAYER_LIGHTPOL);
 
-				this.layers[CFG.LAYER_CADASTRE] = new QldCadastreLayerProvider().create();
+				this.layers[CFG.LAYER_CADASTRE] =
+					new QldCadastreLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_CADASTRE], CFG.LAYER_CADASTRE);
 
 				this.layers[CFG.LAYER_QPWS] = new QpwsLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_QPWS], CFG.LAYER_QPWS);
+
+				this.layers[CFG.LAYER_RELIEF] = new QldReliefLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_RELIEF], CFG.LAYER_RELIEF);
 
 				if (!map.getPane("dwRoadsPane")) {
 					map.createPane("dwRoadsPane");
@@ -2695,7 +3870,9 @@
 					map.getPane("dwLabelsPane").style.pointerEvents = "none";
 				}
 
-				this.layers[CFG.LAYER_ROADS] = new QldRoadsLayerProvider(this.qldToken).create();
+				this.layers[CFG.LAYER_ROADS] = new QldRoadsLayerProvider(
+					this.qldToken,
+				).create();
 				this.layers[CFG.LAYER_LABELS] = new QldLabelsLayerProvider().create();
 
 				map.on("baselayerchange", () => {
@@ -2706,9 +3883,10 @@
 				});
 				map.on("layeradd", (e) => {
 					if (
-						e.layer === this.layers[CFG.LAYER_QLD] ||
-						e.layer === this.layers[CFG.LAYER_GOOGLE] ||
-						e.layer === this.layers[CFG.LAYER_HIST] ||
+						e.layer === this.layers[CFG.LAYER_QLD]    ||
+						e.layer === this.layers[CFG.LAYER_GOOGLE]  ||
+						e.layer === this.layers[CFG.LAYER_HIST]    ||
+						e.layer === this.layers[CFG.LAYER_TOPO]    ||
 						e.layer === this.layers[CFG.LAYER_WAYBACK]
 					) {
 						this._syncLabelsLayer(map);
@@ -2719,6 +3897,7 @@
 				});
 
 				this._restoreLayer(map);
+				this._restoreOverlays(map, ctrl);
 				new LayerManagerUI(ctrl).setup();
 				this._hookSitePopup(map);
 			} catch (e) {
@@ -2730,11 +3909,19 @@
 		// -- Layer sync ---------------------------------------------------
 
 		_syncLabelsLayer(map) {
-			const isQld = map.hasLayer(this.layers[CFG.LAYER_QLD]) || map.hasLayer(this.layers[CFG.LAYER_HIST]);
-			for (const lyr of [this.layers[CFG.LAYER_ROADS], this.layers[CFG.LAYER_LABELS]]) {
+			const isQld =
+				map.hasLayer(this.layers[CFG.LAYER_QLD]) ||
+				map.hasLayer(this.layers[CFG.LAYER_HIST]);
+			for (const lyr of [
+				this.layers[CFG.LAYER_ROADS],
+				this.layers[CFG.LAYER_LABELS],
+			]) {
 				if (!lyr) continue;
-				if (isQld) { if (!map.hasLayer(lyr)) map.addLayer(lyr); }
-				else { if (map.hasLayer(lyr)) map.removeLayer(lyr); }
+				if (isQld) {
+					if (!map.hasLayer(lyr)) map.addLayer(lyr);
+				} else {
+					if (map.hasLayer(lyr)) map.removeLayer(lyr);
+				}
 			}
 		}
 
@@ -2742,8 +3929,7 @@
 			const hist = this.histCompass;
 			if (!hist) return;
 			const isHist = !!(
-				this.layers[CFG.LAYER_HIST] &&
-				map.hasLayer(this.layers[CFG.LAYER_HIST])
+				this.layers[CFG.LAYER_HIST] && map.hasLayer(this.layers[CFG.LAYER_HIST])
 			);
 			if (isHist && !hist._map) hist.addTo(map);
 			else if (!isHist && hist._map) hist.remove();
@@ -2762,8 +3948,9 @@
 
 		_syncZoomLevel(map) {
 			const isDeep =
-				map.hasLayer(this.layers[CFG.LAYER_QLD]) ||
+				map.hasLayer(this.layers[CFG.LAYER_QLD])  ||
 				map.hasLayer(this.layers[CFG.LAYER_HIST]) ||
+				map.hasLayer(this.layers[CFG.LAYER_TOPO]) ||
 				map.hasLayer(this.layers[CFG.LAYER_WAYBACK]);
 			const newMax = isDeep ? 25 : 22;
 			map.setMaxZoom(newMax);
@@ -2771,6 +3958,33 @@
 		}
 
 		// -- Layer restore ------------------------------------------------
+
+		// Save which overlays are active to localStorage so they survive page
+		// reloads. Restore is called once after all overlays are registered;
+		// saving happens on every overlayadd/overlayremove event.
+		_restoreOverlays(map, ctrl) {
+			const overlayNames = new Set(
+				ctrl._layers.filter(l => l.overlay).map(l => l.name)
+			);
+			try {
+				const saved = JSON.parse(localStorage.getItem(CFG.OVERLAY_STATE_KEY) || "[]");
+				for (const name of saved) {
+					const lyr = this.layers[name];
+					if (lyr && overlayNames.has(name) && !map.hasLayer(lyr)) {
+						map.addLayer(lyr);
+					}
+				}
+			} catch (_) {}
+
+			const save = () => {
+				const active = [];
+				for (const [name, lyr] of Object.entries(this.layers)) {
+					if (lyr && overlayNames.has(name) && map.hasLayer(lyr)) active.push(name);
+				}
+				try { localStorage.setItem(CFG.OVERLAY_STATE_KEY, JSON.stringify(active)); } catch (_) {}
+			};
+			map.on("overlayadd overlayremove", save);
+		}
 
 		_restoreLayer(map) {
 			const saved = this._readPageCookie(CFG.MAPTYPE_COOKIE);
@@ -2824,65 +4038,70 @@
 				const lng = parseFloat(parts[1]);
 				if (isNaN(lat) || isNaN(lng)) return;
 
-				// Give the coordinate title a class we can style
+				// Give the coordinate title a class we can style, and make it
+				// click-to-copy so "lat,lng" lands on the clipboard instantly.
 				titleEl.classList.add("dw-popup-coords");
+				titleEl.title = "Click to copy coordinates";
+				titleEl.addEventListener("click", () => {
+					const text = `${lat.toFixed(6)},${lng.toFixed(6)}`;
+					navigator.clipboard.writeText(text).then(() => {
+						titleEl.classList.add("dw-popup-coords--copied");
+						setTimeout(() => titleEl.classList.remove("dw-popup-coords--copied"), 1400);
+					}).catch(() => {});
+				});
 
-				// Collect native buttons and wrap them all in a flex row
-				const nativeBtns = [...pod.querySelectorAll("button")];
-				const btnRow = document.createElement("div");
-				btnRow.className = "dw-popup-btn-row";
-				if (nativeBtns.length) {
-					pod.insertBefore(btnRow, nativeBtns[0]);
-					nativeBtns.forEach((b) => btnRow.appendChild(b));
-				} else {
-					pod.appendChild(btnRow);
-				}
-
-				// Street View button — subtle blue to signal external link
+				// Street View button — matches the native button shape; blue
+				// accent signals "leaves the app". Appended at the end of the
+				// pod rather than wrapped in a row, because the site applies
+				// its own block/full-width button styling we'd be fighting.
 				const btn = document.createElement("button");
 				btn.className = "dw-sv-btn";
+				btn.type = "button";
 				btn.innerHTML =
-					'<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+					'<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
 					'<circle cx="12" cy="5" r="3.5"/>' +
 					'<path d="M12 10c-3 0-5 1.8-5 4v1h10v-1c0-2.2-2-4-5-4z"/>' +
 					'<path d="M9 19l1-5h4l1 5H9z"/>' +
-					'</svg>' +
-					'Street View';
+					"</svg>" +
+					"<span>Street View</span>";
 				btn.addEventListener("click", () => {
 					const svUrl =
 						"https://www.google.com/maps/@" +
-						lat.toFixed(6) + "," + lng.toFixed(6) +
+						lat.toFixed(6) +
+						"," +
+						lng.toFixed(6) +
 						",3a,75y,90t/data=!3m7!1e1";
 					window.open(svUrl, "_blank", "noopener,noreferrer");
 				});
-				btnRow.appendChild(btn);
+				pod.appendChild(btn);
 			});
 		}
 
 		_injectGroupHeaders(ctrl) {
 			const collapsedGroups = new Set(
-				JSON.parse(GM_getValue("dw_collapsed_groups", "[]"))
+				JSON.parse(GM_getValue("dw_collapsed_groups", "[]")),
 			);
-			const doInject = () => {
-				const container = ctrl.getContainer();
-				if (!container) return;
-				const base = container.querySelector(".leaflet-control-layers-base");
-				if (!base) return;
+
+			// Render one set of groups (base or overlay) into its section.
+			const injectSection = (sectionEl, groups) => {
+				if (!sectionEl) return;
 				const labelMap = new Map();
-				for (const lbl of base.querySelectorAll(":scope > label")) {
+				for (const lbl of sectionEl.querySelectorAll(":scope > label")) {
 					const span = lbl.querySelector("span");
-					if (span) {
-						const name = span.textContent.trim();
-						lbl.dataset.dwName = name;
-						labelMap.set(name, lbl);
-					}
+					if (!span) continue;
+					const name = span.textContent.trim();
+					lbl.dataset.dwName = name;
+					labelMap.set(name, lbl);
 				}
-				for (const group of DW_LAYER_GROUPS) {
-					const labels = group.names.map((n) => labelMap.get(n)).filter(Boolean);
+				for (const group of groups) {
+					const labels = group.names
+						.map((n) => labelMap.get(n))
+						.filter(Boolean);
 					if (!labels.length) continue;
 					const grpDiv = document.createElement("div");
 					grpDiv.className = "dw-layer-group";
-					if (collapsedGroups.has(group.header)) grpDiv.classList.add("dw-layer-group--closed");
+					if (collapsedGroups.has(group.header))
+						grpDiv.classList.add("dw-layer-group--closed");
 					const hdr = document.createElement("div");
 					hdr.className = "dw-layer-group-header";
 					hdr.textContent = group.header;
@@ -2890,13 +4109,16 @@
 						const nowClosed = grpDiv.classList.toggle("dw-layer-group--closed");
 						if (nowClosed) collapsedGroups.add(group.header);
 						else collapsedGroups.delete(group.header);
-						GM_setValue("dw_collapsed_groups", JSON.stringify([...collapsedGroups]));
+						GM_setValue(
+							"dw_collapsed_groups",
+							JSON.stringify([...collapsedGroups]),
+						);
 					});
 					grpDiv.appendChild(hdr);
 					const content = document.createElement("div");
 					content.className = "dw-layer-group-content";
 					grpDiv.appendChild(content);
-					base.insertBefore(grpDiv, labels[0]);
+					sectionEl.insertBefore(grpDiv, labels[0]);
 					for (const lbl of labels) {
 						content.appendChild(lbl);
 						if (group.shortLabels) {
@@ -2909,8 +4131,24 @@
 					}
 				}
 			};
+
+			const doInject = () => {
+				const container = ctrl.getContainer();
+				if (!container) return;
+				injectSection(
+					container.querySelector(".leaflet-control-layers-base"),
+					DW_LAYER_GROUPS,
+				);
+				injectSection(
+					container.querySelector(".leaflet-control-layers-overlays"),
+					DW_OVERLAY_GROUPS,
+				);
+			};
 			const origUpdate = ctrl._update.bind(ctrl);
-			ctrl._update = function () { origUpdate(); doInject(); };
+			ctrl._update = function () {
+				origUpdate();
+				doInject();
+			};
 			doInject();
 		}
 
@@ -2958,7 +4196,8 @@
 			const formatLabel = (lab, idx, count) => {
 				if (!count) return "Loading\u2026";
 				const s = lab ? String(lab) : "?";
-				const trimmed = s.length > 10 && /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
+				const trimmed =
+					s.length > 10 && /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
 				return count > 1 ? `${trimmed}  ${idx + 1}/${count}` : trimmed;
 			};
 
@@ -2975,7 +4214,10 @@
 
 			let debounce = null;
 			const applyIdx = (i, immediate) => {
-				if (debounce) { clearTimeout(debounce); debounce = null; }
+				if (debounce) {
+					clearTimeout(debounce);
+					debounce = null;
+				}
 				if (immediate) {
 					adapter.setIdx(i);
 				} else {
@@ -2997,7 +4239,11 @@
 			slider.addEventListener("input", () => {
 				const count = adapter.getCount();
 				const newIdx = Math.max(0, count - 1 - parseInt(slider.value, 10));
-				label.textContent = formatLabel(adapter.getLabel(newIdx), newIdx, count);
+				label.textContent = formatLabel(
+					adapter.getLabel(newIdx),
+					newIdx,
+					count,
+				);
 				applyIdx(newIdx, false);
 			});
 			slider.addEventListener("change", () => {
@@ -3010,7 +4256,9 @@
 			const onChange = () => update();
 
 			return {
-				get _map() { return attachedMap; },
+				get _map() {
+					return attachedMap;
+				},
 				addTo(map) {
 					if (attachedMap === map) return;
 					attachedMap = map;
@@ -3047,8 +4295,6 @@
 				".dw-manager-footer { padding: 5px 8px 1px; border-top: 1px solid #ddd; margin-top: 4px; }",
 				".dw-back-link { font-size: 11px; color: #888; text-decoration: none; cursor: pointer; }",
 				".dw-back-link:hover { color: #333; text-decoration: underline; }",
-				".dw-opacity-wrap { padding: 2px 6px 4px; }",
-				".dw-opacity-slider { display: block; width: 100%; margin: 2px 0 0; cursor: pointer; accent-color: #4a8; }",
 				".dw-history-bar { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1000; display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: rgba(255,255,255,0.95); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); font-size: 11px; font-family: sans-serif; white-space: nowrap; pointer-events: auto; width: min(82vw, 720px); box-sizing: border-box; }",
 				".dw-history-slider { flex: 1; min-width: 0; margin: 0; accent-color: #4a8; cursor: pointer; }",
 				".dw-history-slider:disabled { cursor: not-allowed; opacity: 0.4; }",
@@ -3063,12 +4309,18 @@
 				".dw-layer-group--closed > .dw-layer-group-content { display: none; }",
 				".dw-manager-group-hd { font-size: 10px; font-weight: 700; color: #aaa; text-transform: uppercase; letter-spacing: 0.05em; padding: 5px 6px 1px; margin-top: 3px; border-top: 1px solid #f0f0f0; }",
 				".dw-manager-group { padding-left: 6px; border-left: 2px solid #eee; margin: 0 0 2px 8px; }",
-				".dw-popup-coords { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: #6b7280; margin: 0 0 10px; letter-spacing: 0.04em; }",
-				".dw-popup-btn-row { display: flex; flex-wrap: wrap; gap: 6px; }",
-				".dw-popup-btn-row button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px; font-size: 12.5px; font-family: inherit; background: #f9f9f9; color: #374151; border: 1px solid #d1d5db; border-radius: 5px; cursor: pointer; white-space: nowrap; }",
-				".dw-popup-btn-row button:hover { background: #f0f0f0; border-color: #9ca3af; }",
-				".dw-sv-btn { background: #eff6ff !important; color: #1d4ed8 !important; border-color: #bfdbfe !important; }",
-				".dw-sv-btn:hover { background: #dbeafe !important; border-color: #93c5fd !important; }",
+				".dw-popup-coords { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: #6b7280; margin: 0 0 10px; letter-spacing: 0.04em; cursor: pointer; transition: color 0.12s; }",
+				".dw-popup-coords:hover { color: #374151; }",
+				".dw-popup-coords--copied { color: #16a34a !important; }",
+				".dw-qpws-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
+				".dw-qpws-tip b { font-weight: 700; }",
+				".dw-infra-tip { font-size: 11px; line-height: 1.4; }",
+				// Match the site's native popup buttons (full popup width,
+				// rounded, light border, generous padding) with a blue accent
+				// so Street View reads as the external/exit action.
+				".popup-on-location .dw-sv-btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; margin: 6px 0 0; padding: 12px 16px; font-size: 14px; font-family: inherit; font-weight: 500; line-height: 1.2; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; border-radius: 10px; cursor: pointer; box-sizing: border-box; }",
+				".popup-on-location .dw-sv-btn:hover { background: #dbeafe; border-color: #93c5fd; }",
+				".popup-on-location .dw-sv-btn svg { flex-shrink: 0; }",
 				".dw-flight-icon { background: none !important; border: none !important; }",
 				".dw-flight-tip { font-size: 11px; line-height: 1.4; }",
 				".dw-marine-icon { background: none !important; border: none !important; }",
@@ -3076,6 +4328,27 @@
 				".dw-cad-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
 				".dw-cad-tip b { font-weight: 700; }",
 				".dw-cad-tip .dw-cad-sub { color: #6b7280; }",
+				// Re-enable pointer events just on the SmartMap anchor (the
+				// surrounding tooltip is non-interactive so the cursor still
+				// passes hover events through to the map).
+				".dw-cad-tip .dw-cad-link { display: inline-block; margin-top: 3px; color: #1d4ed8; text-decoration: none; pointer-events: auto; }",
+				".dw-cad-tip .dw-cad-link:hover { text-decoration: underline; }",
+				// Sales popup — opened by clicking the "Sales ↗" link in the
+				// cadastre tooltip. Uses Leaflet's popup primitive so it
+				// inherits autopan + map-anchored behaviour for free.
+				".dw-sales-pop { font-size: 12px; line-height: 1.45; color: #1f2937; min-width: 250px; }",
+				".dw-sales-pop .dw-sales-hd { font-weight: 700; font-size: 12.5px; margin-bottom: 4px; color: #111827; }",
+				".dw-sales-pop .dw-sales-stats { color: #374151; margin-bottom: 6px; }",
+				".dw-sales-pop .dw-sales-sub { color: #6b7280; }",
+				".dw-sales-pop .dw-sales-row { margin: 4px 0; display: flex; gap: 8px; align-items: baseline; }",
+				".dw-sales-pop .dw-sales-k { flex: 0 0 64px; color: #6b7280; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }",
+				".dw-sales-pop .dw-sales-v { flex: 1; }",
+				".dw-sales-pop .dw-sales-events { margin: 0; padding: 0 0 0 4px; list-style: none; }",
+				".dw-sales-pop .dw-sales-events li { margin: 2px 0; }",
+				".dw-sales-pop .dw-sales-err { color: #b91c1c; padding: 4px 0; }",
+				".dw-sales-pop .dw-sales-loading { color: #6b7280; padding: 6px 0; font-style: italic; }",
+				".dw-sales-pop .dw-sales-source { display: inline-block; margin-top: 8px; color: #1d4ed8; text-decoration: none; }",
+				".dw-sales-pop .dw-sales-source:hover { text-decoration: underline; }",
 			].join("\n");
 
 			const style = document.createElement("style");
@@ -3111,4 +4384,3 @@
 
 	new CustomTilesApp().boot();
 })();
-
