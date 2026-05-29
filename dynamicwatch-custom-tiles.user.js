@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.8
+// @version      7.9.12
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, National Parks, OpenSeaMap, Unity Water, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -313,9 +313,13 @@
 		scheduleRefresh() {
 			if (this.refreshScheduled) return;
 			this.refreshScheduled = true;
-			const wait = Math.max(
-				30000,
-				this.expires - Date.now() - this._refreshMargin,
+			// Clamp to setTimeout's signed int32 ceiling — a freshly-acquired
+			// long-lived token can have `expires - Date.now()` > 24.8 days,
+			// which V8's setTimeout treats as "fire immediately" and would
+			// burn through the retry budget in a tight loop.
+			const wait = Math.min(
+				2147483647,
+				Math.max(30000, this.expires - Date.now() - this._refreshMargin),
 			);
 			setTimeout(() => {
 				this.refreshScheduled = false;
@@ -378,42 +382,34 @@
 		// Two-step: GET the QLD Globe homepage to harvest a CSRF token, then
 		// POST it to the token endpoint scoped to our service URL.
 		_fetch(done) {
-			GM_xmlhttpRequest({
-				method: "GET",
-				url: CFG.QLD_ORIGIN + "/",
+			gmGet(CFG.QLD_ORIGIN + "/", {
 				headers: {
 					"Accept": "text/html,*/*;q=0.8",
 					"Accept-Language": "en-US,en;q=0.9",
 					"Origin": CFG.QLD_ORIGIN,
 					"Referer": CFG.QLD_ORIGIN + "/",
 				},
-				onload: (r) => {
-					const csrf =
-						QldTokenManager._xsrfFromSetCookie(r.responseHeaders) ||
-						QldTokenManager._csrfFromHtml(r.responseText);
-					if (!csrf) {
-						done(
-							new Error(
-								`[${this._label}] CSRF token not found in Set-Cookie or HTML`,
-							),
-						);
-						return;
-					}
-					this._doPost(csrf, done);
-				},
-				onerror: () =>
-					done(
-						new Error(
-							`[${this._label}] GET qldglobe.information.qld.gov.au failed`,
-						),
-					),
+			}, (err, r) => {
+				if (err) {
+					done(new Error(
+						`[${this._label}] GET qldglobe.information.qld.gov.au failed`));
+					return;
+				}
+				const csrf =
+					QldTokenManager._xsrfFromSetCookie(r.responseHeaders) ||
+					QldTokenManager._csrfFromHtml(r.responseText);
+				if (!csrf) {
+					done(new Error(
+						`[${this._label}] CSRF token not found in Set-Cookie or HTML`));
+					return;
+				}
+				this._doPost(csrf, done);
 			});
 		}
 
 		_doPost(csrf, done) {
-			GM_xmlhttpRequest({
+			gmJsonGet(CFG.QLD_TOKEN_EP, {
 				method: "POST",
-				url: CFG.QLD_TOKEN_EP,
 				headers: {
 					"Content-Type": "application/json",
 					"X-Requested-With": "XMLHttpRequest",
@@ -436,36 +432,26 @@
 					},
 					_csrf: csrf,
 				}),
-				onload: (r) => {
-					if (r.status < 200 || r.status >= 300) {
-						done(
-							new Error(
-								`[${this._label}] Token endpoint HTTP ${r.status}: ${r.responseText.slice(0, 160)}`,
-							),
-							null,
-						);
-						return;
-					}
-					try {
-						const data = JSON.parse(r.responseText);
-						if (!data.token) throw new Error("No token field in response");
-						const exp = data.expires
-							? data.expires > 1e12
-								? data.expires
-								: data.expires * 1000
-							: Date.now() + CFG.DEFAULT_TTL;
-						this.save(data.token, exp);
-						console.info(
-							`[CustomTiles] ${this._label} token acquired, expires`,
-							new Date(exp).toISOString(),
-						);
-						done(null, data.token);
-					} catch (e) {
-						done(new Error(`[${this._label}] Parse error: ${e.message}`), null);
-					}
-				},
-				onerror: () =>
-					done(new Error(`[${this._label}] Token POST network error`)),
+			}, (err, data, raw) => {
+				if (err) {
+					const tail = raw && raw.responseText
+						? `: ${raw.responseText.slice(0, 160)}` : "";
+					done(new Error(`[${this._label}] Token endpoint ${err.message}${tail}`), null);
+					return;
+				}
+				if (!data.token) {
+					done(new Error(`[${this._label}] Parse error: No token field in response`), null);
+					return;
+				}
+				const exp = data.expires
+					? data.expires > 1e12 ? data.expires : data.expires * 1000
+					: Date.now() + CFG.DEFAULT_TTL;
+				this.save(data.token, exp);
+				console.info(
+					`[CustomTiles] ${this._label} token acquired, expires`,
+					new Date(exp).toISOString(),
+				);
+				done(null, data.token);
 			});
 		}
 
@@ -540,71 +526,62 @@
 		// Two-step: pull a DDG-signed JWT, then exchange it at Apple's
 		// bootstrap endpoint for a 30-minute accessKey + current build `v`.
 		_fetch(done) {
-			GM_xmlhttpRequest({
-				method: "GET",
-				url: CFG.APPLE_DDG_TOKEN_URL,
+			gmGet(CFG.APPLE_DDG_TOKEN_URL, {
 				headers: {
 					Accept: "*/*",
 					Referer: CFG.APPLE_DDG_ORIGIN + "/",
 				},
-				onload: (r) => {
-					if (r.status < 200 || r.status >= 300) {
-						done(new Error("[Apple] DDG token HTTP " + r.status));
-						return;
-					}
-					const jwt = (r.responseText || "").trim();
-					if (!/^[\w-]+\.[\w-]+\.[\w-]+$/.test(jwt)) {
-						done(new Error("[Apple] DDG returned invalid JWT"));
-						return;
-					}
-					this._doBootstrap(jwt, done);
-				},
-				onerror: () => done(new Error("[Apple] DDG token network error")),
+			}, (err, r) => {
+				if (err || r.status < 200 || r.status >= 300) {
+					done(new Error("[Apple] DDG token HTTP " + (r ? r.status : "network")));
+					return;
+				}
+				const jwt = (r.responseText || "").trim();
+				if (!/^[\w-]+\.[\w-]+\.[\w-]+$/.test(jwt)) {
+					done(new Error("[Apple] DDG returned invalid JWT"));
+					return;
+				}
+				this._doBootstrap(jwt, done);
 			});
 		}
 
 		_doBootstrap(jwt, done) {
-			GM_xmlhttpRequest({
-				method: "GET",
-				url: CFG.APPLE_BOOTSTRAP_URL,
+			gmGet(CFG.APPLE_BOOTSTRAP_URL, {
 				headers: {
 					Accept: "*/*",
 					Authorization: "Bearer " + jwt,
 					Origin: CFG.APPLE_DDG_ORIGIN,
 					Referer: CFG.APPLE_DDG_ORIGIN + "/",
 				},
-				onload: (r) => {
-					if (r.status < 200 || r.status >= 300) {
-						done(
-							new Error(
-								`[Apple] Bootstrap HTTP ${r.status}: ${r.responseText.slice(0, 160)}`,
-							),
-						);
-						return;
-					}
-					try {
-						const data = JSON.parse(r.responseText);
-						if (!data.accessKey)
-							throw new Error("No accessKey in bootstrap response");
-						// Pull the current `v` build number out of any tile-URL template
-						// in the response (tileSources, tileURLTemplate, etc.) so we
-						// don't drift onto a stale build.
-						const vMatch = r.responseText.match(/[?&]v=(\d+)/);
-						const version = vMatch ? vMatch[1] : this.version;
-						const exp = Date.now() + CFG.APPLE_TOKEN_TTL;
-						this.save(data.accessKey, version, exp);
-						console.info(
-							"[CustomTiles] Apple accessKey acquired, v=" +
-								version +
-								", expires",
-							new Date(exp).toISOString(),
-						);
-						done(null, data.accessKey, version);
-					} catch (e) {
-						done(new Error("[Apple] Bootstrap parse: " + e.message));
-					}
-				},
-				onerror: () => done(new Error("[Apple] Bootstrap network error")),
+			}, (err, r) => {
+				if (err) {
+					done(new Error("[Apple] Bootstrap network error"));
+					return;
+				}
+				if (r.status < 200 || r.status >= 300) {
+					done(new Error(
+						`[Apple] Bootstrap HTTP ${r.status}: ${r.responseText.slice(0, 160)}`));
+					return;
+				}
+				try {
+					const data = JSON.parse(r.responseText);
+					if (!data.accessKey)
+						throw new Error("No accessKey in bootstrap response");
+					// Pull the current `v` build number out of any tile-URL template
+					// in the response (tileSources, tileURLTemplate, etc.) so we
+					// don't drift onto a stale build.
+					const vMatch = r.responseText.match(/[?&]v=(\d+)/);
+					const version = vMatch ? vMatch[1] : this.version;
+					const exp = Date.now() + CFG.APPLE_TOKEN_TTL;
+					this.save(data.accessKey, version, exp);
+					console.info(
+						"[CustomTiles] Apple accessKey acquired, v=" + version +
+							", expires", new Date(exp).toISOString(),
+					);
+					done(null, data.accessKey, version);
+				} catch (e) {
+					done(new Error("[Apple] Bootstrap parse: " + e.message));
+				}
 			});
 		}
 	}
@@ -827,6 +804,11 @@
 			attribution: opts.attribution,
 			minZoom: opts.minZoom,
 			maxZoom: opts.maxZoom,
+			// Optional: when the export endpoint has a meaningful resolution
+			// ceiling (e.g. coarse coverage grids), set this and Leaflet will
+			// stretch the maxNativeZoom tiles instead of querying for tinier
+			// bboxes that just render the same coarse polygons.
+			maxNativeZoom: opts.maxNativeZoom,
 			tileSize,
 			pane: opts.pane,
 		});
@@ -927,38 +909,30 @@
 				_overpassQueue.run((done) => {
 					// Bail immediately if the view has already changed.
 					if (myGen !== this._gen) { done(); return; }
-					GM_xmlhttpRequest({
+					gmJsonGet(OVERPASS, {
 						method:  "POST",
-						url:     OVERPASS,
 						headers: { "Content-Type": "application/x-www-form-urlencoded" },
 						data:    "data=" + encodeURIComponent(opts.buildQuery(bbox, zoom)),
 						timeout: timeoutMs,
-						onload: (r) => {
-							done();
-							if (myGen !== this._gen || !this._group) return;
-							if (r.status !== 200) return;
-							try {
-								const json = JSON.parse(r.responseText);
-								// Deduplicate by OSM type+id — ways belonging to a
-								// relation are returned twice by `out geom tags`.
-								const seen = new Set();
-								const elements = (json.elements || []).filter(el => {
-									const key = el.type + "/" + el.id;
-									if (seen.has(key)) return false;
-									seen.add(key);
-									return true;
-								});
-								this._group.clearLayers();
-								opts.render(this._group, elements, zoom);
-							} catch (e) {
-								console.warn(`[CustomTiles] ${opts.label} parse error`, e);
-							}
-						},
-						onerror: (e) => {
-							done();
-							if (myGen === this._gen)
-								console.warn(`[CustomTiles] ${opts.label} request error`, e);
-						},
+					}, (err, json) => {
+						done();
+						if (myGen !== this._gen || !this._group) return;
+						if (err) {
+							console.warn(
+								`[CustomTiles] ${opts.label} request error`, err.message);
+							return;
+						}
+						// Deduplicate by OSM type+id — ways belonging to a relation
+						// are returned twice by `out geom tags`.
+						const seen = new Set();
+						const elements = (json.elements || []).filter(el => {
+							const key = el.type + "/" + el.id;
+							if (seen.has(key)) return false;
+							seen.add(key);
+							return true;
+						});
+						this._group.clearLayers();
+						opts.render(this._group, elements, zoom);
 					});
 				});
 			},
@@ -1074,34 +1048,32 @@
 				createTile(coords, done) {
 					const img = document.createElement("img");
 					img.setAttribute("role", "presentation");
-					GM_xmlhttpRequest({
-						method: "GET",
-						url:
-							TILE_BASE + coords.z + "/" + coords.x + "/" + coords.y + ".png",
+					const url =
+						TILE_BASE + coords.z + "/" + coords.x + "/" + coords.y + ".png";
+					gmGet(url, {
 						responseType: "arraybuffer",
 						headers: {
-							Origin: spoofOrigin,
+							Origin:  spoofOrigin,
 							Referer: spoofOrigin + "/",
-							Accept: "image/png,image/*,*/*;q=0.8",
+							Accept:  "image/png,image/*,*/*;q=0.8",
 						},
-						onload: (r) => {
-							if (r.status === 200) {
-								const blob = new Blob([r.response], { type: "image/png" });
-								const objUrl = URL.createObjectURL(blob);
-								img.onload = () => {
-									URL.revokeObjectURL(objUrl);
-									done(null, img);
-								};
-								img.onerror = () => {
-									URL.revokeObjectURL(objUrl);
-									done(new Error("Stamen decode failed"), img);
-								};
-								img.src = objUrl;
-							} else {
-								done(new Error("Stamen HTTP " + r.status), img);
-							}
-						},
-						onerror: () => done(new Error("Stamen network error"), img),
+					}, (err, r) => {
+						if (err) {
+							done(new Error("Stamen " + err.message), img);
+							return;
+						}
+						if (r.status !== 200) {
+							done(new Error("Stamen HTTP " + r.status), img);
+							return;
+						}
+						const blob   = new Blob([r.response], { type: "image/png" });
+						const objUrl = URL.createObjectURL(blob);
+						img.onload  = () => { URL.revokeObjectURL(objUrl); done(null, img); };
+						img.onerror = () => {
+							URL.revokeObjectURL(objUrl);
+							done(new Error("Stamen decode failed"), img);
+						};
+						img.src = objUrl;
 					});
 					return img;
 				},
@@ -1142,52 +1114,50 @@
 			);
 		}
 
+		// Catalog rarely changes — Esri publishes new releases on a slow
+		// cadence — so persist for 24h via cachedFetch. The first session
+		// pays the round-trip; subsequent toggles are instant. Releases are
+		// stored as their decoded {label, releaseNum} array; the per-tile
+		// URL is rebuilt locally so a future change to the tile-template
+		// host doesn't require flushing the cache.
 		_fetchCatalog() {
 			if (this._fetching || this._releases) return;
 			this._fetching = true;
-			GM_xmlhttpRequest({
-				method: "GET",
-				url: CFG.WAYBACK_CONFIG_URL,
-				onload: (r) => {
+			cachedFetch(
+				"wayback_catalog",
+				24 * 3600 * 1000,
+				(done) => gmJsonGet(CFG.WAYBACK_CONFIG_URL, (err, data) => {
+					if (err) { done(err, null); return; }
+					const releases = Object.entries(data)
+						.filter(([, item]) => item.itemTitle)
+						.map(([key, item]) => ({
+							releaseNum: parseInt(key, 10),
+							label: item.itemTitle
+								.replace(/^World Imagery \(Wayback /, "")
+								.replace(/\)$/, ""),
+						}));
+					releases.sort((a, b) =>
+						a.label < b.label ? 1 : a.label > b.label ? -1 : 0);
+					done(null, releases);
+				}),
+				(err, releases) => {
 					this._fetching = false;
-					try {
-						if (r.status === 200) {
-							const data = JSON.parse(r.responseText);
-							const releases = Object.entries(data)
-								.filter(([, item]) => item.itemTitle)
-								.map(([key, item]) => {
-									const releaseNum = parseInt(key, 10);
-									const label = item.itemTitle
-										.replace(/^World Imagery \(Wayback /, "")
-										.replace(/\)$/, "");
-									return { label, releaseNum, url: this._tileUrl(releaseNum) };
-								});
-							releases.sort((a, b) =>
-								a.label < b.label ? 1 : a.label > b.label ? -1 : 0,
-							);
-							this._releases = releases;
-							console.info(
-								"[CustomTiles] Wayback:",
-								releases.length,
-								"releases loaded",
-							);
-						} else {
-							console.warn("[CustomTiles] Wayback catalog HTTP", r.status);
-						}
-					} catch (e) {
-						console.error("[CustomTiles] Wayback catalog parse:", e.message);
+					if (err || !releases) {
+						console.error("[CustomTiles] Wayback catalog:", err && err.message);
+						return;
 					}
+					this._releases = releases.map(r => ({
+						...r, url: this._tileUrl(r.releaseNum),
+					}));
+					console.info("[CustomTiles] Wayback:",
+						this._releases.length, "releases loaded");
 					this._idx = 0;
-					if (this._releases && this._layerRef) {
+					if (this._layerRef) {
 						this._layerRef.setUrl(this._releases[0].url);
 						this._layerRef.fire("histchange");
 					}
 				},
-				onerror: () => {
-					this._fetching = false;
-					console.error("[CustomTiles] Wayback catalog network error");
-				},
-			});
+			);
 		}
 
 		create() {
@@ -1227,7 +1197,10 @@
 		create() {
 			return L.tileLayer(CFG.QLD_LABELS_TILE, {
 				maxNativeZoom: 19,
-				maxZoom: 22,
+				// 25 to match the deep-zoom map ceiling when QLD basemaps
+				// are active; native zoom stays at 19 so Leaflet stretches
+				// the z=19 tiles rather than 404ing at higher zooms.
+				maxZoom: 25,
 				tileSize: 256,
 				crossOrigin: true,
 				opacity: 1,
@@ -1246,46 +1219,23 @@
 		}
 
 		create() {
-			const MERC_ORIGIN = 20037508.3428;
-			const MERC_FULL = 2 * MERC_ORIGIN;
 			const TILE_PX = 256;
 			const token = this._token;
-			const DYN_LAYERS = encodeURIComponent(
-				JSON.stringify([
-					{
-						id: 21,
-						source: { type: "mapLayer", mapLayerId: 21 },
-						drawingInfo: { showLabels: true },
-					},
-					{
-						id: 22,
-						source: { type: "mapLayer", mapLayerId: 22 },
-						drawingInfo: { showLabels: true },
-					},
-					{
-						id: 23,
-						source: { type: "mapLayer", mapLayerId: 23 },
-						drawingInfo: { showLabels: true },
-					},
-					{
-						id: 10,
-						source: { type: "mapLayer", mapLayerId: 10 },
-						drawingInfo: { showLabels: true },
-					},
-				]),
-			);
+			// Show labels on the four sublayers we render.
+			const DYN_LAYERS = encodeURIComponent(JSON.stringify(
+				[21, 22, 23, 10].map(id => ({
+					id, source: { type: "mapLayer", mapLayerId: id },
+					drawingInfo: { showLabels: true },
+				})),
+			));
 
 			const QldRoadsGrid = L.GridLayer.extend({
 				createTile(coords, done) {
 					const img = document.createElement("img");
 					img.setAttribute("role", "presentation");
-					const n = Math.pow(2, coords.z);
-					const tw = MERC_FULL / n;
-					const west = -MERC_ORIGIN + coords.x * tw;
-					const east = west + tw;
-					const north = MERC_ORIGIN - coords.y * tw;
-					const south = north - tw;
-					const bbox = encodeURIComponent(`${west},${south},${east},${north}`);
+					const b = tileToBBox3857(coords.z, coords.x, coords.y);
+					const bbox = encodeURIComponent(
+						`${b.west},${b.south},${b.east},${b.north}`);
 					const tok = token.token
 						? "&token=" + encodeURIComponent(token.token)
 						: "";
@@ -1304,7 +1254,7 @@
 			return new QldRoadsGrid({
 				tileSize: TILE_PX,
 				maxNativeZoom: 19,
-				maxZoom: 22,
+				maxZoom: 25,
 				pane: "dwRoadsPane",
 				attribution: "&copy; State of Queensland (Department of Resources)",
 			});
@@ -1353,35 +1303,28 @@
 				"&outFields=objectid,name,year,title,capturestart" +
 				"&returnGeometry=false&orderByFields=capturestart+DESC&f=json";
 
-			const parseCaptures = (
-				responseText,
-				service,
-				needsToken,
-				mosaicWhere,
-			) => {
-				try {
-					const data = JSON.parse(responseText);
-					return (data.features || [])
-						.map((f) => ({
-							objectid: f.attributes.objectid,
-							title:
-								f.attributes.title ||
-								f.attributes.name ||
-								String(f.attributes.year || ""),
-							captureDate: f.attributes.capturestart
-								? new Date(f.attributes.capturestart).toISOString().slice(0, 10)
-								: f.attributes.year
-									? String(f.attributes.year)
-									: null,
-							service,
-							needsToken,
-							mosaicWhere,
-						}))
-						.filter((f) => f.objectid);
-				} catch (e) {
-					return [];
-				}
-			};
+			// `data` is the already-parsed ArcGIS /query response (.features
+			// array of {attributes}). The old shape took raw responseText
+			// and JSON.parsed inline; now that gmJsonGet hands us the
+			// parsed object directly there's no reason to re-stringify.
+			const parseCaptures = (data, service, needsToken, mosaicWhere) =>
+				(data && data.features || [])
+					.map((f) => ({
+						objectid: f.attributes.objectid,
+						title:
+							f.attributes.title ||
+							f.attributes.name ||
+							String(f.attributes.year || ""),
+						captureDate: f.attributes.capturestart
+							? new Date(f.attributes.capturestart).toISOString().slice(0, 10)
+							: f.attributes.year
+								? String(f.attributes.year)
+								: null,
+						service,
+						needsToken,
+						mosaicWhere,
+					}))
+					.filter((f) => f.objectid);
 
 			let orthoCaptures = null;
 			let photosCaptures = null;
@@ -1421,36 +1364,21 @@
 			};
 
 			// Query 1: AerialOrtho (no token, public)
-			GM_xmlhttpRequest({
-				method: "GET",
-				url:
-					CFG.QLD_HIST_SERVICE + "/query" + geomParam + "&where=category%3D1",
-				headers: { Origin: "https://qldglobe.information.qld.gov.au" },
-				onload: (r) => {
-					if (r.status === 200) {
-						orthoCaptures = parseCaptures(
-							r.responseText,
-							CFG.QLD_HIST_SERVICE,
-							false,
-							"category=1",
-						);
-					} else {
-						console.error(
-							"[CustomTiles] QLD Historical ortho query HTTP",
-							r.status,
-						);
+			gmJsonGet(
+				CFG.QLD_HIST_SERVICE + "/query" + geomParam + "&where=category%3D1",
+				{ headers: { Origin: "https://qldglobe.information.qld.gov.au" } },
+				(err, data) => {
+					if (err) {
+						console.error("[CustomTiles] QLD Historical ortho query:",
+							err.message);
 						orthoCaptures = [];
+					} else {
+						orthoCaptures = parseCaptures(
+							data, CFG.QLD_HIST_SERVICE, false, "category=1");
 					}
 					tryFinish();
 				},
-				onerror: () => {
-					console.error(
-						"[CustomTiles] QLD Historical ortho query network error",
-					);
-					orthoCaptures = [];
-					tryFinish();
-				},
-			});
+			);
 
 			// Query 2: HistoricalAerialPhoto (requires token — holds the
 			// 1930s–1990s scanned aerial photos). Silent empty result here is
@@ -1460,74 +1388,41 @@
 			// from a real "no coverage" result.
 			const doPhotosQuery = (tok) => {
 				const tokenParam = tok ? "&token=" + encodeURIComponent(tok) : "";
-				GM_xmlhttpRequest({
-					method: "GET",
-					url:
-						CFG.QLD_HIST_PHOTOS_SERVICE +
-						"/query" +
-						geomParam +
-						"&where=1%3D1" +
-						tokenParam,
+				const url =
+					CFG.QLD_HIST_PHOTOS_SERVICE + "/query" + geomParam +
+					"&where=1%3D1" + tokenParam;
+				gmJsonGet(url, {
 					headers: {
-						Origin: "https://qldglobe.information.qld.gov.au",
+						Origin:  "https://qldglobe.information.qld.gov.au",
 						Referer: "https://qldglobe.information.qld.gov.au/",
 					},
-					onload: (r) => {
-						if (r.status !== 200) {
-							console.warn(
-								"[CustomTiles] QLD Historical photos HTTP",
-								r.status,
-								tok ? "(token sent)" : "(no token)",
-								r.responseText.slice(0, 200),
-							);
-							photosCaptures = [];
-							tryFinish();
-							return;
-						}
-						try {
-							const data = JSON.parse(r.responseText);
-							if (data.error) {
-								console.warn(
-									"[CustomTiles] QLD Historical photos service error:",
-									data.error.code,
-									data.error.message,
-									tok
-										? "(token sent — may be expired or wrong scope)"
-										: "(no token)",
-								);
-								photosCaptures = [];
-							} else {
-								photosCaptures = parseCaptures(
-									r.responseText,
-									CFG.QLD_HIST_PHOTOS_SERVICE,
-									!!tok,
-									null,
-								);
-								const total = (data.features || []).length;
-								const limited = !!data.exceededTransferLimit;
-								console.info(
-									"[CustomTiles] QLD Historical photos:",
-									total,
-									"features",
-									limited
-										? "(LIMITED — older captures cut off, see maxRecordCount)"
-										: "",
-								);
-							}
-						} catch (e) {
-							console.error(
-								"[CustomTiles] QLD Historical photos parse:",
-								e.message,
-							);
-							photosCaptures = [];
-						}
-						tryFinish();
-					},
-					onerror: () => {
-						console.error("[CustomTiles] QLD Historical photos network error");
+				}, (err, data, raw) => {
+					if (err) {
+						const body = raw && raw.responseText
+							? ` ${raw.responseText.slice(0, 200)}` : "";
+						console.warn("[CustomTiles] QLD Historical photos",
+							err.message,
+							tok ? "(token sent)" : "(no token)", body);
 						photosCaptures = [];
-						tryFinish();
-					},
+					} else if (data.error) {
+						console.warn(
+							"[CustomTiles] QLD Historical photos service error:",
+							data.error.code, data.error.message,
+							tok ? "(token sent — may be expired or wrong scope)"
+							    : "(no token)");
+						photosCaptures = [];
+					} else {
+						photosCaptures = parseCaptures(
+							data, CFG.QLD_HIST_PHOTOS_SERVICE, !!tok, null);
+						const total = (data.features || []).length;
+						const limited = !!data.exceededTransferLimit;
+						console.info("[CustomTiles] QLD Historical photos:",
+							total, "features",
+							limited
+								? "(LIMITED — older captures cut off, see maxRecordCount)"
+								: "");
+					}
+					tryFinish();
 				});
 			};
 
@@ -1540,8 +1435,6 @@
 
 		create() {
 			const provider = this;
-			const MERC_ORIGIN = 20037508.3428;
-			const MERC_FULL = 2 * MERC_ORIGIN;
 			const TILE_PX = 256;
 
 			const QldHistGrid = L.GridLayer.extend({
@@ -1549,15 +1442,9 @@
 					const img = document.createElement("img");
 					img.setAttribute("role", "presentation");
 					const map = this._map;
-					const n = Math.pow(2, coords.z);
-					const tw = MERC_FULL / n;
-					const west = -MERC_ORIGIN + coords.x * tw;
-					const east = west + tw;
-					const north = MERC_ORIGIN - coords.y * tw;
-					const south = north - tw;
+					const b = tileToBBox3857(coords.z, coords.x, coords.y);
 					const bbox = encodeURIComponent(
-						west + "," + south + "," + east + "," + north,
-					);
+						`${b.west},${b.south},${b.east},${b.north}`);
 
 					const myGen = provider._captureGeneration;
 					provider._queryCatalog(map, (oid) => {
@@ -1724,50 +1611,26 @@
 
 					for (const activity of ACTIVITIES) {
 						const url =
-							"https://connecttile.garmin.com/" +
-							activity +
-							"/" +
-							coords.z +
-							"/" +
-							coords.x +
-							"/" +
-							coords.y +
-							".png";
-						GM_xmlhttpRequest({
-							method: "GET",
-							url: url,
-							responseType: "arraybuffer",
-							onload: (r) => {
-								if (r.status === 200) {
-									try {
-										const blob = new Blob([r.response], { type: "image/png" });
-										const objUrl = URL.createObjectURL(blob);
-										const img = new Image();
-										img.onload = () => {
-											ctx.globalCompositeOperation = "lighter";
-											ctx.drawImage(img, 0, 0);
-											URL.revokeObjectURL(objUrl);
-											finish();
-										};
-										img.onerror = () => {
-											URL.revokeObjectURL(objUrl);
-											failed++;
-											finish();
-										};
-										img.src = objUrl;
-									} catch (e) {
-										failed++;
-										finish();
-									}
-								} else {
-									failed++;
-									finish();
-								}
-							},
-							onerror: () => {
-								failed++;
+							"https://connecttile.garmin.com/" + activity + "/" +
+							coords.z + "/" + coords.x + "/" + coords.y + ".png";
+						gmGet(url, { responseType: "arraybuffer" }, (err, r) => {
+							if (err || r.status !== 200) {
+								failed++; finish(); return;
+							}
+							const blob   = new Blob([r.response], { type: "image/png" });
+							const objUrl = URL.createObjectURL(blob);
+							const img = new Image();
+							img.onload = () => {
+								ctx.globalCompositeOperation = "lighter";
+								ctx.drawImage(img, 0, 0);
+								URL.revokeObjectURL(objUrl);
 								finish();
-							},
+							};
+							img.onerror = () => {
+								URL.revokeObjectURL(objUrl);
+								failed++; finish();
+							};
+							img.src = objUrl;
 						});
 					}
 
@@ -1874,29 +1737,17 @@
 					this._cfgs.forEach((cfg, i) => {
 						const guard = guards[i];
 						const url =
-							cfg.url +
-							"/query?geometry=" +
-							geomParam +
+							cfg.url + "/query?geometry=" + geomParam +
 							"&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326" +
 							"&spatialRel=esriSpatialRelIntersects" +
 							"&outFields=" +
 							encodeURIComponent(cfg.fields || "ObjectId") +
 							"&returnGeometry=true&f=geojson";
 
-						GM_xmlhttpRequest({
-							method: "GET",
-							url: url,
-							onload(resp) {
-								if (guard.dead) return;
-								try {
-									results[i] = { cfg, data: JSON.parse(resp.responseText) };
-								} catch (_) {}
-								if (--remaining === 0) self._render(results, guards);
-							},
-							onerror() {
-								if (guard.dead) return;
-								if (--remaining === 0) self._render(results, guards);
-							},
+						gmJsonGet(url, (err, data) => {
+							if (guard.dead) return;
+							if (!err) results[i] = { cfg, data };
+							if (--remaining === 0) self._render(results, guards);
 						});
 					});
 				},
@@ -1977,7 +1828,7 @@
 				_onViewChange() {
 					clearInterval(this._timer);
 					clearTimeout(this._debounce);
-					this._timer = this._debounce = null;
+					this._timer = null;
 					this._debounce = setTimeout(() => this._startPoll(), 400);
 				},
 
@@ -1999,17 +1850,9 @@
 						b.getNorth().toFixed(3) +
 						"&lomax=" +
 						b.getEast().toFixed(3);
-					GM_xmlhttpRequest({
-						method: "GET",
-						url,
-						onload: (r) => {
-							if (r.status === 200 && this._group) {
-								try {
-									this._render(JSON.parse(r.responseText).states || []);
-								} catch (_) {}
-							}
-						},
-						onerror: () => {},
+					gmJsonGet(url, (err, data) => {
+						if (err || !this._group) return;
+						this._render(data.states || []);
 					});
 				},
 
@@ -2148,7 +1991,7 @@
 				_onViewChange() {
 					clearInterval(this._timer);
 					clearTimeout(this._debounce);
-					this._timer = this._debounce = null;
+					this._timer = null;
 					this._debounce = setTimeout(() => this._startPoll(), 400);
 				},
 
@@ -2183,50 +2026,38 @@
 							this._render([...vessels.values()]);
 					};
 					for (const { x, y } of tiles) {
-						GM_xmlhttpRequest({
-							method: "GET",
-							url: `${MT_BASE}/z:${apiZ}/X:${x}/Y:${y}/station:0`,
+						const url = `${MT_BASE}/z:${apiZ}/X:${x}/Y:${y}/station:0`;
+						gmJsonGet(url, {
 							headers: {
-								"Accept": "*/*",
+								"Accept":           "*/*",
 								"X-Requested-With": "XMLHttpRequest",
-								"Referer": referer,
+								"Referer":          referer,
 							},
-							onload: (r) => {
-								if (r.status === 200) {
-									try {
-										const parsed = JSON.parse(r.responseText);
-										// Format: { type, data: { rows: [...], areaShips: N } }
-										const raw =
-											(parsed.data && parsed.data.rows) ||
-											(Array.isArray(parsed.data) ? parsed.data : null) ||
-											(Array.isArray(parsed) ? parsed : null);
-										if (!Array.isArray(raw)) return;
-										let rows = raw;
-										// Normalise array-of-arrays (first row = column headers)
-										if (rows.length && Array.isArray(rows[0])) {
-											const hdrs = rows[0];
-											rows = rows.slice(1).map((row) => {
-												const obj = {};
-												hdrs.forEach((h, i) => {
-													obj[h] = row[i];
-												});
-												return obj;
-											});
-										}
-										for (const v of rows) {
-											const key =
-												v.MMSI ||
-												v.mmsi ||
-												String(v.LAT || v.lat) + "," + String(v.LON || v.lon);
-											if (key && !vessels.has(key)) vessels.set(key, v);
-										}
-									} catch (e) {
-										console.warn("[CustomTiles] MarineTraffic parse error", e);
-									}
-								}
-								done();
-							},
-							onerror: done,
+						}, (err, parsed) => {
+							if (err) { done(); return; }
+							// Format: { type, data: { rows: [...], areaShips: N } }
+							const raw =
+								(parsed.data && parsed.data.rows) ||
+								(Array.isArray(parsed.data) ? parsed.data : null) ||
+								(Array.isArray(parsed) ? parsed : null);
+							if (!Array.isArray(raw)) { done(); return; }
+							let rows = raw;
+							// Normalise array-of-arrays (first row = column headers)
+							if (rows.length && Array.isArray(rows[0])) {
+								const hdrs = rows[0];
+								rows = rows.slice(1).map((row) => {
+									const obj = {};
+									hdrs.forEach((h, i) => { obj[h] = row[i]; });
+									return obj;
+								});
+							}
+							for (const v of rows) {
+								const key =
+									v.MMSI || v.mmsi ||
+									String(v.LAT || v.lat) + "," + String(v.LON || v.lon);
+								if (key && !vessels.has(key)) vessels.set(key, v);
+							}
+							done();
 						});
 					}
 				},
@@ -2234,28 +2065,28 @@
 				_render(rows) {
 					if (!this._group) return;
 					this._group.clearLayers();
+					// MarineTraffic flips between UPPER/lower keys depending
+					// on the endpoint variant — pick walks the candidates.
+					const pick = (obj, ...keys) => {
+						for (const k of keys) {
+							const v = obj[k];
+							if (v !== undefined && v !== null && v !== "") return v;
+						}
+						return "";
+					};
 					for (const v of rows) {
-						const lat = parseFloat(v.LAT || v.lat);
-						const lon = parseFloat(v.LON || v.lon);
+						const lat = parseFloat(pick(v, "LAT", "lat"));
+						const lon = parseFloat(pick(v, "LON", "lon"));
 						if (!isFinite(lat) || !isFinite(lon)) continue;
-						const name =
-							(
-								v.SHIPNAME ||
-								v.shipname ||
-								v.NAME ||
-								v.name ||
-								v.MMSI ||
-								""
-							).trim() || "Unknown";
-						const mmsi = v.MMSI || v.mmsi || "";
-						const type =
-							parseInt(v.SHIPTYPE || v.shiptype || v.TYPE || v.type || "0") ||
-							0;
-						const hdg =
-							parseFloat(
-								v.HEADING || v.heading || v.COURSE || v.course || "0",
-							) || 0;
-						const rawSpd = parseFloat(v.SPEED || v.speed || "0") || 0;
+						const name = String(pick(v,
+							"SHIPNAME", "shipname", "NAME", "name", "MMSI") || ""
+						).trim() || "Unknown";
+						const mmsi = pick(v, "MMSI", "mmsi") || "";
+						const type = parseInt(pick(v,
+							"SHIPTYPE", "shiptype", "TYPE", "type") || "0") || 0;
+						const hdg  = parseFloat(pick(v,
+							"HEADING", "heading", "COURSE", "course") || "0") || 0;
+						const rawSpd = parseFloat(pick(v, "SPEED", "speed") || "0") || 0;
 						// AIS speed is in 1/10 knots; guard against pre-divided values
 						const spdKts =
 							rawSpd > 102 ? (rawSpd / 10).toFixed(1) : rawSpd.toFixed(1);
@@ -2308,7 +2139,12 @@
 				paneZIndex: 380,
 				opacity: 0.5,
 				minZoom: 5,
-				maxZoom: 18,
+				// ACCC's coverage grid is intrinsically coarse (~100 m cells),
+				// so cap the native query at z=18 and let Leaflet stretch the
+				// z=18 tile beyond that — saves the export endpoint from
+				// generating tinier bboxes that render the same blocky pixels.
+				maxNativeZoom: 18,
+				maxZoom: 25,
 				attribution:
 					'Mobile coverage \u00a9 <a href="https://data.gov.au" target="_blank" rel="noreferrer">ACCC / Dept. of Infrastructure</a>',
 			});
@@ -2321,7 +2157,9 @@
 		create() {
 			return L.tileLayer(CFG.QLD_TOPO_TILE, {
 				maxNativeZoom: 16,
-				maxZoom: 22,
+				// Topo is one of the deep-zoom-eligible bases (see
+				// _syncZoomLevel), so it needs to cover the 25 ceiling.
+				maxZoom: 25,
 				tileSize: 256,
 				crossOrigin: true,
 				attribution: "&copy; State of Queensland (Department of Resources)",
@@ -2349,7 +2187,7 @@
 			});
 			return new ReliefLayer(CFG.QLD_RELIEF_TILE, {
 				maxNativeZoom: 14,
-				maxZoom: 22,
+				maxZoom: 25,
 				tileSize: 256,
 				crossOrigin: true,
 				opacity: 0.45,
@@ -3046,7 +2884,7 @@
 				paneZIndex: 385,
 				opacity: 0.75,
 				minZoom: 11,
-				maxZoom: 22,
+				maxZoom: 25,
 				attribution:
 					'Cadastre &copy; <a href="https://www.qld.gov.au/dnrme" target="_blank" rel="noreferrer">State of Queensland (DCDB)</a>',
 				onAdd: (layer, map) => installCadastreHover(layer, map),
@@ -3095,7 +2933,7 @@
 				paneZIndex: 396,
 				opacity:    0.85,
 				minZoom:    9,
-				maxZoom:    22,
+				maxZoom:    25,
 				attribution: 'QPWS &copy; <a href="https://parks.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (DETSI)</a>',
 				onAdd:    (layer, map) => installQpwsHover(layer, map),
 				onRemove: (layer) => {
@@ -3116,7 +2954,7 @@
 				{
 					tileSize: 256,
 					maxNativeZoom: 18,
-					maxZoom: 22,
+					maxZoom: 25,
 					opacity: 1,
 					attribution:
 						'&copy; <a href="https://www.openseamap.org/" target="_blank" rel="noreferrer">OpenSeaMap</a> contributors',
@@ -3372,42 +3210,23 @@
 		}
 	}
 
-	/* -- (INTVL Territories — your own runs — removed in 7.9.5) ----------
-	 *
-	 * The auth-gated `terra.getMyTerritoriesV2` layer was retired once the
-	 * public PMTiles CDN proved to serve the entire game world anonymously.
-	 * The Global Map (below) renders every player's polygons including the
-	 * user's own runs, so the two layers were redundant. Kept the MVT
-	 * decoder and the canvas grid layer; everything Clerk-related — the
-	 * userId prompt, the @connect www.intvl.com.au, INTVL_BASE — is gone.
-	 *
-	 * Stale state cleanup: if the user previously had "INTVL Territories"
-	 * enabled, its name lingers in localStorage's dw_active_overlays list.
-	 * The restorer in _restoreOverlays looks up `this.layers[name]` first,
-	 * so unknown names are silently skipped — no extra cleanup needed.
-	 */
-
-
 	/* -- INTVL Global Map (public Mapbox Vector Tile pyramid) ------------
 	 *
-	 * The INTVL app shows a global territory ownership map: every cell
-	 * "owned" by whoever ran a closed loop around it most recently. Public
-	 * (non-club) view. The data is served as Mapbox Vector Tiles from a
-	 * CloudFront/PMTiles backend reverse-engineered from the v3.4.3 APK's
-	 * Hermes bytecode (the URL builder function `getTileUrlTemplate` calls
-	 * `''.concat(BASE, '/', mode, '/run/{z}/{x}/{y}.pbf')` with mode either
-	 * `single-player` for the public map or `clubs-mode` for clubs).
+	 * Renders the INTVL app's public global territory map: every cell
+	 * owned by whoever last ran a closed loop around it. URL pattern
+	 * (`/single-player/run/{z}/{x}/{y}.pbf`) reverse-engineered from
+	 * v3.4.3 APK; CFG.INTVL_TILES_BASE carries the resolved base and
+	 * CFG.INTVL_TILES_MAX_NATIVE_Z carries the actual native max zoom (11).
 	 *
-	 *   URL:    {INTVL_TILES_BASE}/{z}/{x}/{y}.pbf
-	 *   Layer:  'territories' (POLYGON features)
-	 *   Props:  runId(int), activityId(string), colour(string),
-	 *           currentArea(double, m²), startTime(int, days since epoch)
-	 *   Extent: 4096, max native zoom 12 (deeper zooms over-zoom client-side)
+	 * Tile contents: MVT layer `territories` with POLYGON features whose
+	 * props are { runId, activityId, colour, currentArea (m²), startTime
+	 * (days since epoch) }. Extent 4096.
 	 *
-	 * We render via canvas: per Leaflet tile we fetch the .pbf, decode the
-	 * MVT structure inline, transform each polygon's tile-local coords to
-	 * canvas pixels and fill with the owner's `colour`. No external MVT
-	 * library — the parser is ~150 lines of plain JS protobuf decoding.
+	 * Renderer: per Leaflet tile, fetch the .pbf, run mvtDecode →
+	 * prepareLayers, paint each polygon's fill onto a canvas (no library).
+	 * The old auth-gated "your runs only" layer was removed in 7.9.5 —
+	 * unknown overlay names in localStorage are silently skipped by the
+	 * restorer, so no migration is needed.
 	 */
 
 	// ------ Minimal MVT (Mapbox Vector Tile) PBF parser ------------------
@@ -3586,14 +3405,21 @@
 	}
 
 	// One-pass preprocessor: turn raw MVT layers into a render-ready form.
-	// For each POLYGON feature we extract its property dict (so we don't
-	// re-walk the tag array per render), pre-decode its geometry, and pull
-	// out colour + startTime. Then sort the feature list by startTime ASC
-	// so the renderer paints oldest-first → newest claims end up on top,
-	// matching across adjacent tiles. Non-polygon features are dropped.
-	function prepareLayers(layers) {
+	// For each POLYGON feature we extract its property dict, pre-decode its
+	// geometry, and stash an axis-aligned bbox so hover hit-tests can
+	// short-circuit before the per-ring point-in-poly walk. We also resolve
+	// each unique `colour` to its rgba fillStyle string once via a
+	// per-batch memo — dozens of features typically share a handful of
+	// player colours. Features are sorted by startTime ASC so the renderer
+	// paints oldest-first → newest claims end up on top, matching across
+	// adjacent tiles. Only the `territories` layer is kept (the only one
+	// the renderer + identify use); other MVT layers (if any) are dropped
+	// at source rather than wasted-decoded then ignored downstream.
+	function prepareLayers(layers, fillAlpha) {
 		const out = [];
+		const fillCache = new Map();   // colour → rgba string
 		for (const layer of layers) {
+			if (layer.name !== "territories") continue;
 			const features = [];
 			for (const f of layer.features) {
 				if (f.type !== 3) continue; // POLYGON only
@@ -3601,12 +3427,31 @@
 				for (let i = 0; i < f.tags.length; i += 2) {
 					props[layer.keys[f.tags[i]]] = layer.values[f.tags[i + 1]];
 				}
+				const colour = props.colour || "#3b82f6";
+				let fillStyle = fillCache.get(colour);
+				if (!fillStyle) {
+					fillStyle = hexAlpha(colour, fillAlpha);
+					fillCache.set(colour, fillStyle);
+				}
+				const rings = decodeGeometry(f.geom);
+				// Bbox over all rings — cheap to compute once, lets hover
+				// reject features without walking the geometry.
+				let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
+				for (const ring of rings) {
+					for (const p of ring) {
+						const x = p[0], y = p[1];
+						if (x < mnX) mnX = x; if (x > mxX) mxX = x;
+						if (y < mnY) mnY = y; if (y > mxY) mxY = y;
+					}
+				}
 				features.push({
 					props,
-					colour:    props.colour || "#3b82f6",
+					colour,
+					fillStyle,
 					startTime: typeof props.startTime === "number"
 						? props.startTime : 0,
-					rings: decodeGeometry(f.geom),
+					rings,
+					mnX, mnY, mxX, mxY,
 				});
 			}
 			features.sort((a, b) => a.startTime - b.startTime);
@@ -3616,6 +3461,11 @@
 	}
 
 	// ------ INTVL Global Map layer ---------------------------------------
+
+	// Stable cache key for a Leaflet tile coord. Used in both the renderer
+	// (to stash the prepared layer) and the hover-identify (to look it up
+	// again), so a helper avoids any chance of drift between the two.
+	const tileKey = (z, x, y) => `${z}/${x}/${y}`;
 
 	class IntvlGlobalTilesLayerProvider extends LayerProvider {
 		create() {
@@ -3639,6 +3489,13 @@
 					// cursor. Reusing the prepared per-tile feature list (the
 					// same one the renderer drew from) means no MVT decode
 					// in the hot path.
+					//
+					// Skip wiring on touch-primary devices. Browsers synthesise
+					// `mousemove` during touch-drag panning, which makes every
+					// pan run identify and pop a tooltip; the tooltip then
+					// lingers because `mouseout` doesn't fire on touch-end.
+					// `(hover: none)` is the standards-track "no hover capability"
+					// signal; we fall back to Leaflet's UA-based mobile flag.
 					this._tooltip = L.tooltip({
 						sticky:    true,
 						opacity:   0.95,
@@ -3649,24 +3506,44 @@
 					this._hoverDebounce = null;
 					this._lastFeatKey   = null;
 
-					this._onMove = (e) => {
-						clearTimeout(this._hoverDebounce);
-						const latlng = e.latlng;
-						this._hoverDebounce = setTimeout(
-							() => this._identifyHover(latlng), 60);
+					const noHover = L.Browser.mobile ||
+						(window.matchMedia &&
+						 window.matchMedia("(hover: none)").matches);
+					if (!noHover) {
+						this._onMove = (e) => {
+							clearTimeout(this._hoverDebounce);
+							const latlng = e.latlng;
+							this._hoverDebounce = setTimeout(
+								() => this._identifyHover(latlng), 60);
+						};
+						this._onLeave = () => {
+							clearTimeout(this._hoverDebounce);
+							this._clearTooltip();
+						};
+						map.on("mousemove", this._onMove);
+						map.on("mouseout",  this._onLeave);
+					}
+
+					// Free a tile's prepared feature data when Leaflet
+					// evicts the tile from its cache. Without this the
+					// Map grows unbounded — every panned-away tile leaks
+					// its prepared features (200-500 polygons each, with
+					// nested vertex arrays) for the rest of the session.
+					this._onTileUnload = (e) => {
+						if (!this._tileFeatures) return;
+						const c = e.coords;
+						this._tileFeatures.delete(tileKey(c.z, c.x, c.y));
 					};
-					this._onLeave = () => {
-						clearTimeout(this._hoverDebounce);
-						this._clearTooltip();
-					};
-					map.on("mousemove", this._onMove);
-					map.on("mouseout",  this._onLeave);
+					this.on("tileunload", this._onTileUnload);
 				},
 
 				onRemove(map) {
 					clearTimeout(this._hoverDebounce);
-					map.off("mousemove", this._onMove);
-					map.off("mouseout",  this._onLeave);
+					if (this._onMove) {
+						map.off("mousemove", this._onMove);
+						map.off("mouseout",  this._onLeave);
+					}
+					this.off("tileunload", this._onTileUnload);
 					this._clearTooltip();
 					this._tooltip = null;
 					this._tileFeatures && this._tileFeatures.clear();
@@ -3699,55 +3576,46 @@
 					const url =
 						`${CFG.INTVL_TILES_BASE}/${coords.z}/${coords.x}/${coords.y}.pbf`;
 
-					GM_xmlhttpRequest({
-						method: "GET",
-						url,
+					gmGet(url, {
 						responseType: "arraybuffer",
 						timeout: 15000,
-						onload: (r) => {
-							if (r.status !== 200 || !r.response) {
-								// 404 = no tiles in this area; render empty
-								done(null, canvas);
-								return;
-							}
-							try {
-								const layers   = mvtDecode(r.response);
-								const prepared = prepareLayers(layers);
-								this._renderTile(ctx, prepared, TILE_PX, FILL_ALPHA);
-								if (!this._tileFeatures) this._tileFeatures = new Map();
-								this._tileFeatures.set(
-									`${coords.z}/${coords.x}/${coords.y}`, prepared);
-							} catch (e) {
-								console.warn("[CustomTiles] INTVL global decode:", e);
-							}
-							done(null, canvas);
-						},
-						onerror:   () => done(null, canvas),
-						ontimeout: () => done(null, canvas),
+					}, (err, r) => {
+						// 404 (no coverage) and network errors both render empty —
+						// caller relies on a canvas-shaped tile either way.
+						if (err || r.status !== 200 || !r.response) {
+							done(null, canvas); return;
+						}
+						try {
+							const layers   = mvtDecode(r.response);
+							const prepared = prepareLayers(layers, FILL_ALPHA);
+							this._renderTile(ctx, prepared, TILE_PX);
+							if (!this._tileFeatures) this._tileFeatures = new Map();
+							this._tileFeatures.set(
+								tileKey(coords.z, coords.x, coords.y), prepared);
+						} catch (e) {
+							console.warn("[CustomTiles] INTVL global decode:", e);
+						}
+						done(null, canvas);
 					});
 
 					return canvas;
 				},
 
-				_renderTile(ctx, prepared, tilePx, fillAlpha /*, strokeAlpha unused */) {
+				_renderTile(ctx, prepared, tilePx) {
 					ctx.clearRect(0, 0, tilePx, tilePx);
-					// No explicit clip — canvas clips naturally at its bounds
-					// and the explicit rect() was a no-op visually while
-					// adding a per-tile path-setup cost.
+					// No explicit clip — canvas clips naturally at its bounds.
+					// Features are pre-sorted by startTime ASC so older claims
+					// paint first and the latest claim ends up on top —
+					// resolves "last runner owns it" consistently within each
+					// tile. Adjacent tile seams can still show colour breaks
+					// when the server didn't include the same polygons in
+					// both tiles (server-side MVT generation quirk); fill
+					// alone, with no per-polygon stroke, makes those
+					// transitions read as natural colour boundaries rather
+					// than emphasised outlines. Nonzero winding rule (canvas
+					// default) matches MVT's outer-CW / inner-CCW convention.
 					for (const layer of prepared) {
-						if (layer.name !== "territories") continue;
 						const scale = tilePx / layer.extent;
-
-						// Features are pre-sorted by startTime ASC, so older
-						// claims paint first and the latest claim ends up on
-						// top — which makes "last runner owns it" colour
-						// resolve consistently within each tile. Adjacent
-						// tile seams can still show colour breaks when the
-						// server didn't include the same polygons in both
-						// tiles (server-side MVT generation quirk); fill
-						// alone, with no per-polygon stroke, makes those
-						// transitions read as natural colour boundaries
-						// rather than emphasised outlines.
 						for (const f of layer.features) {
 							ctx.beginPath();
 							for (const ring of f.rings) {
@@ -3760,9 +3628,7 @@
 								}
 								ctx.closePath();
 							}
-							ctx.fillStyle = hexAlpha(f.colour, fillAlpha);
-							// Nonzero winding rule (canvas default) matches
-							// MVT's outer-CW / inner-CCW ring convention.
+							ctx.fillStyle = f.fillStyle;
 							ctx.fill();
 						}
 					}
@@ -3780,32 +3646,39 @@
 					const proj   = map.project(latlng, cappedZ);
 					const tileX  = Math.floor(proj.x / TILE_PX);
 					const tileY  = Math.floor(proj.y / TILE_PX);
-					const localPx = proj.x - tileX * TILE_PX;
-					const localPy = proj.y - tileY * TILE_PX;
 
 					const prepared = this._tileFeatures.get(
-						`${cappedZ}/${tileX}/${tileY}`);
+						tileKey(cappedZ, tileX, tileY));
 					if (!prepared) { this._clearTooltip(); return; }
 
 					for (const layer of prepared) {
-						if (layer.name !== "territories") continue;
-						const scale = TILE_PX / layer.extent;
+						// Convert the click point ONCE from canvas pixels to
+						// MVT-extent coords (0..extent). Then per-feature
+						// bbox tests and the ray-cast work directly on the
+						// raw stored rings — no per-vertex Array allocation,
+						// no per-ring `.map()`. With ~200 features per tile
+						// at z=11 this drops hover work from O(rings·verts)
+						// to O(features) for the common case where the
+						// cursor is outside the feature's bbox.
+						const scaleInv = layer.extent / TILE_PX;
+						const ex = (proj.x - tileX * TILE_PX) * scaleInv;
+						const ey = (proj.y - tileY * TILE_PX) * scaleInv;
 
 						// Walk newest-first (reverse of paint order): the
 						// topmost rendered polygon is the "owner" at this point.
 						for (let fi = layer.features.length - 1; fi >= 0; fi--) {
 							const f = layer.features[fi];
+							if (ex < f.mnX || ex > f.mxX ||
+							    ey < f.mnY || ey > f.mxY) continue;
+
 							let inside = false;
 							for (const ring of f.rings) {
 								if (ring.length < 3) continue;
-								const pts = ring.map(([tx, ty]) =>
-									[tx * scale, ty * scale]);
-								if (pointInRing(localPx, localPy, pts)) inside = !inside;
+								if (pointInRing(ex, ey, ring)) inside = !inside;
 							}
 							if (!inside) continue;
 
-							const featKey =
-								`${cappedZ}/${tileX}/${tileY}/${fi}`;
+							const featKey = tileKey(cappedZ, tileX, tileY) + "/" + fi;
 							if (featKey === this._lastFeatKey) {
 								this._tooltip.setLatLng(latlng);
 								return;
@@ -3853,7 +3726,7 @@
 				tileSize: TILE_PX,
 				minZoom: 4,
 				maxNativeZoom: CFG.INTVL_TILES_MAX_NATIVE_Z,
-				maxZoom: 22,
+				maxZoom: 25,
 				opacity: 1,
 				pane: "dwIntvlGlobalPane",
 			});
@@ -3924,7 +3797,7 @@
 				tileSize: TILE_PX,
 				minZoom: 0,
 				maxNativeZoom: 12,
-				maxZoom: 22,
+				maxZoom: 25,
 				opacity: 0.65,
 				attribution:
 					'Light pollution © <a href="https://www.lightpollutionmap.info/" target="_blank" rel="noreferrer">lightpollutionmap.info</a>',
@@ -3939,13 +3812,10 @@
 			this._ctrl = ctrl;
 		}
 
-		static escHtml(s) {
-			return String(s)
-				.replace(/&/g, "&amp;")
-				.replace(/</g, "&lt;")
-				.replace(/>/g, "&gt;")
-				.replace(/"/g, "&quot;");
-		}
+		// Delegates to the top-level _escHtml helper — kept as a static so
+		// existing `LayerManagerUI.escHtml(...)` call sites in this class
+		// don't need to change.
+		static escHtml(s) { return _escHtml(s); }
 
 		// -- Archive persistence ------------------------------------------
 
@@ -4534,12 +4404,11 @@
 			const target = saved ? this.layers[saved] : null;
 			if (!target) return;
 
-			let attempts = 0;
-			const trySwap = () => {
-				if (!map._loaded) {
-					if (++attempts < 50) setTimeout(trySwap, 150);
-					return;
-				}
+			// map.whenReady fires immediately if the map already loaded,
+			// or once on the next `load` event otherwise — exact and
+			// event-driven, vs. the prior 7.5-second poll budget that
+			// silently gave up.
+			map.whenReady(() => {
 				const toRemove = [];
 				map.eachLayer((l) => {
 					if (l instanceof L.TileLayer && l !== target) toRemove.push(l);
@@ -4547,8 +4416,7 @@
 				toRemove.forEach((l) => map.removeLayer(l));
 				if (!map.hasLayer(target)) map.addLayer(target);
 				console.info("[CustomTiles] Restored layer:", saved);
-			};
-			trySwap();
+			});
 		}
 
 		_readPageCookie(name) {
