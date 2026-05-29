@@ -1,8 +1,8 @@
 ﻿// ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.8.0
-// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, National Parks, OpenSeaMap, Unity Water, QLD Relief. Includes overlay persistence, QPWS hover-identify, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
+// @version      7.9.8
+// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, National Parks, OpenSeaMap, Unity Water, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
 // @grant        GM_xmlhttpRequest
@@ -26,6 +26,7 @@
 // @connect      tiles.openseamap.org
 // @connect      www2.lightpollutionmap.info
 // @connect      www.onthehouse.com.au
+// @connect      d1yalngj9nsyl4.cloudfront.net
 // @run-at       document-start
 // ==/UserScript==
 
@@ -116,7 +117,32 @@
 		LAYER_QPWS:    "QPWS Estate",
 		LAYER_TOPO:    "QLD Topo",
 		LAYER_RELIEF:  "QLD Relief",
+		LAYER_INTVL_GLOBAL: "INTVL Global Map",
 		OVERLAY_STATE_KEY: "dw_active_overlays",
+
+		// INTVL global Mapbox Vector Tile (MVT) CDN. Each tile is a PBF
+		// containing a 'territories' layer of POLYGON features with
+		// properties: runId, activityId, colour, currentArea, startTime.
+		// The path `/single-player/run/{z}/{x}/{y}.pbf` is the PUBLIC
+		// "every runner claims their own territory" mode — the same data
+		// the INTVL app shows on its main map. (The other mode at this
+		// CDN is `/clubs-mode/run/...` — only for club members.)
+		//
+		// Native max zoom is 11. Empirically verified by probing 2x2
+		// quads at each zoom: z=8..11 each return 4 distinct files per
+		// quad, z=12+ return 4 identical files (server-side overzoom of
+		// the z=11 parent with no scaling). If we let Leaflet request z
+		// > 11 directly, the lambda returns the parent's z=11 content
+		// verbatim — so the same 4096-extent polygons render in 4
+		// different z=12 canvases each positioned at a different
+		// geographic location, which looks like the polygons are 1/4 the
+		// size they should be and produces hard seams at every z=12
+		// tile boundary. Capping maxNativeZoom at 11 makes Leaflet
+		// fetch one z=11 tile and CSS-scale 2x for z=12 viewing,
+		// rendering each polygon once at its true location.
+		INTVL_TILES_BASE:
+			"https://d1yalngj9nsyl4.cloudfront.net/single-player/run",
+		INTVL_TILES_MAX_NATIVE_Z: 11,
 
 		// QLD Topo and Relief tile caches — public, no token required.
 		QLD_TOPO_TILE:
@@ -212,7 +238,8 @@
 		},
 		{
 			header: "Live data",
-			names:  [CFG.LAYER_FLIGHTS, CFG.LAYER_MARINE],
+			names:  [CFG.LAYER_FLIGHTS, CFG.LAYER_MARINE,
+			         CFG.LAYER_INTVL_GLOBAL],
 		},
 		{
 			header: "Heatmaps",
@@ -3345,6 +3372,515 @@
 		}
 	}
 
+	/* -- (INTVL Territories — your own runs — removed in 7.9.5) ----------
+	 *
+	 * The auth-gated `terra.getMyTerritoriesV2` layer was retired once the
+	 * public PMTiles CDN proved to serve the entire game world anonymously.
+	 * The Global Map (below) renders every player's polygons including the
+	 * user's own runs, so the two layers were redundant. Kept the MVT
+	 * decoder and the canvas grid layer; everything Clerk-related — the
+	 * userId prompt, the @connect www.intvl.com.au, INTVL_BASE — is gone.
+	 *
+	 * Stale state cleanup: if the user previously had "INTVL Territories"
+	 * enabled, its name lingers in localStorage's dw_active_overlays list.
+	 * The restorer in _restoreOverlays looks up `this.layers[name]` first,
+	 * so unknown names are silently skipped — no extra cleanup needed.
+	 */
+
+
+	/* -- INTVL Global Map (public Mapbox Vector Tile pyramid) ------------
+	 *
+	 * The INTVL app shows a global territory ownership map: every cell
+	 * "owned" by whoever ran a closed loop around it most recently. Public
+	 * (non-club) view. The data is served as Mapbox Vector Tiles from a
+	 * CloudFront/PMTiles backend reverse-engineered from the v3.4.3 APK's
+	 * Hermes bytecode (the URL builder function `getTileUrlTemplate` calls
+	 * `''.concat(BASE, '/', mode, '/run/{z}/{x}/{y}.pbf')` with mode either
+	 * `single-player` for the public map or `clubs-mode` for clubs).
+	 *
+	 *   URL:    {INTVL_TILES_BASE}/{z}/{x}/{y}.pbf
+	 *   Layer:  'territories' (POLYGON features)
+	 *   Props:  runId(int), activityId(string), colour(string),
+	 *           currentArea(double, m²), startTime(int, days since epoch)
+	 *   Extent: 4096, max native zoom 12 (deeper zooms over-zoom client-side)
+	 *
+	 * We render via canvas: per Leaflet tile we fetch the .pbf, decode the
+	 * MVT structure inline, transform each polygon's tile-local coords to
+	 * canvas pixels and fill with the owner's `colour`. No external MVT
+	 * library — the parser is ~150 lines of plain JS protobuf decoding.
+	 */
+
+	// ------ Minimal MVT (Mapbox Vector Tile) PBF parser ------------------
+	// Implements just what we need:
+	//   - top-level Tile message → repeated Layer (field 3)
+	//   - Layer: name(1), features(2 repeated), keys(3 repeated string),
+	//     values(4 repeated Value), extent(5 uint32), version(15)
+	//   - Feature: tags(2 packed uint32), type(3 enum), geometry(4 packed uint32)
+	//   - Value: string(1) / float(2) / double(3) / int(4) / uint(5) / sint(6) / bool(7)
+	// Geometry commands: MoveTo=1, LineTo=2, ClosePath=7. Coords are
+	// zigzag-encoded relative-to-previous tile pixels (0..extent).
+	function mvtDecode(buf) {
+		const layers = [];
+		const view = new Uint8Array(buf);
+		let off = 0;
+		while (off < view.length) {
+			const tag = readVarint(view, off); off = tag.end;
+			const fn = tag.v >>> 3, wt = tag.v & 7;
+			if (fn === 3 && wt === 2) {
+				const len = readVarint(view, off); off = len.end;
+				layers.push(parseLayer(view.subarray(off, off + len.v)));
+				off += len.v;
+			} else {
+				off = skipField(view, off, wt);
+			}
+		}
+		return layers;
+	}
+
+	function readVarint(buf, off) {
+		let result = 0, shift = 0, b;
+		do {
+			b = buf[off++];
+			result |= (b & 0x7f) << shift;
+			shift += 7;
+		} while (b & 0x80);
+		return { v: result >>> 0, end: off };
+	}
+
+	function skipField(buf, off, wireType) {
+		if (wireType === 0)        { return readVarint(buf, off).end; }
+		else if (wireType === 1)   { return off + 8; }
+		else if (wireType === 2)   { const r = readVarint(buf, off); return r.end + r.v; }
+		else if (wireType === 5)   { return off + 4; }
+		return off;
+	}
+
+	function parseLayer(buf) {
+		const info = { name: "", extent: 4096, keys: [], values: [], features: [] };
+		let off = 0;
+		while (off < buf.length) {
+			const tag = readVarint(buf, off); off = tag.end;
+			const fn = tag.v >>> 3, wt = tag.v & 7;
+			if      (fn === 1 && wt === 2) {
+				const r = readVarint(buf, off); off = r.end;
+				info.name = utf8(buf, off, r.v); off += r.v;
+			} else if (fn === 5 && wt === 0) {
+				const r = readVarint(buf, off); off = r.end; info.extent = r.v;
+			} else if (fn === 3 && wt === 2) {
+				const r = readVarint(buf, off); off = r.end;
+				info.keys.push(utf8(buf, off, r.v)); off += r.v;
+			} else if (fn === 4 && wt === 2) {
+				const r = readVarint(buf, off); off = r.end;
+				info.values.push(parseValue(buf.subarray(off, off + r.v))); off += r.v;
+			} else if (fn === 2 && wt === 2) {
+				const r = readVarint(buf, off); off = r.end;
+				info.features.push(parseFeature(buf.subarray(off, off + r.v))); off += r.v;
+			} else {
+				off = skipField(buf, off, wt);
+			}
+		}
+		return info;
+	}
+
+	function parseValue(buf) {
+		let off = 0;
+		while (off < buf.length) {
+			const tag = readVarint(buf, off); off = tag.end;
+			const fn = tag.v >>> 3, wt = tag.v & 7;
+			if (fn === 1 && wt === 2) {
+				const r = readVarint(buf, off); off = r.end;
+				return utf8(buf, off, r.v);
+			}
+			if (fn === 2 && wt === 5) {
+				return new DataView(buf.buffer, buf.byteOffset + off).getFloat32(0, true);
+			}
+			if (fn === 3 && wt === 1) {
+				return new DataView(buf.buffer, buf.byteOffset + off).getFloat64(0, true);
+			}
+			if ((fn === 4 || fn === 5) && wt === 0) {
+				return readVarint(buf, off).v;
+			}
+			if (fn === 6 && wt === 0) {
+				const v = readVarint(buf, off).v;
+				return (v >>> 1) ^ -(v & 1);
+			}
+			if (fn === 7 && wt === 0) {
+				return readVarint(buf, off).v !== 0;
+			}
+			off = skipField(buf, off, wt);
+		}
+		return null;
+	}
+
+	function parseFeature(buf) {
+		const f = { tags: [], type: 0, geom: [] };
+		let off = 0;
+		while (off < buf.length) {
+			const tag = readVarint(buf, off); off = tag.end;
+			const fn = tag.v >>> 3, wt = tag.v & 7;
+			if (fn === 2 && wt === 2) {
+				const r = readVarint(buf, off); off = r.end;
+				const end = off + r.v;
+				while (off < end) {
+					const x = readVarint(buf, off); off = x.end;
+					f.tags.push(x.v);
+				}
+			} else if (fn === 3 && wt === 0) {
+				const r = readVarint(buf, off); off = r.end; f.type = r.v;
+			} else if (fn === 4 && wt === 2) {
+				const r = readVarint(buf, off); off = r.end;
+				const end = off + r.v;
+				while (off < end) {
+					const x = readVarint(buf, off); off = x.end;
+					f.geom.push(x.v);
+				}
+			} else {
+				off = skipField(buf, off, wt);
+			}
+		}
+		return f;
+	}
+
+	// Decode a feature's geometry stream into an array of rings of
+	// [tilePxX, tilePxY] points. Each ring is closed implicitly by the
+	// ClosePath command (we don't repeat the first point).
+	function decodeGeometry(geom) {
+		const rings = [];
+		let ring = null;
+		let i = 0, x = 0, y = 0;
+		while (i < geom.length) {
+			const cmd = geom[i] & 0x7;
+			const count = geom[i] >>> 3;
+			i++;
+			if (cmd === 1) {       // MoveTo
+				for (let k = 0; k < count; k++) {
+					x += zig(geom[i++]); y += zig(geom[i++]);
+					if (ring && ring.length) rings.push(ring);
+					ring = [[x, y]];
+				}
+			} else if (cmd === 2) { // LineTo
+				for (let k = 0; k < count; k++) {
+					x += zig(geom[i++]); y += zig(geom[i++]);
+					ring.push([x, y]);
+				}
+			} else if (cmd === 7) { // ClosePath
+				if (ring) { rings.push(ring); ring = null; }
+			}
+		}
+		if (ring && ring.length) rings.push(ring);
+		return rings;
+	}
+
+	function zig(n) { return (n >>> 1) ^ -(n & 1); }
+
+	function utf8(buf, off, len) {
+		// Fast path for ASCII; fall back to TextDecoder for unicode
+		let s = "";
+		let allAscii = true;
+		for (let i = 0; i < len; i++) {
+			const b = buf[off + i];
+			if (b > 127) { allAscii = false; break; }
+			s += String.fromCharCode(b);
+		}
+		return allAscii ? s : new TextDecoder().decode(buf.subarray(off, off + len));
+	}
+
+	// One-pass preprocessor: turn raw MVT layers into a render-ready form.
+	// For each POLYGON feature we extract its property dict (so we don't
+	// re-walk the tag array per render), pre-decode its geometry, and pull
+	// out colour + startTime. Then sort the feature list by startTime ASC
+	// so the renderer paints oldest-first → newest claims end up on top,
+	// matching across adjacent tiles. Non-polygon features are dropped.
+	function prepareLayers(layers) {
+		const out = [];
+		for (const layer of layers) {
+			const features = [];
+			for (const f of layer.features) {
+				if (f.type !== 3) continue; // POLYGON only
+				const props = {};
+				for (let i = 0; i < f.tags.length; i += 2) {
+					props[layer.keys[f.tags[i]]] = layer.values[f.tags[i + 1]];
+				}
+				features.push({
+					props,
+					colour:    props.colour || "#3b82f6",
+					startTime: typeof props.startTime === "number"
+						? props.startTime : 0,
+					rings: decodeGeometry(f.geom),
+				});
+			}
+			features.sort((a, b) => a.startTime - b.startTime);
+			out.push({ name: layer.name, extent: layer.extent, features });
+		}
+		return out;
+	}
+
+	// ------ INTVL Global Map layer ---------------------------------------
+
+	class IntvlGlobalTilesLayerProvider extends LayerProvider {
+		create() {
+			const TILE_PX = 256;
+			const FILL_ALPHA = 0.55;
+
+			const IntvlGlobalGrid = L.GridLayer.extend({
+				onAdd(map) {
+					if (!map.getPane("dwIntvlGlobalPane")) {
+						map.createPane("dwIntvlGlobalPane");
+						map.getPane("dwIntvlGlobalPane").style.zIndex = "404";
+						// Pane is non-interactive so the underlying map
+						// still receives waypoint clicks. The hover-identify
+						// listens on the map's mousemove directly.
+						map.getPane("dwIntvlGlobalPane").style.pointerEvents = "none";
+					}
+					L.GridLayer.prototype.onAdd.call(this, map);
+
+					// Hover-identify: debounced mousemove → ray-cast against
+					// the cached, pre-decoded polygons of the tile under the
+					// cursor. Reusing the prepared per-tile feature list (the
+					// same one the renderer drew from) means no MVT decode
+					// in the hot path.
+					this._tooltip = L.tooltip({
+						sticky:    true,
+						opacity:   0.95,
+						className: "dw-intvl-tip",
+						direction: "right",
+						offset:    [12, 0],
+					});
+					this._hoverDebounce = null;
+					this._lastFeatKey   = null;
+
+					this._onMove = (e) => {
+						clearTimeout(this._hoverDebounce);
+						const latlng = e.latlng;
+						this._hoverDebounce = setTimeout(
+							() => this._identifyHover(latlng), 60);
+					};
+					this._onLeave = () => {
+						clearTimeout(this._hoverDebounce);
+						this._clearTooltip();
+					};
+					map.on("mousemove", this._onMove);
+					map.on("mouseout",  this._onLeave);
+				},
+
+				onRemove(map) {
+					clearTimeout(this._hoverDebounce);
+					map.off("mousemove", this._onMove);
+					map.off("mouseout",  this._onLeave);
+					this._clearTooltip();
+					this._tooltip = null;
+					this._tileFeatures && this._tileFeatures.clear();
+					L.GridLayer.prototype.onRemove.call(this, map);
+				},
+
+				_clearTooltip() {
+					if (this._tooltip && this._tooltip._map) this._tooltip.remove();
+					this._lastFeatKey = null;
+				},
+
+				createTile(coords, done) {
+					const canvas = L.DomUtil.create("canvas", "leaflet-tile");
+					// Internal canvas resolution is multiplied by devicePixelRatio
+					// so the polygon edges stay crisp on HiDPI displays. CSS size
+					// stays at TILE_PX (256px logical) — Leaflet places the tile
+					// at logical-pixel coordinates and the browser samples the
+					// higher-resolution backing store.
+					const dpr = Math.max(1, window.devicePixelRatio || 1);
+					canvas.width  = TILE_PX * dpr;
+					canvas.height = TILE_PX * dpr;
+					canvas.style.width  = TILE_PX + "px";
+					canvas.style.height = TILE_PX + "px";
+					const ctx = canvas.getContext("2d");
+					ctx.scale(dpr, dpr);
+
+					// Leaflet caps `coords.z` to maxNativeZoom and scales the
+					// canvas in CSS for over-zoom, so we just fetch at
+					// coords.z directly — no manual sub-tile cropping needed.
+					const url =
+						`${CFG.INTVL_TILES_BASE}/${coords.z}/${coords.x}/${coords.y}.pbf`;
+
+					GM_xmlhttpRequest({
+						method: "GET",
+						url,
+						responseType: "arraybuffer",
+						timeout: 15000,
+						onload: (r) => {
+							if (r.status !== 200 || !r.response) {
+								// 404 = no tiles in this area; render empty
+								done(null, canvas);
+								return;
+							}
+							try {
+								const layers   = mvtDecode(r.response);
+								const prepared = prepareLayers(layers);
+								this._renderTile(ctx, prepared, TILE_PX, FILL_ALPHA);
+								if (!this._tileFeatures) this._tileFeatures = new Map();
+								this._tileFeatures.set(
+									`${coords.z}/${coords.x}/${coords.y}`, prepared);
+							} catch (e) {
+								console.warn("[CustomTiles] INTVL global decode:", e);
+							}
+							done(null, canvas);
+						},
+						onerror:   () => done(null, canvas),
+						ontimeout: () => done(null, canvas),
+					});
+
+					return canvas;
+				},
+
+				_renderTile(ctx, prepared, tilePx, fillAlpha /*, strokeAlpha unused */) {
+					ctx.clearRect(0, 0, tilePx, tilePx);
+					// No explicit clip — canvas clips naturally at its bounds
+					// and the explicit rect() was a no-op visually while
+					// adding a per-tile path-setup cost.
+					for (const layer of prepared) {
+						if (layer.name !== "territories") continue;
+						const scale = tilePx / layer.extent;
+
+						// Features are pre-sorted by startTime ASC, so older
+						// claims paint first and the latest claim ends up on
+						// top — which makes "last runner owns it" colour
+						// resolve consistently within each tile. Adjacent
+						// tile seams can still show colour breaks when the
+						// server didn't include the same polygons in both
+						// tiles (server-side MVT generation quirk); fill
+						// alone, with no per-polygon stroke, makes those
+						// transitions read as natural colour boundaries
+						// rather than emphasised outlines.
+						for (const f of layer.features) {
+							ctx.beginPath();
+							for (const ring of f.rings) {
+								if (ring.length < 3) continue;
+								let started = false;
+								for (const [tx, ty] of ring) {
+									const px = tx * scale, py = ty * scale;
+									if (!started) { ctx.moveTo(px, py); started = true; }
+									else ctx.lineTo(px, py);
+								}
+								ctx.closePath();
+							}
+							ctx.fillStyle = hexAlpha(f.colour, fillAlpha);
+							// Nonzero winding rule (canvas default) matches
+							// MVT's outer-CW / inner-CCW ring convention.
+							ctx.fill();
+						}
+					}
+				},
+
+				_identifyHover(latlng) {
+					if (!this._tileFeatures || !this._tileFeatures.size) return;
+					const map = this._map;
+					if (!map || !this._tooltip) return;
+					const z       = map.getZoom();
+					const cappedZ = Math.min(z, CFG.INTVL_TILES_MAX_NATIVE_Z);
+
+					// Project to pixel coords at the FETCH zoom — that's the
+					// zoom the cached tile data is keyed at.
+					const proj   = map.project(latlng, cappedZ);
+					const tileX  = Math.floor(proj.x / TILE_PX);
+					const tileY  = Math.floor(proj.y / TILE_PX);
+					const localPx = proj.x - tileX * TILE_PX;
+					const localPy = proj.y - tileY * TILE_PX;
+
+					const prepared = this._tileFeatures.get(
+						`${cappedZ}/${tileX}/${tileY}`);
+					if (!prepared) { this._clearTooltip(); return; }
+
+					for (const layer of prepared) {
+						if (layer.name !== "territories") continue;
+						const scale = TILE_PX / layer.extent;
+
+						// Walk newest-first (reverse of paint order): the
+						// topmost rendered polygon is the "owner" at this point.
+						for (let fi = layer.features.length - 1; fi >= 0; fi--) {
+							const f = layer.features[fi];
+							let inside = false;
+							for (const ring of f.rings) {
+								if (ring.length < 3) continue;
+								const pts = ring.map(([tx, ty]) =>
+									[tx * scale, ty * scale]);
+								if (pointInRing(localPx, localPy, pts)) inside = !inside;
+							}
+							if (!inside) continue;
+
+							const featKey =
+								`${cappedZ}/${tileX}/${tileY}/${fi}`;
+							if (featKey === this._lastFeatKey) {
+								this._tooltip.setLatLng(latlng);
+								return;
+							}
+							this._lastFeatKey = featKey;
+
+							const km2 = ((f.props.currentArea || 0) / 1e6).toFixed(2);
+							// startTime is "days since 1970-01-01"
+							let when = "?";
+							if (typeof f.props.startTime === "number") {
+								when = new Date(f.props.startTime * 86400 * 1000)
+									.toISOString().slice(0, 10);
+							}
+							const swatch =
+								`<span style="display:inline-block;width:10px;` +
+								`height:10px;background:${f.colour};` +
+								`border:1px solid #444;vertical-align:middle"></span>`;
+							// The public MVT data ships only runId/activityId
+							// — no username/userId. To resolve a runner we'd
+							// need an authed tRPC call (and a per-run lookup
+							// procedure I haven't located). Surface what we
+							// have so it can be cross-referenced manually.
+							const html =
+								`<b>${swatch} ${f.colour}</b><br>` +
+								`${km2} km² · ${when}<br>` +
+								`<span class="dw-cad-sub">` +
+								`run ${f.props.runId || "?"}<br>` +
+								`activity ${f.props.activityId || "?"}<br>` +
+								`<i>runner identity not in public tile data</i>` +
+								`</span>`;
+							this._tooltip.setLatLng(latlng).setContent(html);
+							if (!this._tooltip._map) this._tooltip.addTo(map);
+							return;
+						}
+					}
+					this._clearTooltip();
+				},
+
+				getAttribution() {
+					return 'Global territories © <a href="https://www.intvl.com.au" target="_blank" rel="noreferrer">INTVL</a>';
+				},
+			});
+
+			return new IntvlGlobalGrid({
+				tileSize: TILE_PX,
+				minZoom: 4,
+				maxNativeZoom: CFG.INTVL_TILES_MAX_NATIVE_Z,
+				maxZoom: 22,
+				opacity: 1,
+				pane: "dwIntvlGlobalPane",
+			});
+		}
+	}
+
+	// Append alpha to a #rrggbb colour → 'rgba(r,g,b,a)' for canvas fill.
+	function hexAlpha(hex, a) {
+		const m = /^#([0-9a-f]{6})$/i.exec(hex);
+		if (!m) return hex;
+		const v = parseInt(m[1], 16);
+		return `rgba(${(v >> 16) & 0xff},${(v >> 8) & 0xff},${v & 0xff},${a})`;
+	}
+
+	// Ray-casting point-in-polygon for hit testing.
+	function pointInRing(px, py, ring) {
+		let inside = false;
+		for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+			const xi = ring[i][0], yi = ring[i][1];
+			const xj = ring[j][0], yj = ring[j][1];
+			const intersect = ((yi > py) !== (yj > py)) &&
+				(px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi);
+			if (intersect) inside = !inside;
+		}
+		return inside;
+	}
+
 	/* -- Light Pollution (lightpollutionmap.info WMS) --------------------- */
 
 	// WMS GetMap served via GeoServer's GWC tile cache. We compute the
@@ -3859,6 +4395,13 @@
 				this.layers[CFG.LAYER_RELIEF] = new QldReliefLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_RELIEF], CFG.LAYER_RELIEF);
 
+				this.layers[CFG.LAYER_INTVL_GLOBAL] =
+					new IntvlGlobalTilesLayerProvider().create();
+				ctrl.addOverlay(
+					this.layers[CFG.LAYER_INTVL_GLOBAL],
+					CFG.LAYER_INTVL_GLOBAL,
+				);
+
 				if (!map.getPane("dwRoadsPane")) {
 					map.createPane("dwRoadsPane");
 					map.getPane("dwRoadsPane").style.zIndex = 225;
@@ -4333,6 +4876,9 @@
 				// passes hover events through to the map).
 				".dw-cad-tip .dw-cad-link { display: inline-block; margin-top: 3px; color: #1d4ed8; text-decoration: none; pointer-events: auto; }",
 				".dw-cad-tip .dw-cad-link:hover { text-decoration: underline; }",
+				// INTVL territory tooltip — same minimalist style as cadastre.
+				".dw-intvl-tip { font-size: 11px; line-height: 1.4; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
+				".dw-intvl-tip b { font-weight: 700; }",
 				// Sales popup — opened by clicking the "Sales ↗" link in the
 				// cadastre tooltip. Uses Leaflet's popup primitive so it
 				// inherits autopan + map-anchored behaviour for free.
