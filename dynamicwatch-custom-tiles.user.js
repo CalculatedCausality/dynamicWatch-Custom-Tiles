@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.14
+// @version      7.9.15
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, National Parks, OpenSeaMap, Unity Water, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -807,21 +807,12 @@
 
 			getTileUrl(coords) {
 				const bb = tileToBBox4326(coords.z, coords.x, coords.y);
-				// On HiDPI screens ask the export endpoint for a 2× raster
-				// (size doubled, dpi=192) so labels and contours render at
-				// native pixel density instead of being upscaled by the
-				// browser. Plain integer dpr only — fractional scaling
-				// produces fractional-pixel sizes the server rounds.
-				const dpr = Math.max(1, Math.min(3, Math.round(
-					window.devicePixelRatio || 1)));
-				const px  = tileSize * dpr;
-				const dpiParam = dpr > 1 ? `&dpi=${96 * dpr}` : "";
 				return (
 					`${opts.baseUrl}/export?` +
 					`bbox=${bb.minLon},${bb.minLat},${bb.maxLon},${bb.maxLat}` +
 					`&bboxSR=4326&imageSR=4326` +
 					(opts.showLayers != null ? `&layers=show:${opts.showLayers}` : "") +
-					`&size=${px},${px}${dpiParam}` +
+					`&size=${tileSize},${tileSize}` +
 					`&format=png32&transparent=true&f=image`
 				);
 			},
