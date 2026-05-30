@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.13
+// @version      7.9.14
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, National Parks, OpenSeaMap, Unity Water, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -655,6 +655,25 @@
 		}
 	}
 
+	// Wire a GridLayer subclass so that any gmGet handle stored on a tile
+	// DOM element (as `_dwHandle` for one fetch, or `_dwHandles` for the
+	// Garmin-style multi-fetch case) is cancelled when Leaflet drops the
+	// tile. Without this, fast panning leaves dozens of inflight XHRs
+	// streaming bytes nobody will look at — wasteful on metered links and
+	// outright harmful on the Garmin heatmap, which fans 5 requests per
+	// tile and can queue 80+ wasted fetches on a single pan.
+	function wireTileAbort(gridLayer) {
+		gridLayer.on("tileunload", (e) => {
+			const t = e.tile;
+			if (!t) return;
+			if (t._dwHandle) { gmCancel(t._dwHandle); t._dwHandle = null; }
+			if (t._dwHandles) {
+				for (const h of t._dwHandles) gmCancel(h);
+				t._dwHandles = null;
+			}
+		});
+	}
+
 	// Coalesce concurrent fetchers by key. `fn(done)` is invoked once per
 	// key while a previous call is still pending; every caller's callback
 	// receives the same result. Used to dedupe e.g. address lookups when
@@ -788,12 +807,21 @@
 
 			getTileUrl(coords) {
 				const bb = tileToBBox4326(coords.z, coords.x, coords.y);
+				// On HiDPI screens ask the export endpoint for a 2× raster
+				// (size doubled, dpi=192) so labels and contours render at
+				// native pixel density instead of being upscaled by the
+				// browser. Plain integer dpr only — fractional scaling
+				// produces fractional-pixel sizes the server rounds.
+				const dpr = Math.max(1, Math.min(3, Math.round(
+					window.devicePixelRatio || 1)));
+				const px  = tileSize * dpr;
+				const dpiParam = dpr > 1 ? `&dpi=${96 * dpr}` : "";
 				return (
 					`${opts.baseUrl}/export?` +
 					`bbox=${bb.minLon},${bb.minLat},${bb.maxLon},${bb.maxLat}` +
 					`&bboxSR=4326&imageSR=4326` +
 					(opts.showLayers != null ? `&layers=show:${opts.showLayers}` : "") +
-					`&size=${tileSize},${tileSize}` +
+					`&size=${px},${px}${dpiParam}` +
 					`&format=png32&transparent=true&f=image`
 				);
 			},
@@ -1050,7 +1078,7 @@
 					img.setAttribute("role", "presentation");
 					const url =
 						TILE_BASE + coords.z + "/" + coords.x + "/" + coords.y + ".png";
-					gmGet(url, {
+					img._dwHandle = gmGet(url, {
 						responseType: "arraybuffer",
 						headers: {
 							Origin:  spoofOrigin,
@@ -1058,6 +1086,7 @@
 							Accept:  "image/png,image/*,*/*;q=0.8",
 						},
 					}, (err, r) => {
+						img._dwHandle = null;
 						if (err) {
 							done(new Error("Stamen " + err.message), img);
 							return;
@@ -1079,7 +1108,7 @@
 				},
 			});
 
-			return new TonerGrid({
+			const layer = new TonerGrid({
 				tileSize: TILE_PX,
 				maxNativeZoom: 20,
 				maxZoom: 22,
@@ -1089,6 +1118,8 @@
 					'&copy; <a href="https://openmaptiles.org/" target="_blank" rel="noreferrer">OpenMapTiles</a> ' +
 					'&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors',
 			});
+			wireTileAbort(layer);
+			return layer;
 		}
 	}
 
@@ -1597,10 +1628,12 @@
 
 					let remaining = ACTIVITIES.length;
 					let failed = 0;
+					canvas._dwHandles = [];
 
 					const finish = () => {
 						remaining--;
 						if (remaining === 0) {
+							canvas._dwHandles = null;
 							if (failed === ACTIVITIES.length) {
 								done(new Error("All Garmin activity tiles failed"), canvas);
 							} else {
@@ -1613,38 +1646,42 @@
 						const url =
 							"https://connecttile.garmin.com/" + activity + "/" +
 							coords.z + "/" + coords.x + "/" + coords.y + ".png";
-						gmGet(url, { responseType: "arraybuffer" }, (err, r) => {
-							if (err || r.status !== 200) {
-								failed++; finish(); return;
-							}
-							const blob   = new Blob([r.response], { type: "image/png" });
-							const objUrl = URL.createObjectURL(blob);
-							const img = new Image();
-							img.onload = () => {
-								ctx.globalCompositeOperation = "lighter";
-								ctx.drawImage(img, 0, 0);
-								URL.revokeObjectURL(objUrl);
-								finish();
-							};
-							img.onerror = () => {
-								URL.revokeObjectURL(objUrl);
-								failed++; finish();
-							};
-							img.src = objUrl;
-						});
+						canvas._dwHandles.push(
+							gmGet(url, { responseType: "arraybuffer" }, (err, r) => {
+								if (err || r.status !== 200) {
+									failed++; finish(); return;
+								}
+								const blob   = new Blob([r.response], { type: "image/png" });
+								const objUrl = URL.createObjectURL(blob);
+								const img = new Image();
+								img.onload = () => {
+									ctx.globalCompositeOperation = "lighter";
+									ctx.drawImage(img, 0, 0);
+									URL.revokeObjectURL(objUrl);
+									finish();
+								};
+								img.onerror = () => {
+									URL.revokeObjectURL(objUrl);
+									failed++; finish();
+								};
+								img.src = objUrl;
+							}),
+						);
 					}
 
 					return canvas;
 				},
 			});
 
-			return new GarminHeatGrid({
+			const layer = new GarminHeatGrid({
 				tileSize: 256,
 				maxNativeZoom: 17,
 				maxZoom: 25,
 				opacity: 0.8,
 				attribution: "© Garmin",
 			});
+			wireTileAbort(layer);
+			return layer;
 		}
 	}
 
@@ -3530,6 +3567,13 @@
 					// its prepared features (200-500 polygons each, with
 					// nested vertex arrays) for the rest of the session.
 					this._onTileUnload = (e) => {
+						// Abort the in-flight pbf fetch so a fast pan doesn't
+						// keep streaming bytes for tiles Leaflet has already
+						// discarded — biggest win on flaky mobile networks.
+						if (e.tile && e.tile._dwHandle) {
+							gmCancel(e.tile._dwHandle);
+							e.tile._dwHandle = null;
+						}
 						if (!this._tileFeatures) return;
 						const c = e.coords;
 						this._tileFeatures.delete(tileKey(c.z, c.x, c.y));
@@ -3576,10 +3620,11 @@
 					const url =
 						`${CFG.INTVL_TILES_BASE}/${coords.z}/${coords.x}/${coords.y}.pbf`;
 
-					gmGet(url, {
+					canvas._dwHandle = gmGet(url, {
 						responseType: "arraybuffer",
 						timeout: 15000,
 					}, (err, r) => {
+						canvas._dwHandle = null;
 						// 404 (no coverage) and network errors both render empty —
 						// caller relies on a canvas-shaped tile either way.
 						if (err || r.status !== 200 || !r.response) {
