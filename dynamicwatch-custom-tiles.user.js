@@ -1,8 +1,8 @@
 ﻿// ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.22
-// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, National Parks, OpenSeaMap, Unity Water, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
+// @version      7.9.23
+// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
 // @grant        GM_xmlhttpRequest
@@ -18,7 +18,6 @@
 // @connect      tiles.stadiamaps.com
 // @connect      s3-us-west-2.amazonaws.com
 // @connect      wayback.maptiles.arcgis.com
-// @connect      services2.arcgis.com
 // @connect      opensky-network.org
 // @connect      www.marinetraffic.com
 // @connect      openinframap.org
@@ -105,7 +104,7 @@
 			"https://spatial-img.information.qld.gov.au/arcgis/rest/services/" +
 			"QImagery/HistoricalAerialPhoto_AllUsers/ImageServer",
 
-		LAYER_UW: "Unity Water",
+		LAYER_WATER: "Water Infrastructure",
 		LAYER_FLIGHTS: "Live Flights",
 		LAYER_MARINE: "Marine Vessels",
 		LAYER_MOBILE: "Mobile Coverage",
@@ -169,7 +168,7 @@
 		// Minimum zoom for QPWS hover-identify (below this, polygons too small).
 		QLD_QPWS_HOVER_MIN_ZOOM: 11,
 
-		UW_FS_BASE: "https://services2.arcgis.com/tQg86iShPXJPWQWw",
+		OIM_WATER_TILES: "https://openinframap.org/map/water",
 
 		// QLD Digital Cadastral Database via Planning Cadastre MapServer.
 		// Layer 1 is the parent "Land Parcels" group — service handles
@@ -253,7 +252,7 @@
 		},
 		{
 			header: "Infrastructure",
-			names:  [CFG.LAYER_INFRA, CFG.LAYER_MOBILE, CFG.LAYER_UW],
+			names:  [CFG.LAYER_INFRA, CFG.LAYER_TELECOM, CFG.LAYER_WATER, CFG.LAYER_MOBILE],
 		},
 		{
 			header: "Environment",
@@ -1733,141 +1732,6 @@
 			});
 			wireTileAbort(layer);
 			return layer;
-		}
-	}
-
-	// -- Unity Water Infrastructure ------------------------------------------
-
-	/**
-	 * Renders one or more Esri FeatureServer layers as a GeoJSON overlay.
-	 * Queries the visible extent on each map move and re-renders features.
-	 *
-	 * @param {Array<{url:string, fields:string, style:object|function}>} configs
-	 */
-	class UnityWaterLayerProvider extends LayerProvider {
-		constructor(configs) {
-			super();
-			this._configs = configs;
-		}
-
-		create() {
-			const configs = this._configs;
-
-			const UWLayer = L.Layer.extend({
-				initialize(cfgs) {
-					L.setOptions(this, {});
-					this._cfgs = cfgs;
-					this._group = null;
-					this._timer = null;
-					this._guards = [];
-				},
-
-				onAdd(map) {
-					if (!map.getPane("dwUWPane")) {
-						map.createPane("dwUWPane");
-						map.getPane("dwUWPane").style.zIndex = "400";
-						map.getPane("dwUWPane").style.pointerEvents = "none";
-					}
-					this._group = L.layerGroup().addTo(map);
-					map.on("moveend", this._schedule, this);
-					map.on("zoomend", this._schedule, this);
-					this._fetch();
-				},
-
-				onRemove(map) {
-					clearTimeout(this._timer);
-					map.off("moveend", this._schedule, this);
-					map.off("zoomend", this._schedule, this);
-					this._guards.forEach((g) => {
-						g.dead = true;
-					});
-					this._guards = [];
-					if (this._group) {
-						this._group.remove();
-						this._group = null;
-					}
-				},
-
-				_schedule() {
-					clearTimeout(this._timer);
-					this._timer = setTimeout(() => this._fetch(), 400);
-				},
-
-				_fetch() {
-					const self = this;
-					const map = this._map;
-					if (!map || !this._group) return;
-					if (map.getZoom() < 13) {
-						this._group.clearLayers();
-						return;
-					}
-
-					const b = map.getBounds();
-					const geomParam = encodeURIComponent(
-						JSON.stringify({
-							xmin: b.getWest(),
-							ymin: b.getSouth(),
-							xmax: b.getEast(),
-							ymax: b.getNorth(),
-							spatialReference: { wkid: 4326 },
-						}),
-					);
-
-					this._guards.forEach((g) => {
-						g.dead = true;
-					});
-					const guards = this._cfgs.map(() => ({ dead: false }));
-					this._guards = guards;
-
-					const results = new Array(this._cfgs.length).fill(null);
-					let remaining = this._cfgs.length;
-
-					this._cfgs.forEach((cfg, i) => {
-						const guard = guards[i];
-						const url =
-							cfg.url + "/query?geometry=" + geomParam +
-							"&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326" +
-							"&spatialRel=esriSpatialRelIntersects" +
-							"&outFields=" +
-							encodeURIComponent(cfg.fields || "ObjectId") +
-							"&returnGeometry=true&f=geojson";
-
-						gmJsonGet(url, (err, data) => {
-							if (guard.dead) return;
-							if (!err) results[i] = { cfg, data };
-							if (--remaining === 0) self._render(results, guards);
-						});
-					});
-				},
-
-				_render(results, guards) {
-					if (!this._group || guards.some((g) => g.dead)) return;
-					this._group.clearLayers();
-					for (const r of results) {
-						if (!r || !r.data || r.data.error || !r.data.features) continue;
-						const cfg = r.cfg;
-						L.geoJSON(r.data, {
-							pane: "dwUWPane",
-							style:
-								typeof cfg.style === "function" ? cfg.style : () => cfg.style,
-							pointToLayer: (ft, ll) => {
-								const s =
-									typeof cfg.style === "function" ? cfg.style(ft) : cfg.style;
-								return L.circleMarker(
-									ll,
-									Object.assign({ radius: 4, pane: "dwUWPane" }, s),
-								);
-							},
-						}).addTo(this._group);
-					}
-				},
-
-				getAttribution() {
-					return "\u00a9 Unitywater";
-				},
-			});
-
-			return new UWLayer(configs);
 		}
 	}
 
@@ -3383,6 +3247,122 @@
 		}
 	}
 
+	/* -- Water Infrastructure (OpenInfraMap vector tiles) --------------- */
+
+	// Water & wastewater facilities worldwide from OpenInfraMap's water tiles:
+	// treatment & wastewater plants, reservoirs, water towers, wells, pumping
+	// stations, plus named trunk pipelines. Note this is a *facilities* map,
+	// not a pipe network — OSM has little reticulation — so it replaced the old
+	// Unitywater layer (authoritative pipe-level, but SE-QLD only) with global
+	// coverage. Same vector-tile pipeline as Power/Telecoms; polygon+centroid
+	// pairs share an `_id` so the polygon wins.
+	class WaterLayerProvider extends LayerProvider {
+		create() {
+			function dotIcon(glyph, fill, size) {
+				size = size || 14;
+				return L.divIcon({
+					className: "dw-water-icon",
+					html: `<svg viewBox="0 0 16 16" width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">` +
+					      `<circle cx="8" cy="8" r="6.5" fill="${fill}" stroke="#222" stroke-width="1" opacity="0.92"/>` +
+					      `<text x="8" y="11.5" text-anchor="middle" font-size="9" font-family="sans-serif" fill="#fff">${glyph}</text>` +
+					      `</svg>`,
+					iconSize: [size, size], iconAnchor: [size / 2, size / 2],
+				});
+			}
+			// water-kind → marker glyph/colour + label (pipelines styled below).
+			const STYLE = {
+				plant_water: { fill: "#0277BD", glyph: "≈", label: "Water treatment plant" },
+				plant_waste: { fill: "#6D4C41", glyph: "≈", label: "Wastewater plant" },
+				reservoir:   { fill: "#0288D1", glyph: "R", label: "Reservoir" },
+				tower:       { fill: "#0288D1", glyph: "T", label: "Water tower" },
+				well:        { fill: "#0288D1", glyph: "○", label: "Well" },
+				pump:        { fill: "#00897B", glyph: "P", label: "Pumping station" },
+			};
+			const WASTE = /waste|sewage|sewer|drain/i;
+
+			return makeVectorTileLayer({
+				label:         "Water",
+				pane:          "dwWaterPane",
+				paneZIndex:    400,
+				minZoom:       10,
+				padBounds:     0.1,
+				maxNativeZoom: CFG.OIM_MAX_NATIVE_Z,
+				attribution:   'Water data © <a href="https://openinframap.org/" target="_blank" rel="noreferrer">OpenInfraMap</a> / <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>',
+				tileUrl: (z, x, y) => `${CFG.OIM_WATER_TILES}/${z}/${x}/${y}.pbf`,
+
+				toElements: (layerName, p, gtype, rings) => {
+					if (p.disused) return null;
+					const tagsFor = (wk) => ({ wk: wk, name: p.name,
+						operator: p.operator, substance: p.substance });
+					const ways = (wk, id) => rings.map((r) => ({ type: "way",
+						geometry: r, tags: tagsFor(wk), _id: id }));
+					const point = (wk, id) => {
+						const r = rings[0]; if (!r || !r.length) return null;
+						return [{ type: "node", lat: r[0].lat, lon: r[0].lon,
+							_id: id, tags: tagsFor(wk) }];
+					};
+					switch (layerName) {
+						case "water_pipeline": {
+							const wk = WASTE.test(p.substance || "")
+								? "pipe_waste" : "pipe_water";
+							return rings.map((r) => ({ type: "way", geometry: r,
+								tags: tagsFor(wk) }));
+						}
+						case "water_treatment_plant_polygon": return ways("plant_water", "wtp/" + p.osm_id);
+						case "water_treatment_plant_point":   return point("plant_water", "wtp/" + p.osm_id);
+						case "wastewater_plant_polygon":      return ways("plant_waste", "wwp/" + p.osm_id);
+						case "wastewater_plant_point":        return point("plant_waste", "wwp/" + p.osm_id);
+						case "water_reservoir":               return ways("reservoir", "res/" + p.osm_id);
+						case "water_reservoir_point":         return point("reservoir", "res/" + p.osm_id);
+						case "pumping_station_polygon":       return ways("pump", "pmp/" + p.osm_id);
+						case "pumping_station_point":         return point("pump", "pmp/" + p.osm_id);
+						case "water_tower":                   return point("tower");
+						case "water_well":                    return point("well");
+						default: return null; // water_cabinet, etc.
+					}
+				},
+
+				render: (group, elements) => {
+					for (const el of elements) {
+						const t = el.tags || {};
+						const extra = (t.operator ? `<br>${t.operator}` : "") +
+							(t.substance ? `<br>${t.substance}` : "");
+						if (el.type === "way" && el.geometry && el.geometry.length) {
+							const latlngs = el.geometry.map((g) => [g.lat, g.lon]);
+							if (t.wk === "pipe_water" || t.wk === "pipe_waste") {
+								const waste = t.wk === "pipe_waste";
+								L.polyline(latlngs, {
+									pane: "dwWaterPane",
+									color: waste ? "#8D6E63" : "#039BE5",
+									weight: 2, opacity: 0.9,
+									dashArray: waste ? "5 4" : null,
+								}).bindTooltip(`<b>${t.name ||
+									(waste ? "Wastewater pipeline" : "Water pipeline")}</b>` + extra,
+									{ className: "dw-infra-tip", sticky: true }).addTo(group);
+								continue;
+							}
+							const st = STYLE[t.wk] || STYLE.reservoir;
+							L.polygon(latlngs, {
+								pane: "dwWaterPane", color: st.fill, weight: 1.5,
+								opacity: 0.9, fillColor: st.fill, fillOpacity: 0.2,
+							}).bindTooltip(`<b>${t.name || st.label}</b>` + extra,
+								{ className: "dw-infra-tip", sticky: true }).addTo(group);
+							continue;
+						}
+						if (el.type !== "node" || !isFinite(el.lat) || !isFinite(el.lon))
+							continue;
+						const st = STYLE[t.wk]; if (!st) continue;
+						L.marker([el.lat, el.lon], {
+							icon: dotIcon(st.glyph, st.fill, t.wk === "well" ? 12 : 14),
+							pane: "dwWaterPane", interactive: true,
+						}).bindTooltip(`<b>${t.name || st.label}</b>` + extra,
+							{ className: "dw-infra-tip", sticky: true }).addTo(group);
+					}
+				},
+			});
+		}
+	}
+
 	/* -- National Parks (QLD QPWS protected-areas reference) -------------- */
 
 	// Vector overlay backed by an ArcGIS REST `query` endpoint returning
@@ -4604,37 +4584,8 @@
 					new GarminHeatmapLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_GARMIN], CFG.LAYER_GARMIN);
 
-				this.layers[CFG.LAYER_UW] = new UnityWaterLayerProvider([
-					{
-						url:
-							CFG.UW_FS_BASE +
-							"/ArcGIS/rest/services/UWPublicAccessWaterInfrastructureLayers/FeatureServer/10",
-						fields: "SubtypeCD",
-						style: (f) => {
-							const s = f.properties && f.properties.SubtypeCD;
-							return s === 11101
-								? { color: "#005ce6", weight: 3, opacity: 0.85 }
-								: s === 11102
-									? { color: "#00c5ff", weight: 2.5, opacity: 0.85 }
-									: { color: "#73b2ff", weight: 1.5, opacity: 0.85 };
-						},
-					},
-					{
-						url:
-							CFG.UW_FS_BASE +
-							"/ArcGIS/rest/services/UWPublicAccessSewerInfrastructureLayers/FeatureServer/11",
-						fields: "NominalDiameter",
-						style: { color: "#734c00", weight: 1.5, opacity: 0.85 },
-					},
-					{
-						url:
-							CFG.UW_FS_BASE +
-							"/ArcGIS/rest/services/UWPublicAccessSewerInfrastructureLayers/FeatureServer/12",
-						fields: "NominalDiameter",
-						style: { color: "#df3c00", weight: 2, opacity: 0.85 },
-					},
-				]).create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_UW], CFG.LAYER_UW);
+				this.layers[CFG.LAYER_WATER] = new WaterLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_WATER], CFG.LAYER_WATER);
 
 				this.layers[CFG.LAYER_FLIGHTS] = new FlightsLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_FLIGHTS], CFG.LAYER_FLIGHTS);
