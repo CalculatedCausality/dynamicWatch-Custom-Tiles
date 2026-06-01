@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.18
+// @version      7.9.19
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, National Parks, OpenSeaMap, Unity Water, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -3190,6 +3190,60 @@
 
 	/* -- National Parks / Protected Areas (OSM via Overpass) -------------- */
 
+	// Stitch a relation's member ways into closed rings. Overpass `out geom`
+	// returns a boundary relation as many unordered segments in arbitrary
+	// direction (Lamington NP alone is 78 outer ways) — handing those straight
+	// to L.polygon draws 78 disjoint slivers, not one park. We walk segments
+	// end-to-end, matching shared endpoints, until each ring closes.
+	// `ways` is an array of geometry arrays ([{lat,lon},…]); returns an array
+	// of rings ([[lat,lon],…], first point repeated at the end when closed).
+	function assembleRings(ways) {
+		const segs = ways
+			.filter((w) => w && w.length >= 2)
+			.map((w) => w.map((p) => [p.lat, p.lon]));
+		const used = new Array(segs.length).fill(false);
+		const key = (p) => p[0].toFixed(7) + "," + p[1].toFixed(7);
+		const rings = [];
+		for (let i = 0; i < segs.length; i++) {
+			if (used[i]) continue;
+			used[i] = true;
+			let ring = segs[i].slice();
+			let grew = true;
+			while (grew && key(ring[0]) !== key(ring[ring.length - 1])) {
+				grew = false;
+				const tail = key(ring[ring.length - 1]);
+				for (let j = 0; j < segs.length; j++) {
+					if (used[j]) continue;
+					const s = segs[j];
+					if (key(s[0]) === tail) {
+						ring = ring.concat(s.slice(1));
+						used[j] = true; grew = true; break;
+					}
+					if (key(s[s.length - 1]) === tail) {
+						ring = ring.concat(s.slice().reverse().slice(1));
+						used[j] = true; grew = true; break;
+					}
+				}
+			}
+			rings.push(ring);
+		}
+		return rings;
+	}
+
+	// Ray-cast point-in-ring on [lat,lon] points — used to attach inner rings
+	// (holes) to whichever outer ring contains them.
+	function ringContains(ring, pt) {
+		let inside = false;
+		const x = pt[1], y = pt[0];
+		for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+			const xi = ring[i][1], yi = ring[i][0];
+			const xj = ring[j][1], yj = ring[j][0];
+			if ((yi > y) !== (yj > y) &&
+			    x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+		}
+		return inside;
+	}
+
 	// Polygons for OSM-tagged national parks and protected areas. Bumped to
 	// min zoom 9 so we don't pull continent-scale geometry on world view.
 	class NationalParksLayerProvider extends LayerProvider {
@@ -3212,7 +3266,12 @@
 					`relation[boundary=national_park](${bbox});` +
 					`way[boundary=protected_area]["protect_class"~"^[1-4]$"](${bbox});` +
 					`relation[boundary=protected_area]["protect_class"~"^[1-4]$"](${bbox});` +
-					`);out geom tags;`,
+					// `out geom;` (NOT `out geom tags;`): the `tags` verbosity
+					// prints only ids+tags and drops relation members, so every
+					// park relation came back as a bare bbox with no polygon and
+					// rendered nothing. Plain `out geom` keeps the tags AND emits
+					// each member way's geometry.
+					`);out geom;`,
 				render: (group, elements) => {
 					for (const el of elements) {
 						const tags = el.tags || {};
@@ -3233,17 +3292,26 @@
 								.bindTooltip(name, { className: "dw-park-tip", sticky: true })
 								.addTo(group);
 						} else if (el.type === "relation" && el.members) {
-							const rings = [];
+							// Split members by role (empty role → outer, as OSM
+							// boundary relations often leave it blank), stitch each
+							// set into closed rings, then render every outer ring as
+							// its own polygon with any contained inner rings as holes.
+							const outerWays = [], innerWays = [];
 							for (const m of el.members) {
 								if (m.type !== "way" || !m.geometry) continue;
-								if (m.role && m.role !== "outer" && m.role !== "inner")
-									continue;
-								rings.push(m.geometry.map((g) => [g.lat, g.lon]));
+								(m.role === "inner" ? innerWays : outerWays).push(m.geometry);
 							}
-							if (!rings.length) continue;
-							L.polygon(rings, style)
-								.bindTooltip(name, { className: "dw-park-tip", sticky: true })
-								.addTo(group);
+							const outers = assembleRings(outerWays)
+								.filter((r) => r.length >= 4);
+							const inners = assembleRings(innerWays)
+								.filter((r) => r.length >= 4);
+							if (!outers.length) continue;
+							for (const outer of outers) {
+								const holes = inners.filter((h) => ringContains(outer, h[0]));
+								L.polygon(holes.length ? [outer, ...holes] : outer, style)
+									.bindTooltip(name, { className: "dw-park-tip", sticky: true })
+									.addTo(group);
+							}
 						}
 					}
 				},
