@@ -1,8 +1,8 @@
 ﻿// ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.21
-// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, National Parks, OpenSeaMap, Unity Water, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
+// @version      7.9.22
+// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, National Parks, OpenSeaMap, Unity Water, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
 // @grant        GM_xmlhttpRequest
@@ -111,6 +111,7 @@
 		LAYER_MOBILE: "Mobile Coverage",
 		LAYER_SEAMARKS: "OpenSeaMap",
 		LAYER_INFRA: "Power Infrastructure",
+		LAYER_TELECOM: "Telecoms",
 		LAYER_PARKS: "National Parks",
 		LAYER_LIGHTPOL: "Light Pollution",
 		LAYER_CADASTRE: "QLD Cadastre",
@@ -204,6 +205,7 @@
 		// power_plant(_point), power_generator(_area), power_tower. Voltages
 		// are in kV and generator/plant output in MW (converted on read).
 		OIM_POWER_TILES: "https://openinframap.org/map/power",
+		OIM_TELECOM_TILES: "https://openinframap.org/map/telecoms",
 		OIM_MAX_NATIVE_Z: 16,
 
 		// lightpollutionmap.info GeoServer (WMS via GWC tile cache).
@@ -3283,6 +3285,104 @@
 		}
 	}
 
+	/* -- Telecoms Infrastructure (OpenInfraMap vector tiles) ------------- */
+
+	// Telephone exchanges / data centres (named, with operator — Telstra,
+	// NBN Co, …), plus communications masts and antennas, from OpenInfraMap's
+	// global telecoms vector tiles. Same vector-tile pipeline as Power; data
+	// centres ship as both polygon and centroid point (shared `_id` → polygon
+	// wins). Masts/antennas are usually unnamed points.
+	class TelecomsLayerProvider extends LayerProvider {
+		create() {
+			function dotIcon(glyph, fill, size) {
+				size = size || 15;
+				return L.divIcon({
+					className: "dw-telecom-icon",
+					html: `<svg viewBox="0 0 16 16" width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">` +
+					      `<circle cx="8" cy="8" r="6.5" fill="${fill}" stroke="#222" stroke-width="1" opacity="0.92"/>` +
+					      `<text x="8" y="11.5" text-anchor="middle" font-size="9" font-family="sans-serif" fill="#fff">${glyph}</text>` +
+					      `</svg>`,
+					iconSize:   [size, size],
+					iconAnchor: [size / 2, size / 2],
+				});
+			}
+			const DC_FILL = "#00897B";   // teal — data centre / exchange
+			const MAST_FILL = "#26A69A";
+
+			return makeVectorTileLayer({
+				label:         "Telecoms",
+				pane:          "dwTelecomPane",
+				paneZIndex:    409,
+				minZoom:       10,
+				padBounds:     0.1,
+				maxNativeZoom: CFG.OIM_MAX_NATIVE_Z,
+				attribution:   'Telecoms data © <a href="https://openinframap.org/" target="_blank" rel="noreferrer">OpenInfraMap</a> / <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>',
+				tileUrl: (z, x, y) => `${CFG.OIM_TELECOM_TILES}/${z}/${x}/${y}.pbf`,
+
+				toElements: (layerName, p, gtype, rings) => {
+					if (p.disused) return null;
+					if (layerName === "telecoms_data_center") {
+						const tags = { kind: "datacenter", name: p.name,
+							operator: p.operator, dtype: p.type };
+						return rings.map((r) => ({ type: "way", geometry: r, tags,
+							_id: "dc/" + p.osm_id }));
+					}
+					if (layerName === "telecoms_data_center_point") {
+						const r = rings[0]; if (!r || !r.length) return null;
+						return [{ type: "node", lat: r[0].lat, lon: r[0].lon,
+							_id: "dc/" + p.osm_id, tags: { kind: "datacenter",
+								name: p.name, operator: p.operator, dtype: p.type } }];
+					}
+					if (layerName === "telecoms_mast" || layerName === "telecoms_antenna") {
+						const r = rings[0]; if (!r || !r.length) return null;
+						return [{ type: "node", lat: r[0].lat, lon: r[0].lon,
+							tags: { kind: layerName === "telecoms_mast" ? "mast" : "antenna",
+								name: p.name, operator: p.operator } }];
+					}
+					return null;
+				},
+
+				render: (group, elements) => {
+					for (const el of elements) {
+						const t = el.tags || {};
+						if (el.type === "way" && el.geometry && el.geometry.length) {
+							const latlngs = el.geometry.map((g) => [g.lat, g.lon]);
+							const tip =
+								`<b>${t.name || "Telephone exchange / data centre"}</b>` +
+								(t.dtype    ? `<br>${t.dtype}` : "") +
+								(t.operator ? `<br>${t.operator}` : "");
+							L.polygon(latlngs, {
+								pane: "dwTelecomPane", color: DC_FILL, weight: 1.5,
+								opacity: 0.9, fillColor: DC_FILL, fillOpacity: 0.2,
+							}).bindTooltip(tip, { className: "dw-infra-tip", sticky: true })
+							  .addTo(group);
+							continue;
+						}
+						if (el.type !== "node" || !isFinite(el.lat) || !isFinite(el.lon))
+							continue;
+						let glyph, fill, label;
+						if (t.kind === "datacenter") {
+							glyph = "▣"; fill = DC_FILL;
+							label = t.name || "Telephone exchange / data centre";
+						} else if (t.kind === "mast") {
+							glyph = "T"; fill = MAST_FILL; label = t.name || "Comms mast";
+						} else {
+							glyph = "Y"; fill = MAST_FILL; label = t.name || "Antenna";
+						}
+						let tip = `<b>${label}</b>`;
+						if (t.dtype)    tip += `<br>${t.dtype}`;
+						if (t.operator) tip += `<br>${t.operator}`;
+						L.marker([el.lat, el.lon], {
+							icon: dotIcon(glyph, fill, t.kind === "datacenter" ? 16 : 13),
+							pane: "dwTelecomPane", interactive: true,
+						}).bindTooltip(tip, { className: "dw-infra-tip", sticky: true })
+						  .addTo(group);
+					}
+				},
+			});
+		}
+	}
+
 	/* -- National Parks (QLD QPWS protected-areas reference) -------------- */
 
 	// Vector overlay backed by an ArcGIS REST `query` endpoint returning
@@ -4553,6 +4653,9 @@
 
 				this.layers[CFG.LAYER_INFRA] = new PowerInfraLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_INFRA], CFG.LAYER_INFRA);
+
+				this.layers[CFG.LAYER_TELECOM] = new TelecomsLayerProvider().create();
+				ctrl.addOverlay(this.layers[CFG.LAYER_TELECOM], CFG.LAYER_TELECOM);
 
 				this.layers[CFG.LAYER_PARKS] =
 					new NationalParksLayerProvider().create();
