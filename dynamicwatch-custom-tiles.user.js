@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.20
+// @version      7.9.21
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, National Parks, OpenSeaMap, Unity Water, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -21,9 +21,7 @@
 // @connect      services2.arcgis.com
 // @connect      opensky-network.org
 // @connect      www.marinetraffic.com
-// @connect      overpass-api.de
-// @connect      overpass.private.coffee
-// @connect      overpass.kumi.systems
+// @connect      openinframap.org
 // @connect      spatial.infrastructure.gov.au
 // @connect      tiles.openseamap.org
 // @connect      www2.lightpollutionmap.info
@@ -199,6 +197,14 @@
 			"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
 			"Environment/ParksTerrestrialProtectedAreas/MapServer",
 		QLD_QPWS_LAYER_IDS: "10,5,6,7,8,9",
+
+		// OpenInfraMap public power vector-tile pyramid (MVT/pbf). Global,
+		// CDN-served, derived from OSM — far more reliable than hitting raw
+		// Overpass. Layers per tile: power_line, power_substation(_point),
+		// power_plant(_point), power_generator(_area), power_tower. Voltages
+		// are in kV and generator/plant output in MW (converted on read).
+		OIM_POWER_TILES: "https://openinframap.org/map/power",
+		OIM_MAX_NATIVE_Z: 16,
 
 		// lightpollutionmap.info GeoServer (WMS via GWC tile cache).
 		// LAYERS=PostGIS:SB_2025 = sky brightness, latest published edition.
@@ -848,74 +854,45 @@
 		});
 	}
 
-	// Global rate-limiter for Overpass API requests. Allows at most 2 concurrent
-	// fetches so Power Infrastructure and National Parks don't hammer the
-	// endpoint simultaneously when both are visible.
-	const _overpassQueue = (() => {
-		const MAX = 2;
-		let running = 0;
-		const pending = [];
-		function next() {
-			if (!pending.length || running >= MAX) return;
-			running++;
-			pending.shift()(function done() { running--; next(); });
-		}
-		return {
-			run(fn) { pending.push(fn); next(); },
-		};
-	})();
-
-	// Factory for OSM/Overpass-backed vector overlays (Power Infrastructure,
-	// National Parks, …). All such layers share the same skeleton: debounced
-	// per-bbox fetch, render into a layerGroup, clear-and-redraw on view
-	// change. A generation counter drops stale responses so fast panning
-	// can't paint old data on top of new.
+	// Vector-tile overlay: fetches the MVT (.pbf) tiles covering the current
+	// view, decodes them with mvtDecode, projects each feature's tile-extent
+	// geometry to lat/lon, maps it via opts.toElements(), and hands the result
+	// to opts.render() in the very same { type, geometry|lat/lon, tags } shape
+	// an OSM/Overpass-style renderer consumes — so such a renderer can be
+	// repointed at a vector-tile backend unchanged. Debounced and generation-
+	// guarded like the other view-driven layers; in-flight tile fetches are
+	// aborted when the view changes.
 	//
-	// opts: {
-	//   label:        used in console warnings
-	//   pane:         Leaflet pane name
-	//   paneZIndex:   numeric z-index
-	//   minZoom:      below this, the group is cleared and no fetch fires
-	//   buildQuery(bbox):       returns the Overpass QL string
-	//   render(group, elements): paints features into group (already cleared)
-	//   attribution:  static attribution string
-	//   debounceMs=400, timeoutMs=60000, padBounds=0, clickThrough=true
-	// }
-	// Public Overpass mirrors, tried in order until one returns usable data.
-	// kumi.systems was the sole endpoint and routinely 504s / runs 40–160s,
-	// which silently killed BOTH Overpass layers (Power Infrastructure and
-	// National Parks) whenever it was unhealthy — the request just timed out
-	// and nothing rendered. overpass-api.de is the fastest/reference mirror;
-	// private.coffee is a solid backup; kumi stays last as a final resort.
-	const OVERPASS_ENDPOINTS = [
-		"https://overpass-api.de/api/interpreter",
-		"https://overpass.private.coffee/api/interpreter",
-		"https://overpass.kumi.systems/api/interpreter",
-	];
-
-	function makeOverpassLayer(opts) {
+	// De-dup: node-type elements carrying an `_id` are de-duplicated across
+	// tiles, and dropped when a way-type element shares that `_id` (so a feature
+	// shipped as both a polygon and a centroid point renders only as the
+	// polygon). Way-type elements are never de-duplicated — a line/area clipped
+	// across tile borders must keep every piece.
+	//
+	// opts: { label, pane, paneZIndex, minZoom, maxNativeZoom=16, tileUrl(z,x,y),
+	//         toElements(layerName, props, geomType, latlonRings)->elements|null,
+	//         render(group, elements, zoom), attribution,
+	//         debounceMs=400, timeoutMs=20000, padBounds=0, maxTiles=60 }
+	function makeVectorTileLayer(opts) {
 		const debounceMs = opts.debounceMs || 400;
-		const timeoutMs = opts.timeoutMs || 60000;
-		// Per-attempt cap so a hung mirror fails over quickly instead of
-		// eating the whole budget before the next endpoint is tried.
-		const attemptTimeout = Math.min(timeoutMs, 35000);
+		const timeoutMs = opts.timeoutMs || 20000;
 		const padBounds = opts.padBounds || 0;
-		const clickThrough = opts.clickThrough !== false;
+		const maxNativeZoom = opts.maxNativeZoom || 16;
+		const maxTiles = opts.maxTiles || 60;
 
 		const Layer = L.Layer.extend({
 			initialize() {
 				this._group = null;
 				this._debounce = null;
-				this._lastBbox = null;
+				this._lastKey = null;
 				this._gen = 0;
+				this._handles = [];
 			},
 
 			onAdd(map) {
 				if (!map.getPane(opts.pane)) {
 					map.createPane(opts.pane);
-					const el = map.getPane(opts.pane);
-					el.style.zIndex = String(opts.paneZIndex);
-					if (clickThrough) el.style.pointerEvents = "none";
+					map.getPane(opts.pane).style.zIndex = String(opts.paneZIndex);
 				}
 				this._group = L.layerGroup().addTo(map);
 				this._fetch();
@@ -925,12 +902,10 @@
 			onRemove(map) {
 				clearTimeout(this._debounce);
 				this._debounce = null;
-				this._gen++; // invalidate any in-flight response
+				this._gen++;
+				this._cancel();
 				map.off("moveend zoomend", this._onViewChange, this);
-				if (this._group) {
-					this._group.remove();
-					this._group = null;
-				}
+				if (this._group) { this._group.remove(); this._group = null; }
 			},
 
 			_onViewChange() {
@@ -938,73 +913,110 @@
 				this._debounce = setTimeout(() => this._fetch(), debounceMs);
 			},
 
+			_cancel() {
+				for (const h of this._handles) gmCancel(h);
+				this._handles = [];
+			},
+
 			_fetch() {
 				const map = this._map;
 				if (!map || !this._group) return;
-				if (map.getZoom() < opts.minZoom) {
+				const vz = map.getZoom();
+				if (vz < opts.minZoom) {
 					this._group.clearLayers();
-					this._lastBbox = null;
+					this._lastKey = null;
+					this._cancel();
 					return;
 				}
 
+				const tz = Math.min(Math.floor(vz), maxNativeZoom);
+				const n = Math.pow(2, tz);
 				const b = padBounds ? map.getBounds().pad(padBounds) : map.getBounds();
-				const bbox = `${b.getSouth().toFixed(4)},${b.getWest().toFixed(4)},${b.getNorth().toFixed(4)},${b.getEast().toFixed(4)}`;
-				if (bbox === this._lastBbox) return;
-				this._lastBbox = bbox;
+				const lon2t = (lon) => Math.floor((lon + 180) / 360 * n);
+				const lat2t = (lat) => {
+					const r = lat * Math.PI / 180;
+					return Math.floor(
+						(1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n);
+				};
+				const x0 = Math.max(0, lon2t(b.getWest()));
+				const x1 = Math.min(n - 1, lon2t(b.getEast()));
+				const y0 = Math.max(0, lat2t(b.getNorth()));
+				const y1 = Math.min(n - 1, lat2t(b.getSouth()));
+
+				const key = `${tz}:${x0},${y0},${x1},${y1}`;
+				if (key === this._lastKey) return;
+				this._lastKey = key;
+
+				const coords = [];
+				for (let x = x0; x <= x1; x++)
+					for (let y = y0; y <= y1; y++) coords.push([x, y]);
+				if (coords.length > maxTiles) {
+					console.warn(`[CustomTiles] ${opts.label}: ${coords.length} ` +
+						`tiles exceeds cap ${maxTiles}, skipping`);
+					return;
+				}
 
 				const myGen = ++this._gen;
-				const zoom  = map.getZoom();
-				const data  = "data=" + encodeURIComponent(opts.buildQuery(bbox, zoom));
-				_overpassQueue.run((done) => {
-					// Try each mirror in turn; fall through on transport/HTTP
-					// error or a server-side Overpass failure (200 + remark with
-					// no data), holding the queue slot until one succeeds or all
-					// are exhausted.
-					const tryAt = (idx) => {
-						if (myGen !== this._gen || !this._group) { done(); return; }
-						if (idx >= OVERPASS_ENDPOINTS.length) {
-							done();
-							console.warn(
-								`[CustomTiles] ${opts.label}: all Overpass mirrors failed`);
-							return;
+				this._cancel();
+				const elements = [];
+				let pending = coords.length;
+				if (!pending) { this._group.clearLayers(); return; }
+
+				const finish = () => {
+					if (myGen !== this._gen || !this._group) return;
+					// Prefer polygons over their centroid points; drop duplicate
+					// boundary points (see header).
+					const wayIds = new Set();
+					for (const el of elements)
+						if (el.type === "way" && el._id) wayIds.add(el._id);
+					const seenNode = new Set();
+					const out = elements.filter((el) => {
+						if (el.type === "node" && el._id) {
+							if (wayIds.has(el._id) || seenNode.has(el._id)) return false;
+							seenNode.add(el._id);
 						}
-						gmJsonGet(OVERPASS_ENDPOINTS[idx], {
-							method:  "POST",
-							headers: { "Content-Type": "application/x-www-form-urlencoded" },
-							data,
-							timeout: attemptTimeout,
-						}, (err, json) => {
-							if (myGen !== this._gen || !this._group) { done(); return; }
-							const serverErr = json && json.remark &&
-								(!json.elements || !json.elements.length);
-							if (err || serverErr) {
-								console.warn(`[CustomTiles] ${opts.label} @ ` +
-									`${OVERPASS_ENDPOINTS[idx]}: ` +
-									(err ? err.message : "server: " + json.remark));
-								tryAt(idx + 1);
-								return;
+						return true;
+					});
+					this._group.clearLayers();
+					opts.render(this._group, out, tz);
+				};
+
+				for (const [x, y] of coords) {
+					const h = gmGet(opts.tileUrl(tz, x, y),
+						{ responseType: "arraybuffer", timeout: timeoutMs },
+						(err, r) => {
+							if (myGen === this._gen && this._group &&
+							    !err && r && r.status === 200 && r.response) {
+								try {
+									const layers = mvtDecode(r.response);
+									for (const layer of layers) {
+										const ext = layer.extent || 4096;
+										for (const f of layer.features) {
+											const props = {};
+											for (let i = 0; i < f.tags.length; i += 2)
+												props[layer.keys[f.tags[i]]] =
+													layer.values[f.tags[i + 1]];
+											const rings = decodeGeometry(f.geom).map((ring) =>
+												ring.map((p) => ({
+													lon: (x + p[0] / ext) / n * 360 - 180,
+													lat: Math.atan(Math.sinh(Math.PI *
+														(1 - 2 * (y + p[1] / ext) / n))) *
+														180 / Math.PI,
+												})));
+											const els =
+												opts.toElements(layer.name, props, f.type, rings);
+											if (els) for (const e of els) elements.push(e);
+										}
+									}
+								} catch (e) { /* skip a malformed tile */ }
 							}
-							done();
-							// Deduplicate by OSM type+id — ways belonging to a
-							// relation can be returned twice.
-							const seen = new Set();
-							const elements = (json.elements || []).filter(el => {
-								const key = el.type + "/" + el.id;
-								if (seen.has(key)) return false;
-								seen.add(key);
-								return true;
-							});
-							this._group.clearLayers();
-							opts.render(this._group, elements, zoom);
+							if (--pending === 0) finish();
 						});
-					};
-					tryAt(0);
-				});
+					this._handles.push(h);
+				}
 			},
 
-			getAttribution() {
-				return opts.attribution;
-			},
+			getAttribution() { return opts.attribution; },
 		});
 
 		return new Layer();
@@ -3037,12 +3049,13 @@
 		}
 	}
 
-	/* -- Power Infrastructure (OSM via Overpass) -------------------------- */
+	/* -- Power Infrastructure (OpenInfraMap vector tiles) ---------------- */
 
-	// Mirrors what OpenInfraMap renders: transmission/distribution lines,
-	// substations, power plants, wind generators. Queried per visible bbox
-	// because the dataset is too sparse for a worldwide tile preload to be
-	// worth the bandwidth.
+	// Transmission/distribution lines, substations, power plants and generator
+	// farms, sourced straight from OpenInfraMap's global power vector tiles
+	// (the same data its own map renders) rather than live Overpass queries —
+	// CDN-served and reliable. Tiles for the view are decoded, projected, and
+	// fed to the same voltage-coloured renderer the Overpass version used.
 	class PowerInfraLayerProvider extends LayerProvider {
 		create() {
 			// Format raw OSM voltage (stored in V) as human-readable kV/V.
@@ -3085,33 +3098,82 @@
 				});
 			}
 
-			return makeOverpassLayer({
-				label:        "PowerInfra",
-				pane:         "dwInfraPane",
-				paneZIndex:   410,
-				minZoom:      9,   // show major transmission lines from z9
-				padBounds:    0.15,
-				clickThrough: false,
-				attribution:  'Infrastructure © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors',
+			// OpenInfraMap stores voltage in kV and output in MW; the renderer
+			// (and lineColor/fmtVoltage) expect OSM-style volts, so convert.
+			function kvToV(v) {
+				const x = parseFloat(v);
+				return x ? String(Math.round(x * 1000)) : "";
+			}
+			function fmtMW(v) {
+				const x = parseFloat(v);
+				if (!x) return "";
+				return (Number.isInteger(x) ? x
+					: (x < 10 ? x.toFixed(2) : x.toFixed(1))) + " MW";
+			}
 
-				// At low zooms only query major lines to keep payload small.
-				buildQuery: (bbox, zoom) => {
-					const full = zoom >= 12;
-					return (
-						`[out:json][timeout:30];(` +
-						`way[power=line](${bbox});` +
-						(full ? `way[power=minor_line](${bbox});` : "") +
-						(full ? `way[power=cable](${bbox});` : "") +
-						`way[power=substation](${bbox});` +
-						`node[power=substation](${bbox});` +
-						`way[power=plant](${bbox});` +
-						`node[power=plant](${bbox});` +
-						(full ? `node[power=transformer](${bbox});` : "") +
-						`node[power=generator]["generator:source"=wind](${bbox});` +
-						`way[power=generator]["generator:source"=solar](${bbox});` +
-						`node[power=generator]["generator:source"=solar](${bbox});` +
-						`);out geom tags;`
-					);
+			return makeVectorTileLayer({
+				label:         "PowerInfra",
+				pane:          "dwInfraPane",
+				paneZIndex:    410,
+				minZoom:       9,   // show major transmission lines from z9
+				padBounds:     0.1,
+				maxNativeZoom: CFG.OIM_MAX_NATIVE_Z,
+				attribution:   'Power data © <a href="https://openinframap.org/" target="_blank" rel="noreferrer">OpenInfraMap</a> / <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>',
+				tileUrl: (z, x, y) => `${CFG.OIM_POWER_TILES}/${z}/${x}/${y}.pbf`,
+
+				// Map OpenInfraMap's power layers into the element shape the
+				// renderer below consumes. Individual generator points
+				// (power_generator — every solar panel, thousands per tile) and
+				// towers are intentionally skipped; generator *areas* (farms) are
+				// kept. Substations/plants ship as both a polygon and a centroid
+				// point — both carry a shared `_id` so the factory keeps the
+				// polygon and drops the redundant point.
+				toElements: (layerName, p, gtype, rings) => {
+					if (p.disused) return null;
+					if (layerName === "power_line") {
+						const t = p.type;
+						const power = t === "cable" ? "cable"
+							: t === "minor_line" ? "minor_line" : "line";
+						const tags = { power, voltage: kvToV(p.voltage),
+							name: p.name, operator: p.operator, ref: p.ref };
+						return rings.map((r) => ({ type: "way", geometry: r, tags }));
+					}
+					if (layerName === "power_substation") {
+						const tags = { power: "substation", voltage: kvToV(p.voltage),
+							name: p.name, operator: p.operator };
+						return rings.map((r) => ({ type: "way", geometry: r, tags,
+							_id: "sub/" + p.osm_id }));
+					}
+					if (layerName === "power_substation_point") {
+						const r = rings[0]; if (!r || !r.length) return null;
+						return [{ type: "node", lat: r[0].lat, lon: r[0].lon,
+							_id: "sub/" + p.osm_id, tags: { power: "substation",
+								voltage: kvToV(p.voltage), name: p.name,
+								operator: p.operator } }];
+					}
+					if (layerName === "power_plant") {
+						const tags = { power: "plant", "plant:source": p.source,
+							"plant:output:electricity": fmtMW(p.output),
+							name: p.name, operator: p.operator };
+						return rings.map((r) => ({ type: "way", geometry: r, tags,
+							_id: "plant/" + p.osm_id }));
+					}
+					if (layerName === "power_plant_point") {
+						const r = rings[0]; if (!r || !r.length) return null;
+						return [{ type: "node", lat: r[0].lat, lon: r[0].lon,
+							_id: "plant/" + p.osm_id, tags: { power: "plant",
+								"plant:source": p.source,
+								"plant:output:electricity": fmtMW(p.output),
+								name: p.name, operator: p.operator } }];
+					}
+					if (layerName === "power_generator_area") {
+						const tags = { power: "generator",
+							"generator:source": p.source,
+							"generator:output:electricity": fmtMW(p.output),
+							name: p.name, operator: p.operator };
+						return rings.map((r) => ({ type: "way", geometry: r, tags }));
+					}
+					return null; // power_generator (points), power_tower, …
 				},
 
 				render: (group, elements, zoom) => {
@@ -3225,8 +3287,9 @@
 
 	// Vector overlay backed by an ArcGIS REST `query` endpoint returning
 	// GeoJSON. Same debounced, generation-guarded, redraw-on-move skeleton as
-	// makeOverpassLayer, but a single GET passes the view bbox as an envelope
-	// with server-side geometry simplification (maxAllowableOffset, keyed to
+	// the other view-driven overlays, but a single GET passes the view bbox as
+	// an envelope with server-side geometry simplification (maxAllowableOffset,
+	// keyed to
 	// zoom) so payloads stay small and polygons arrive pre-assembled — holes
 	// and multipart included — for L.geoJSON to render directly. The pane is
 	// left interactive (no pointerEvents:none) so the hover name tooltip works.
