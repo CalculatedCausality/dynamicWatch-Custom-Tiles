@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.19
+// @version      7.9.20
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, National Parks, OpenSeaMap, Unity Water, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -21,6 +21,8 @@
 // @connect      services2.arcgis.com
 // @connect      opensky-network.org
 // @connect      www.marinetraffic.com
+// @connect      overpass-api.de
+// @connect      overpass.private.coffee
 // @connect      overpass.kumi.systems
 // @connect      spatial.infrastructure.gov.au
 // @connect      tiles.openseamap.org
@@ -879,10 +881,24 @@
 	//   attribution:  static attribution string
 	//   debounceMs=400, timeoutMs=60000, padBounds=0, clickThrough=true
 	// }
+	// Public Overpass mirrors, tried in order until one returns usable data.
+	// kumi.systems was the sole endpoint and routinely 504s / runs 40–160s,
+	// which silently killed BOTH Overpass layers (Power Infrastructure and
+	// National Parks) whenever it was unhealthy — the request just timed out
+	// and nothing rendered. overpass-api.de is the fastest/reference mirror;
+	// private.coffee is a solid backup; kumi stays last as a final resort.
+	const OVERPASS_ENDPOINTS = [
+		"https://overpass-api.de/api/interpreter",
+		"https://overpass.private.coffee/api/interpreter",
+		"https://overpass.kumi.systems/api/interpreter",
+	];
+
 	function makeOverpassLayer(opts) {
-		const OVERPASS = "https://overpass.kumi.systems/api/interpreter";
 		const debounceMs = opts.debounceMs || 400;
 		const timeoutMs = opts.timeoutMs || 60000;
+		// Per-attempt cap so a hung mirror fails over quickly instead of
+		// eating the whole budget before the next endpoint is tried.
+		const attemptTimeout = Math.min(timeoutMs, 35000);
 		const padBounds = opts.padBounds || 0;
 		const clickThrough = opts.clickThrough !== false;
 
@@ -938,34 +954,51 @@
 
 				const myGen = ++this._gen;
 				const zoom  = map.getZoom();
+				const data  = "data=" + encodeURIComponent(opts.buildQuery(bbox, zoom));
 				_overpassQueue.run((done) => {
-					// Bail immediately if the view has already changed.
-					if (myGen !== this._gen) { done(); return; }
-					gmJsonGet(OVERPASS, {
-						method:  "POST",
-						headers: { "Content-Type": "application/x-www-form-urlencoded" },
-						data:    "data=" + encodeURIComponent(opts.buildQuery(bbox, zoom)),
-						timeout: timeoutMs,
-					}, (err, json) => {
-						done();
-						if (myGen !== this._gen || !this._group) return;
-						if (err) {
+					// Try each mirror in turn; fall through on transport/HTTP
+					// error or a server-side Overpass failure (200 + remark with
+					// no data), holding the queue slot until one succeeds or all
+					// are exhausted.
+					const tryAt = (idx) => {
+						if (myGen !== this._gen || !this._group) { done(); return; }
+						if (idx >= OVERPASS_ENDPOINTS.length) {
+							done();
 							console.warn(
-								`[CustomTiles] ${opts.label} request error`, err.message);
+								`[CustomTiles] ${opts.label}: all Overpass mirrors failed`);
 							return;
 						}
-						// Deduplicate by OSM type+id — ways belonging to a relation
-						// are returned twice by `out geom tags`.
-						const seen = new Set();
-						const elements = (json.elements || []).filter(el => {
-							const key = el.type + "/" + el.id;
-							if (seen.has(key)) return false;
-							seen.add(key);
-							return true;
+						gmJsonGet(OVERPASS_ENDPOINTS[idx], {
+							method:  "POST",
+							headers: { "Content-Type": "application/x-www-form-urlencoded" },
+							data,
+							timeout: attemptTimeout,
+						}, (err, json) => {
+							if (myGen !== this._gen || !this._group) { done(); return; }
+							const serverErr = json && json.remark &&
+								(!json.elements || !json.elements.length);
+							if (err || serverErr) {
+								console.warn(`[CustomTiles] ${opts.label} @ ` +
+									`${OVERPASS_ENDPOINTS[idx]}: ` +
+									(err ? err.message : "server: " + json.remark));
+								tryAt(idx + 1);
+								return;
+							}
+							done();
+							// Deduplicate by OSM type+id — ways belonging to a
+							// relation can be returned twice.
+							const seen = new Set();
+							const elements = (json.elements || []).filter(el => {
+								const key = el.type + "/" + el.id;
+								if (seen.has(key)) return false;
+								seen.add(key);
+								return true;
+							});
+							this._group.clearLayers();
+							opts.render(this._group, elements, zoom);
 						});
-						this._group.clearLayers();
-						opts.render(this._group, elements, zoom);
-					});
+					};
+					tryAt(0);
 				});
 			},
 
@@ -3188,132 +3221,150 @@
 		}
 	}
 
-	/* -- National Parks / Protected Areas (OSM via Overpass) -------------- */
+	/* -- National Parks (QLD QPWS protected-areas reference) -------------- */
 
-	// Stitch a relation's member ways into closed rings. Overpass `out geom`
-	// returns a boundary relation as many unordered segments in arbitrary
-	// direction (Lamington NP alone is 78 outer ways) — handing those straight
-	// to L.polygon draws 78 disjoint slivers, not one park. We walk segments
-	// end-to-end, matching shared endpoints, until each ring closes.
-	// `ways` is an array of geometry arrays ([{lat,lon},…]); returns an array
-	// of rings ([[lat,lon],…], first point repeated at the end when closed).
-	function assembleRings(ways) {
-		const segs = ways
-			.filter((w) => w && w.length >= 2)
-			.map((w) => w.map((p) => [p.lat, p.lon]));
-		const used = new Array(segs.length).fill(false);
-		const key = (p) => p[0].toFixed(7) + "," + p[1].toFixed(7);
-		const rings = [];
-		for (let i = 0; i < segs.length; i++) {
-			if (used[i]) continue;
-			used[i] = true;
-			let ring = segs[i].slice();
-			let grew = true;
-			while (grew && key(ring[0]) !== key(ring[ring.length - 1])) {
-				grew = false;
-				const tail = key(ring[ring.length - 1]);
-				for (let j = 0; j < segs.length; j++) {
-					if (used[j]) continue;
-					const s = segs[j];
-					if (key(s[0]) === tail) {
-						ring = ring.concat(s.slice(1));
-						used[j] = true; grew = true; break;
-					}
-					if (key(s[s.length - 1]) === tail) {
-						ring = ring.concat(s.slice().reverse().slice(1));
-						used[j] = true; grew = true; break;
-					}
+	// Vector overlay backed by an ArcGIS REST `query` endpoint returning
+	// GeoJSON. Same debounced, generation-guarded, redraw-on-move skeleton as
+	// makeOverpassLayer, but a single GET passes the view bbox as an envelope
+	// with server-side geometry simplification (maxAllowableOffset, keyed to
+	// zoom) so payloads stay small and polygons arrive pre-assembled — holes
+	// and multipart included — for L.geoJSON to render directly. The pane is
+	// left interactive (no pointerEvents:none) so the hover name tooltip works.
+	//
+	// opts: { label, pane, paneZIndex, minZoom, queryUrl, where, outFields,
+	//         style, tooltip(props)->html, tipClass, attribution,
+	//         debounceMs=400, timeoutMs=30000, padBounds=0 }
+	function makeArcgisQueryLayer(opts) {
+		const debounceMs = opts.debounceMs || 400;
+		const timeoutMs = opts.timeoutMs || 30000;
+		const padBounds = opts.padBounds || 0;
+
+		const Layer = L.Layer.extend({
+			initialize() {
+				this._group = null;
+				this._debounce = null;
+				this._lastBbox = null;
+				this._gen = 0;
+			},
+
+			onAdd(map) {
+				if (!map.getPane(opts.pane)) {
+					map.createPane(opts.pane);
+					map.getPane(opts.pane).style.zIndex = String(opts.paneZIndex);
 				}
-			}
-			rings.push(ring);
-		}
-		return rings;
+				this._group = L.layerGroup().addTo(map);
+				this._fetch();
+				map.on("moveend zoomend", this._onViewChange, this);
+			},
+
+			onRemove(map) {
+				clearTimeout(this._debounce);
+				this._debounce = null;
+				this._gen++; // invalidate any in-flight response
+				map.off("moveend zoomend", this._onViewChange, this);
+				if (this._group) { this._group.remove(); this._group = null; }
+			},
+
+			_onViewChange() {
+				clearTimeout(this._debounce);
+				this._debounce = setTimeout(() => this._fetch(), debounceMs);
+			},
+
+			_fetch() {
+				const map = this._map;
+				if (!map || !this._group) return;
+				const z = map.getZoom();
+				if (z < opts.minZoom) {
+					this._group.clearLayers();
+					this._lastBbox = null;
+					return;
+				}
+
+				const b = padBounds ? map.getBounds().pad(padBounds) : map.getBounds();
+				const bbox = `${b.getWest().toFixed(4)},${b.getSouth().toFixed(4)},` +
+					`${b.getEast().toFixed(4)},${b.getNorth().toFixed(4)}`;
+				if (bbox === this._lastBbox) return;
+				this._lastBbox = bbox;
+
+				const myGen = ++this._gen;
+				// Simplify geometry to ~2 screen pixels at the current zoom.
+				const offset = (360 / (256 * Math.pow(2, z))) * 2;
+				const url = opts.queryUrl + "?f=geojson&returnGeometry=true" +
+					"&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326" +
+					"&spatialRel=esriSpatialRelIntersects&geometryPrecision=5" +
+					"&where=" + encodeURIComponent(opts.where) +
+					"&outFields=" + encodeURIComponent(opts.outFields) +
+					"&geometry=" + encodeURIComponent(bbox) +
+					"&maxAllowableOffset=" + offset;
+
+				gmJsonGet(url, { timeout: timeoutMs }, (err, geojson) => {
+					if (myGen !== this._gen || !this._group) return;
+					if (err || (geojson && geojson.error)) {
+						console.warn(`[CustomTiles] ${opts.label} request error`,
+							err ? err.message : JSON.stringify(geojson.error));
+						return;
+					}
+					this._group.clearLayers();
+					L.geoJSON(geojson, {
+						pane: opts.pane,
+						style: () => opts.style,
+						onEachFeature: (f, lyr) => {
+							const tip = opts.tooltip && opts.tooltip(f.properties || {});
+							if (tip) lyr.bindTooltip(tip, {
+								className: opts.tipClass || "dw-park-tip", sticky: true,
+							});
+						},
+					}).addTo(this._group);
+				});
+			},
+
+			getAttribution() { return opts.attribution; },
+		});
+
+		return new Layer();
 	}
 
-	// Ray-cast point-in-ring on [lat,lon] points — used to attach inner rings
-	// (holes) to whichever outer ring contains them.
-	function ringContains(ring, pt) {
-		let inside = false;
-		const x = pt[1], y = pt[0];
-		for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-			const xi = ring[i][1], yi = ring[i][0];
-			const xj = ring[j][1], yj = ring[j][0];
-			if ((yi > y) !== (yj > y) &&
-			    x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
-		}
-		return inside;
-	}
+	// Friendly labels for the national-park estate sub-types in the QPWS data.
+	const NP_TYPE_LABEL = {
+		NP: "National Park",
+		NS: "National Park (scientific)",
+		NY: "National Park (Aboriginal land — CYPAL)",
+		NA: "National Park (Aboriginal land)",
+	};
 
-	// Polygons for OSM-tagged national parks and protected areas. Bumped to
-	// min zoom 9 so we don't pull continent-scale geometry on world view.
+	// National parks of Queensland, from the authoritative QPWS protected-areas
+	// reference (the same MapServer the QPWS Estate overlay uses), layer 10
+	// filtered to the national-park estate types (NP/NY/NS/NA). Other estate
+	// types (CP/RR/SF/TR) are excluded — the broader QPWS Estate overlay covers
+	// those. Replaces the old OSM/Overpass source, which was both less
+	// authoritative and chronically unreliable (the public Overpass mirrors
+	// routinely timed out, leaving the layer blank).
 	class NationalParksLayerProvider extends LayerProvider {
 		create() {
-			return makeOverpassLayer({
+			return makeArcgisQueryLayer({
 				label: "National Parks",
 				pane: "dwParksPane",
 				paneZIndex: 395,
 				minZoom: 9,
 				debounceMs: 500,
-				timeoutMs: 90000,
+				timeoutMs: 30000,
+				queryUrl: CFG.QLD_QPWS_SERVICE + "/10/query",
+				where: "esttype IN ('NP','NY','NS','NA')",
+				outFields: "estatename,esttype",
 				attribution:
-					'Parks © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors',
-				// `boundary=national_park` is the strict tag; `protected_area`
-				// with protect_class 1–4 covers most reserves people care
-				// about (strict reserves, wilderness, national parks, habitat).
-				buildQuery: (bbox) =>
-					`[out:json][timeout:25];(` +
-					`way[boundary=national_park](${bbox});` +
-					`relation[boundary=national_park](${bbox});` +
-					`way[boundary=protected_area]["protect_class"~"^[1-4]$"](${bbox});` +
-					`relation[boundary=protected_area]["protect_class"~"^[1-4]$"](${bbox});` +
-					// `out geom;` (NOT `out geom tags;`): the `tags` verbosity
-					// prints only ids+tags and drops relation members, so every
-					// park relation came back as a bare bbox with no polygon and
-					// rendered nothing. Plain `out geom` keeps the tags AND emits
-					// each member way's geometry.
-					`);out geom;`,
-				render: (group, elements) => {
-					for (const el of elements) {
-						const tags = el.tags || {};
-						const name = tags.name || "Protected area";
-						const isNP = tags.boundary === "national_park";
-						const style = {
-							pane: "dwParksPane",
-							color: isNP ? "#1B5E20" : "#33691E",
-							weight: 1.5,
-							opacity: 0.85,
-							fillColor: isNP ? "#43A047" : "#7CB342",
-							fillOpacity: 0.18,
-						};
-
-						if (el.type === "way" && el.geometry) {
-							const latlngs = el.geometry.map((g) => [g.lat, g.lon]);
-							L.polygon(latlngs, style)
-								.bindTooltip(name, { className: "dw-park-tip", sticky: true })
-								.addTo(group);
-						} else if (el.type === "relation" && el.members) {
-							// Split members by role (empty role → outer, as OSM
-							// boundary relations often leave it blank), stitch each
-							// set into closed rings, then render every outer ring as
-							// its own polygon with any contained inner rings as holes.
-							const outerWays = [], innerWays = [];
-							for (const m of el.members) {
-								if (m.type !== "way" || !m.geometry) continue;
-								(m.role === "inner" ? innerWays : outerWays).push(m.geometry);
-							}
-							const outers = assembleRings(outerWays)
-								.filter((r) => r.length >= 4);
-							const inners = assembleRings(innerWays)
-								.filter((r) => r.length >= 4);
-							if (!outers.length) continue;
-							for (const outer of outers) {
-								const holes = inners.filter((h) => ringContains(outer, h[0]));
-								L.polygon(holes.length ? [outer, ...holes] : outer, style)
-									.bindTooltip(name, { className: "dw-park-tip", sticky: true })
-									.addTo(group);
-							}
-						}
-					}
+					'Parks © <a href="https://parks.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (DETSI)</a>',
+				style: {
+					pane: "dwParksPane",
+					color: "#1B5E20",
+					weight: 1.5,
+					opacity: 0.85,
+					fillColor: "#43A047",
+					fillOpacity: 0.18,
+				},
+				tooltip: (p) => {
+					const name = p.estatename || "National park";
+					const type = NP_TYPE_LABEL[p.esttype];
+					return `<b>${name}</b>` + (type ? `<br>${type}` : "");
 				},
 			});
 		}
