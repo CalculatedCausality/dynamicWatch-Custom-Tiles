@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.15
+// @version      7.9.16
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, National Parks, OpenSeaMap, Unity Water, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -143,6 +143,19 @@
 		INTVL_TILES_BASE:
 			"https://d1yalngj9nsyl4.cloudfront.net/single-player/run",
 		INTVL_TILES_MAX_NATIVE_Z: 11,
+
+		// `startTime` in the territories layer is an integer DAY count, but
+		// NOT days since the Unix epoch — it counts days since a custom app
+		// epoch ~1977-09-03, i.e. it runs 2802 days behind the Unix day
+		// number. Pinned from ground truth: a territory captured 2026-05-31
+		// carries startTime 17802 (20604 − 2802). Decoding it as days since
+		// 1970 (the original guess) rendered every hover date ~7.67 years
+		// early (that capture showed as 2018-09-28). Verified against the
+		// cuid creation timestamps embedded in activityId: the offset stays
+		// in a tight ±a-few-days band across the whole data range, so the
+		// unit is days (slope 1) and only the epoch was wrong. Add this back
+		// before treating startTime as a Unix day number.
+		INTVL_START_TIME_EPOCH_OFFSET_DAYS: 2802,
 
 		// QLD Topo and Relief tile caches — public, no token required.
 		QLD_TOPO_TILE:
@@ -3248,7 +3261,9 @@
 	 *
 	 * Tile contents: MVT layer `territories` with POLYGON features whose
 	 * props are { runId, activityId, colour, currentArea (m²), startTime
-	 * (days since epoch) }. Extent 4096.
+	 * (integer day count against a custom ~1977-09-03 app epoch, i.e. 2802
+	 * days behind the Unix day number — see
+	 * CFG.INTVL_START_TIME_EPOCH_OFFSET_DAYS) }. Extent 4096.
 	 *
 	 * Renderer: per Leaflet tile, fetch the .pbf, run mvtDecode →
 	 * prepareLayers, paint each polygon's fill onto a canvas (no library).
@@ -3722,10 +3737,15 @@
 							this._lastFeatKey = featKey;
 
 							const km2 = ((f.props.currentArea || 0) / 1e6).toFixed(2);
-							// startTime is "days since 1970-01-01"
+							// startTime is an integer day count against a custom
+							// app epoch (~1977-09-03), not the Unix epoch — shift
+							// it onto the Unix day number before formatting. See
+							// CFG.INTVL_START_TIME_EPOCH_OFFSET_DAYS.
 							let when = "?";
 							if (typeof f.props.startTime === "number") {
-								when = new Date(f.props.startTime * 86400 * 1000)
+								const unixDay = f.props.startTime +
+									CFG.INTVL_START_TIME_EPOCH_OFFSET_DAYS;
+								when = new Date(unixDay * 86400 * 1000)
 									.toISOString().slice(0, 10);
 							}
 							const swatch =
