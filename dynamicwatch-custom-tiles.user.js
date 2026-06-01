@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.16
+// @version      7.9.18
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, National Parks, OpenSeaMap, Unity Water, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -3510,6 +3510,58 @@
 	// again), so a helper avoids any chance of drift between the two.
 	const tileKey = (z, x, y) => `${z}/${x}/${y}`;
 
+	/* -- INTVL hover formatting helpers ----------------------------------
+	 *
+	 * The public tiles ship only { runId, activityId, colour, currentArea,
+	 * startTime } — deliberately anonymised: there is NO username/userId in
+	 * the data and NO public way to resolve one. Confirmed by enumerating
+	 * the INTVL tRPC router at https://www.intvl.com.au/api/trpc — every
+	 * run/user lookup (run.getRun, user.getRun, user.byId,
+	 * user.byIdProfileImage, …) requires BOTH a Clerk login AND a `userId`
+	 * the tiles never carry, so runId/activityId cannot be turned into a
+	 * name without an authed session that already knows the owner. So we
+	 * make the data we DO have as useful as possible instead.
+	 *
+	 * One bonus: most activityIds are cuid v1 (`c` + 8 base36 chars of
+	 * creation-time ms + counter/fingerprint/random). Decoding that recovers
+	 * the precise time-of-day the run was recorded — `startTime` itself is
+	 * only day-resolution. Older rows use a different id scheme; we sanity-
+	 * check the decoded date and silently skip when it isn't a sane cuid. */
+	function intvlActivityTime(activityId) {
+		if (typeof activityId !== "string" || activityId.length < 9 ||
+		    activityId[0] !== "c") return null;
+		const ms = parseInt(activityId.slice(1, 9), 36);
+		// Plausible only if it lands in the app's lifetime (2018..now+1d).
+		if (!Number.isFinite(ms) ||
+		    ms < Date.UTC(2018, 0, 1) || ms > Date.now() + 864e5) return null;
+		return new Date(ms);
+	}
+
+	// "3 days ago" / "today" / "2 months ago" — coarse, good enough for a
+	// hover. Input is a Date; future/invalid → "".
+	function intvlAgo(date) {
+		if (!(date instanceof Date) || isNaN(date)) return "";
+		const days = Math.floor((Date.now() - date.getTime()) / 864e5);
+		if (days < 0) return "";
+		if (days === 0) return "today";
+		if (days === 1) return "yesterday";
+		if (days < 30) return days + " days ago";
+		const months = Math.floor(days / 30);
+		if (months < 12) return months + (months === 1 ? " month" : " months") + " ago";
+		const years = Math.floor(days / 365);
+		const rem = Math.floor((days - years * 365) / 30);
+		return years + "y" + (rem ? " " + rem + "mo" : "") + " ago";
+	}
+
+	// Area string: m² under 0.1 km² (so small claims read sensibly instead
+	// of collapsing to "0.01 km²"), else km² with magnitude-aware precision.
+	function intvlArea(m2) {
+		const v = Number(m2) || 0;
+		if (v < 1e5) return Math.round(v).toLocaleString() + " m²";
+		const km2 = v / 1e6;
+		return (km2 < 10 ? km2.toFixed(2) : km2.toFixed(1)) + " km²";
+	}
+
 	class IntvlGlobalTilesLayerProvider extends LayerProvider {
 		create() {
 			const TILE_PX = 256;
@@ -3736,35 +3788,52 @@
 							}
 							this._lastFeatKey = featKey;
 
-							const km2 = ((f.props.currentArea || 0) / 1e6).toFixed(2);
+							const area = intvlArea(f.props.currentArea);
+
+							// Captured date from startTime (day-resolution) —
 							// startTime is an integer day count against a custom
-							// app epoch (~1977-09-03), not the Unix epoch — shift
-							// it onto the Unix day number before formatting. See
+							// app epoch (~1977-09-03), not the Unix epoch, so
+							// shift it onto the Unix day number first. See
 							// CFG.INTVL_START_TIME_EPOCH_OFFSET_DAYS.
-							let when = "?";
+							let dayDate = null;
 							if (typeof f.props.startTime === "number") {
 								const unixDay = f.props.startTime +
 									CFG.INTVL_START_TIME_EPOCH_OFFSET_DAYS;
-								when = new Date(unixDay * 86400 * 1000)
-									.toISOString().slice(0, 10);
+								dayDate = new Date(unixDay * 86400 * 1000);
 							}
+							// Precise recorded time from the activityId cuid, when
+							// decodable — recovers the time-of-day startTime lacks.
+							const actDate = intvlActivityTime(f.props.activityId);
+							const fmtDay = (d) => d.toLocaleDateString(undefined,
+								{ day: "numeric", month: "short", year: "numeric" });
+							const fmtDateTime = (d) => d.toLocaleString(undefined, {
+								day: "numeric", month: "short", year: "numeric",
+								hour: "numeric", minute: "2-digit",
+							});
+
+							let whenLine;
+							if (actDate) {
+								whenLine = `Recorded ${fmtDateTime(actDate)}` +
+									` <span class="dw-cad-sub">(${intvlAgo(actDate)})</span>`;
+							} else if (dayDate) {
+								whenLine = `Captured ${fmtDay(dayDate)}` +
+									` <span class="dw-cad-sub">(${intvlAgo(dayDate)})</span>`;
+							} else {
+								whenLine = "Capture date unknown";
+							}
+
 							const swatch =
 								`<span style="display:inline-block;width:10px;` +
 								`height:10px;background:${f.colour};` +
 								`border:1px solid #444;vertical-align:middle"></span>`;
-							// The public MVT data ships only runId/activityId
-							// — no username/userId. To resolve a runner we'd
-							// need an authed tRPC call (and a per-run lookup
-							// procedure I haven't located). Surface what we
-							// have so it can be cross-referenced manually.
+							// The public tiles carry no username/userId and there's
+							// no public way to resolve one (see intvlActivityTime
+							// comment), so the runId/activityId are dead weight in a
+							// hover — show only what's actually meaningful: the
+							// territory's colour, area, and when it was claimed.
 							const html =
-								`<b>${swatch} ${f.colour}</b><br>` +
-								`${km2} km² · ${when}<br>` +
-								`<span class="dw-cad-sub">` +
-								`run ${f.props.runId || "?"}<br>` +
-								`activity ${f.props.activityId || "?"}<br>` +
-								`<i>runner identity not in public tile data</i>` +
-								`</span>`;
+								`<b>${swatch} ${area}</b> territory<br>` +
+								`${whenLine}`;
 							this._tooltip.setLatLng(latlng).setContent(html);
 							if (!this._tooltip._map) this._tooltip.addTo(map);
 							return;
