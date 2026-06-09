@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.30
+// @version      7.9.56
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -27,6 +27,9 @@
 // @connect      www.onthehouse.com.au
 // @connect      d1yalngj9nsyl4.cloudfront.net
 // @connect      www.geocaching.com
+// @connect      api.mapbox.com
+// @connect      s3.amazonaws.com
+// @connect      elevation-tiles-prod.s3.amazonaws.com
 // @run-at       document-start
 // ==/UserScript==
 
@@ -112,15 +115,30 @@
 		LAYER_SEAMARKS: "OpenSeaMap",
 		LAYER_INFRA: "Power Infrastructure",
 		LAYER_TELECOM: "Telecoms",
-		LAYER_PARKS: "National Parks",
 		LAYER_LIGHTPOL: "Light Pollution",
 		LAYER_CADASTRE: "QLD Cadastre",
 		LAYER_QPWS:    "QPWS Estate",
 		LAYER_TOPO:    "QLD Topo",
-		LAYER_RELIEF:  "QLD Relief",
 		LAYER_INTVL_GLOBAL: "INTVL Global Map",
 		LAYER_GEOCACHING: "Geocaches",
+		MODE_3D_STATE_KEY: "dw_mode_3d_on",
 		OVERLAY_STATE_KEY: "dw_active_overlays",
+
+		// Mapbox GL JS — loaded dynamically when 3D Mode is first toggled
+		// on, not at script init. The borrowed token only satisfies the
+		// library's init check; all our tile sources are keyless. Tiles
+		// are AWS-hosted Mapzen Terrarium DEM (free, no auth, world
+		// coverage to z14) decoded via Mapbox GL's built-in `terrarium`
+		// encoding. Mapbox telemetry is silenced after script load.
+		MAPBOX_GL_VERSION: "3.7.0",
+		// No embedded Mapbox token — dynamic.watch already serves its own
+		// public pk.eyJ... in the page payload (mapOptions.k[0] for /me,
+		// route-thumbnail URLs everywhere); pickMapboxToken() scrapes it
+		// at runtime. We only need *some* token to satisfy mapbox-gl-js's
+		// init check; all our tile sources are non-Mapbox (Terrarium DEM
+		// on AWS, basemaps mirrored from Leaflet templates).
+		TERRARIUM_TILES:
+			"https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
 
 		// Geocaching.com's web map endpoint. POSTed with a JSON body
 		// containing a bbox; reuses the user's existing session cookie via
@@ -173,9 +191,6 @@
 		QLD_TOPO_TILE:
 			"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
 			"Basemaps/QldMap_Topo/MapServer/tile/{z}/{y}/{x}",
-		QLD_RELIEF_TILE:
-			"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
-			"Basemaps/QldMap_Relief/MapServer/tile/{z}/{y}/{x}",
 
 		// Minimum zoom for QPWS hover-identify (below this, polygons too small).
 		QLD_QPWS_HOVER_MIN_ZOOM: 11,
@@ -260,7 +275,7 @@
 	const DW_OVERLAY_GROUPS = [
 		{
 			header: "Property",
-			names:  [CFG.LAYER_CADASTRE, CFG.LAYER_QPWS, CFG.LAYER_RELIEF],
+			names:  [CFG.LAYER_CADASTRE, CFG.LAYER_QPWS],
 		},
 		{
 			header: "Infrastructure",
@@ -268,7 +283,7 @@
 		},
 		{
 			header: "Environment",
-			names:  [CFG.LAYER_PARKS, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS],
+			names:  [CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS],
 		},
 		{
 			header: "Live data",
@@ -794,6 +809,77 @@
 		return { west, south, east, north };
 	}
 
+	/* -- Mapbox custom protocol (`dw://`) ---------------------------------
+	 *
+	 * Mapbox GL JS raster sources need a static URL template. Many of our
+	 * Leaflet layers can't be expressed that way:
+	 *   - ArcGIS Export tiles use per-tile bbox params (size, format, layers)
+	 *   - Stamen Terrain needs a spoofed Origin header (Mapbox can't set one)
+	 *   - QLD Historical needs an async catalog lookup before each fetch
+	 *   - QLD Roads embeds dynamicLayers JSON in the query string
+	 *
+	 * Solution: register `mapboxgl.addProtocol("dw", handler)` so Mapbox
+	 * raster sources can use `dw://<layerKey>/{z}/{x}/{y}.png` URLs.
+	 * The handler routes to a per-layer fetch function the Leaflet layer
+	 * registered via `dwRegisterMbLayer()` — whatever auth flow, header
+	 * spoof, or bbox builder it needs is encapsulated there. Each tile
+	 * resolves with the same ArrayBuffer Mapbox would have got from a
+	 * direct fetch.
+	 */
+	const _dwMbLayers = new Map();
+	let   _dwMbNextId = 1;
+	// Set true the first time `mapboxgl.addProtocol` works. Builds of
+	// Mapbox GL JS 3.x ship without it (dynamic.watch's page-loaded
+	// bundle is one such — version 3.7.0 yet no addProtocol export).
+	// When false, layers with only a `_dwMbKey` (Stamen, QLD Historical,
+	// Garmin) get silently skipped in the mirror — otherwise Mapbox
+	// pumps `dw://…` URLs into native fetch and spams the console with
+	// "CORS request not http" errors.
+	let   _dwMbHasProtocol = false;
+
+	function dwRegisterMbLayer(lyr, fetchTile) {
+		const key = "lyr" + (_dwMbNextId++);
+		_dwMbLayers.set(key, fetchTile);
+		lyr._dwMbKey = key;
+		return key;
+	}
+
+	function dwUnregisterMbLayer(lyr) {
+		if (lyr && lyr._dwMbKey) {
+			_dwMbLayers.delete(lyr._dwMbKey);
+			lyr._dwMbKey = null;
+		}
+	}
+
+	function dwMbProtocolHandler(params) {
+		const m = (params.url || "").match(/^dw:\/\/(\w+)\/(\d+)\/(\d+)\/(\d+)\b/);
+		if (!m) return Promise.reject(new Error("dw://: bad url " + params.url));
+		const [, key, z, x, y] = m;
+		const fetchTile = _dwMbLayers.get(key);
+		if (!fetchTile) return Promise.reject(new Error("dw://: no layer " + key));
+		return Promise.resolve()
+			.then(() => fetchTile(+z, +x, +y))
+			.then((data) => ({ data }));
+	}
+
+	// Helper: arraybuffer fetch through fetch() (no header spoof).
+	function dwMbFetchAB(url) {
+		return fetch(url, { credentials: "omit" }).then((r) => {
+			if (!r.ok) throw new Error("HTTP " + r.status + " " + url);
+			return r.arrayBuffer();
+		});
+	}
+	// Helper: arraybuffer fetch through GM_xhr (header spoof / cookies).
+	function dwMbGmFetchAB(url, opts) {
+		return new Promise((resolve, reject) => {
+			gmGet(url, { responseType: "arraybuffer", ...(opts || {}) }, (err, r) => {
+				if (err) return reject(err);
+				if (!r || r.status >= 400) return reject(new Error("HTTP " + (r?.status || "?") + " " + url));
+				resolve(r.response);
+			});
+		});
+	}
+
 	/* -- Layer Providers --------------------------------------------------- */
 
 	class LayerProvider {
@@ -852,7 +938,7 @@
 			},
 		});
 
-		return new Layer("", {
+		const inst = new Layer("", {
 			opacity: opts.opacity,
 			attribution: opts.attribution,
 			minZoom: opts.minZoom,
@@ -865,6 +951,18 @@
 			tileSize,
 			pane: opts.pane,
 		});
+		// 3D mirror: Mapbox supports `{bbox-epsg-3857}` natively in
+		// raster source URL templates. ArcGIS Export takes a bbox
+		// query string, so the Mapbox-side URL just needs that token —
+		// no dw:// indirection, no protocol handler. Use 3857 for both
+		// bboxSR and imageSR; ArcGIS resolves them identically.
+		const showParam = opts.showLayers != null ? `&layers=show:${opts.showLayers}` : "";
+		inst._dwMb3DUrl =
+			`${opts.baseUrl}/export?bbox={bbox-epsg-3857}` +
+			`&bboxSR=3857&imageSR=3857` +
+			`&size=${tileSize},${tileSize}` +
+			`&format=png32&transparent=true&f=image${showParam}`;
+		return inst;
 	}
 
 	// Vector-tile overlay: fetches the MVT (.pbf) tiles covering the current
@@ -1185,6 +1283,17 @@
 					'&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors',
 			});
 			wireTileAbort(layer);
+			// 3D mirror: Stadia rejects browser-fetch from non-allowlisted
+			// origins, so we proxy the request through GM_xmlhttpRequest
+			// with the same `localhost` Origin Leaflet's createTile spoofs.
+			dwRegisterMbLayer(layer, (z, x, y) => dwMbGmFetchAB(
+				TILE_BASE + z + "/" + x + "/" + y + ".png", {
+					headers: {
+						Origin:  spoofOrigin,
+						Referer: spoofOrigin + "/",
+						Accept:  "image/png,image/*,*/*;q=0.8",
+					},
+				}));
 			return layer;
 		}
 	}
@@ -1349,13 +1458,28 @@
 				},
 			});
 
-			return new QldRoadsGrid({
+			const layer = new QldRoadsGrid({
 				tileSize: TILE_PX,
 				maxNativeZoom: 19,
 				maxZoom: 25,
 				pane: "dwRoadsPane",
 				attribution: "&copy; State of Queensland (Department of Resources)",
 			});
+			// 3D mirror: ArcGIS understands `bboxSR=3857`, and Mapbox
+			// expands `{bbox-epsg-3857}` natively in raster source URLs.
+			// Getter form because the QLD token may not be available
+			// at create-time (CSRF bootstrap is async) and rotates
+			// every ~6h — re-eval on each sync keeps the URL valid.
+			layer._dwMb3DGetUrl = () => {
+				if (!token.token) return null;  // skip mirror until ready
+				const tok = "&token=" + encodeURIComponent(token.token);
+				return CFG.QLD_ROADS_EXPORT +
+					`?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857` +
+					`&size=${TILE_PX},${TILE_PX}` +
+					`&dpi=192&format=png32&transparent=true` +
+					`&dynamicLayers=${DYN_LAYERS}&f=image${tok}`;
+			};
+			return layer;
 		}
 	}
 
@@ -1628,6 +1752,99 @@
 				}, 300);
 			};
 
+			// 3D mirror: getter form so it works without addProtocol.
+			// Returns null while the catalog query is in flight; the
+			// catalog resolution fires `capturechange` (we listen for
+			// that in Mode3DController) which triggers a resync once
+			// `_currentOid` is set. Mapbox's `{bbox-epsg-3857}` token
+			// gives us per-tile bbox substitution at the service layer.
+			gridLayer._dwMb3DGetUrl = () => {
+				if (provider._currentOid == null) {
+					// Catalog hasn't resolved — kick off a query so the
+					// retry path eventually re-evaluates with an OID.
+					const map = gridLayer._map;
+					if (map && !provider._fetching) {
+						provider._queryCatalog(map, () => {});
+					}
+					return null;
+				}
+				const cap = provider._captures[provider._captureIdx];
+				const svc = cap ? cap.service : CFG.QLD_HIST_SERVICE;
+				const mosaicWhere = cap ? cap.mosaicWhere : "category=1";
+				const needsToken = cap && cap.needsToken;
+				const tokStr =
+					needsToken && provider._qldToken && provider._qldToken.token
+						? "&token=" + encodeURIComponent(provider._qldToken.token)
+						: "";
+				const mosaicRuleObj = {
+					mosaicMethod: "esriMosaicLockRaster",
+					lockRasterIds: [provider._currentOid],
+					ascending: true,
+				};
+				if (mosaicWhere) mosaicRuleObj.where = mosaicWhere;
+				const mosaicRule = encodeURIComponent(
+					JSON.stringify(mosaicRuleObj));
+				return svc + "/exportImage?bbox={bbox-epsg-3857}" +
+					"&bboxSR=3857&imageSR=3857" +
+					"&size=" + TILE_PX + "," + TILE_PX +
+					"&format=jpg&mosaicRule=" + mosaicRule +
+					"&f=image" + tokStr;
+			};
+			// Event names Mode3DController watches to trigger a
+			// re-sync (so the scrubber moving back in time refetches
+			// tiles for the new capture).
+			gridLayer._dwMb3DReloadOn = ["capturechange"];
+
+			// Legacy dw:// path — unused on builds without addProtocol,
+			// kept so a fresh Mapbox build that does expose addProtocol
+			// transparently regains the same behaviour.
+			const EMPTY_PNG_AB = (() => {
+				// 1×1 transparent PNG — fixed bytes so we don't allocate.
+				const b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+				const bin = atob(b64);
+				const ab  = new ArrayBuffer(bin.length);
+				const u8  = new Uint8Array(ab);
+				for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+				return ab;
+			})();
+			dwRegisterMbLayer(gridLayer, (z, x, y) => new Promise((resolve, reject) => {
+				const map = gridLayer._map;
+				if (!map) return resolve(EMPTY_PNG_AB);
+				const myGen = provider._captureGeneration;
+				provider._queryCatalog(map, (oid) => {
+					if (!oid || provider._captureGeneration !== myGen) {
+						return resolve(EMPTY_PNG_AB);
+					}
+					const b = tileToBBox3857(z, x, y);
+					const bbox = encodeURIComponent(
+						`${b.west},${b.south},${b.east},${b.north}`);
+					const cap = provider._captures[provider._captureIdx];
+					const svc = cap ? cap.service : CFG.QLD_HIST_SERVICE;
+					const mosaicWhere = cap ? cap.mosaicWhere : "category=1";
+					const needsToken = cap && cap.needsToken;
+					const tokenStr =
+						needsToken && provider._qldToken && provider._qldToken.token
+							? "&token=" + encodeURIComponent(provider._qldToken.token)
+							: "";
+					const mosaicRuleObj = {
+						mosaicMethod: "esriMosaicLockRaster",
+						lockRasterIds: [oid],
+						ascending: true,
+					};
+					if (mosaicWhere) mosaicRuleObj.where = mosaicWhere;
+					const mosaicRule = encodeURIComponent(
+						JSON.stringify(mosaicRuleObj));
+					const url =
+						svc +
+						"/exportImage?bbox=" + bbox +
+						"&bboxSR=102100&imageSR=102100" +
+						"&size=" + TILE_PX + "%2C" + TILE_PX +
+						"&format=jpg&mosaicRule=" + mosaicRule +
+						"&f=image" + tokenStr;
+					dwMbFetchAB(url).then(resolve, reject);
+				});
+			}));
+
 			gridLayer.on("add", function () {
 				const m = this._map;
 				const onMoveEnd = () => {
@@ -1748,6 +1965,33 @@
 				attribution: "© Garmin",
 			});
 			wireTileAbort(layer);
+			// 3D mirror: fetch all 5 activity feeds in parallel, decode
+			// each via createImageBitmap, then composite onto an
+			// OffscreenCanvas with `globalCompositeOperation: "lighter"`
+			// — the same additive blend the Leaflet createTile uses on
+			// a regular canvas. Result encoded back to PNG so Mapbox
+			// renders it as a single raster tile. Per-feed failures are
+			// tolerated (less common activities often 404 outside dense
+			// areas); we only reject if every fetch fails.
+			dwRegisterMbLayer(layer, async (z, x, y) => {
+				const urls = ACTIVITIES.map((a) =>
+					"https://connecttile.garmin.com/" + a + "/" +
+					z + "/" + x + "/" + y + ".png");
+				const blobs = await Promise.all(urls.map((u) =>
+					dwMbGmFetchAB(u)
+						.then((ab) => new Blob([ab], { type: "image/png" }))
+						.catch(() => null)));
+				const bitmaps = await Promise.all(blobs.map((b) =>
+					b ? createImageBitmap(b).catch(() => null) : null));
+				const alive = bitmaps.filter(Boolean);
+				if (!alive.length) throw new Error("All Garmin activity tiles failed");
+				const canvas = new OffscreenCanvas(256, 256);
+				const ctx = canvas.getContext("2d");
+				ctx.globalCompositeOperation = "lighter";
+				for (const bm of alive) ctx.drawImage(bm, 0, 0);
+				const out = await canvas.convertToBlob({ type: "image/png" });
+				return await out.arrayBuffer();
+			});
 			return layer;
 		}
 	}
@@ -2438,6 +2682,30 @@
 							sticky:    true,
 						});
 
+						// 3D mirror metadata: lets the Mode3DController
+						// extract the cache code + status into the Mapbox
+						// GeoJSON properties so the 3D dot is colour-coded
+						// and clickable, and the hover popup can show full
+						// detail.
+						marker._dwData = {
+							kind:     "geocache",
+							code,
+							name:     c.name || code,
+							color:    fill,
+							disabled,
+							label:    label,
+							diff:     diff,
+							terr:     terr,
+							size:     size,
+							owner:    owner,
+							favs:     favs,
+							found:    found,
+							dnf:      dnf,
+							url:      code
+								? `https://www.geocaching.com/geocache/${code}`
+								: null,
+						};
+
 						if (code) {
 							marker.on("click", () => {
 								window.open(
@@ -2496,36 +2764,6 @@
 				maxZoom: 25,
 				tileSize: 256,
 				crossOrigin: true,
-				attribution: "&copy; State of Queensland (Department of Resources)",
-			});
-		}
-	}
-
-	/* -- QLD Relief overlay ----------------------------------------------- */
-
-	// Hillshade layer served as a transparent overlay tile cache. Designed to
-	// sit on top of any base layer at ~40% opacity to add terrain context.
-	// Lives in its own pane (z=240) so it stacks above the basemap and roads
-	// but stays underneath QLD Labels (dwLabelsPane z=250).
-	class QldReliefLayerProvider extends LayerProvider {
-		create() {
-			const ReliefLayer = L.TileLayer.extend({
-				onAdd(map) {
-					if (!map.getPane("dwReliefPane")) {
-						map.createPane("dwReliefPane");
-						map.getPane("dwReliefPane").style.zIndex = "240";
-						map.getPane("dwReliefPane").style.pointerEvents = "none";
-					}
-					L.TileLayer.prototype.onAdd.call(this, map);
-				},
-			});
-			return new ReliefLayer(CFG.QLD_RELIEF_TILE, {
-				maxNativeZoom: 14,
-				maxZoom: 25,
-				tileSize: 256,
-				crossOrigin: true,
-				opacity: 0.45,
-				pane: "dwReliefPane",
 				attribution: "&copy; State of Queensland (Department of Resources)",
 			});
 		}
@@ -3745,16 +3983,15 @@
 		}
 	}
 
-	/* -- National Parks (QLD QPWS protected-areas reference) -------------- */
+	/* -- ArcGIS REST query → GeoJSON overlay ------------------------------ */
 
 	// Vector overlay backed by an ArcGIS REST `query` endpoint returning
-	// GeoJSON. Same debounced, generation-guarded, redraw-on-move skeleton as
-	// the other view-driven overlays, but a single GET passes the view bbox as
-	// an envelope with server-side geometry simplification (maxAllowableOffset,
-	// keyed to
-	// zoom) so payloads stay small and polygons arrive pre-assembled — holes
-	// and multipart included — for L.geoJSON to render directly. The pane is
-	// left interactive (no pointerEvents:none) so the hover name tooltip works.
+	// GeoJSON. Debounced + generation-guarded + redraw-on-move; a single
+	// GET passes the view bbox as an envelope with server-side geometry
+	// simplification (maxAllowableOffset, keyed to zoom) so payloads stay
+	// small and polygons arrive pre-assembled — holes + multipart included
+	// — for L.geoJSON to render directly. The pane is left interactive
+	// (no pointerEvents:none) so the hover name tooltip works.
 	//
 	// opts: { label, pane, paneZIndex, minZoom, queryUrl, where, outFields,
 	//         style, tooltip(props)->html, tipClass, attribution,
@@ -3847,52 +4084,6 @@
 		});
 
 		return new Layer();
-	}
-
-	// Friendly labels for the national-park estate sub-types in the QPWS data.
-	const NP_TYPE_LABEL = {
-		NP: "National Park",
-		NS: "National Park (scientific)",
-		NY: "National Park (Aboriginal land — CYPAL)",
-		NA: "National Park (Aboriginal land)",
-	};
-
-	// National parks of Queensland, from the authoritative QPWS protected-areas
-	// reference (the same MapServer the QPWS Estate overlay uses), layer 10
-	// filtered to the national-park estate types (NP/NY/NS/NA). Other estate
-	// types (CP/RR/SF/TR) are excluded — the broader QPWS Estate overlay covers
-	// those. Replaces the old OSM/Overpass source, which was both less
-	// authoritative and chronically unreliable (the public Overpass mirrors
-	// routinely timed out, leaving the layer blank).
-	class NationalParksLayerProvider extends LayerProvider {
-		create() {
-			return makeArcgisQueryLayer({
-				label: "National Parks",
-				pane: "dwParksPane",
-				paneZIndex: 395,
-				minZoom: 9,
-				debounceMs: 500,
-				timeoutMs: 30000,
-				queryUrl: CFG.QLD_QPWS_SERVICE + "/10/query",
-				where: "esttype IN ('NP','NY','NS','NA')",
-				outFields: "estatename,esttype",
-				attribution:
-					'Parks © <a href="https://parks.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (DETSI)</a>',
-				style: {
-					pane: "dwParksPane",
-					color: "#1B5E20",
-					weight: 1.5,
-					opacity: 0.85,
-					fillColor: "#43A047",
-					fillOpacity: 0.18,
-				},
-				tooltip: (p) => {
-					const name = p.estatename || "National park";
-					const type = NP_TYPE_LABEL[p.esttype];
-					return `<b>${name}</b>` + (type ? `<br>${type}` : "");
-				},
-			});
-		}
 	}
 
 	/* -- INTVL Global Map (public Mapbox Vector Tile pyramid) ------------
@@ -4250,6 +4441,11 @@
 						 window.matchMedia("(hover: none)").matches);
 					if (!noHover) {
 						this._onMove = (e) => {
+							// Leaflet occasionally fires mousemove from layer
+							// cascade events (e.g. when a layer add triggers
+							// re-projection) without a real latlng — guard so
+							// the debounced identify call never blows up.
+							if (!e?.latlng) return;
 							clearTimeout(this._hoverDebounce);
 							const latlng = e.latlng;
 							this._hoverDebounce = setTimeout(
@@ -4330,7 +4526,7 @@
 						// 404 (no coverage) and network errors both render empty —
 						// caller relies on a canvas-shaped tile either way.
 						if (err || r.status !== 200 || !r.response) {
-							done(null, canvas); return;
+							safeDone(); return;
 						}
 						try {
 							const layers   = mvtDecode(r.response);
@@ -4342,8 +4538,20 @@
 						} catch (e) {
 							console.warn("[CustomTiles] INTVL global decode:", e);
 						}
-						done(null, canvas);
+						safeDone();
 					});
+					// Guard against the case where a rapid layer-toggle (or
+					// 3D mode hide/show) evicts the tile after the request
+					// fired but before it resolved. Leaflet's _tileReady
+					// then null-derefs the tile element. Wrap done() so
+					// the unmount race doesn't surface as a runtime error.
+					function safeDone() {
+						try { done(null, canvas); }
+						catch (e) {
+							// Only swallow the specific null-tile race; rethrow others.
+							if (!String(e?.message || "").includes("style")) throw e;
+						}
+					}
 
 					return canvas;
 				},
@@ -4491,7 +4699,7 @@
 				},
 			});
 
-			return new IntvlGlobalGrid({
+			const layer = new IntvlGlobalGrid({
 				tileSize: TILE_PX,
 				minZoom: 4,
 				maxNativeZoom: CFG.INTVL_TILES_MAX_NATIVE_Z,
@@ -4499,6 +4707,43 @@
 				opacity: 1,
 				pane: "dwIntvlGlobalPane",
 			});
+			// 3D mirror: same PBF tileset, decoded natively by Mapbox.
+			// Source-layer "territories" carries polygons with a
+			// `colour` string property (no leading #). CloudFront
+			// serves CORS-allowed PBFs, so Mapbox can fetch directly —
+			// no addProtocol indirection needed (which is good because
+			// some Mapbox builds dynamic.watch loads don't expose
+			// addProtocol at all).
+			layer._dwMb3DStyle = {
+				sources: {
+					src: {
+						type: "vector",
+						tiles: [`${CFG.INTVL_TILES_BASE}/{z}/{x}/{y}.pbf`],
+						minzoom: 0,
+						maxzoom: CFG.INTVL_TILES_MAX_NATIVE_Z,
+					},
+				},
+				layers: [{
+					id: "fill",
+					type: "fill",
+					source: "src",
+					"source-layer": "territories",
+					paint: {
+						// INTVL features already store `#RRGGBB` (with the
+						// leading hash). Mapbox's `to-color` reads that
+						// directly; do NOT concat another `#` or every
+						// feature comes back as `##RRGGBB` and the entire
+						// expression throws "could not parse color".
+						"fill-color": ["case",
+							["has", "colour"], ["to-color", ["get", "colour"]],
+							"#888",
+						],
+						"fill-opacity": 0.55,
+						"fill-emissive-strength": 0.85,
+					},
+				}],
+			};
+			return layer;
 		}
 	}
 
@@ -4562,7 +4807,7 @@
 				},
 			});
 
-			return new LightPolWmsLayer("", {
+			const layer = new LightPolWmsLayer("", {
 				tileSize: TILE_PX,
 				minZoom: 0,
 				maxNativeZoom: 12,
@@ -4571,6 +4816,1352 @@
 				attribution:
 					'Light pollution © <a href="https://www.lightpollutionmap.info/" target="_blank" rel="noreferrer">lightpollutionmap.info</a>',
 			});
+			// 3D mirror: WMS is bbox-driven, and Mapbox supports
+			// `{bbox-epsg-3857}` natively. Drop the wmsParams `SRS` /
+			// `CRS` to match Mapbox's 3857 default (the WMS server
+			// accepts either).
+			layer._dwMb3DUrl =
+				CFG.LIGHTPOL_WMS_BASE + wmsParams + "&BBOX={bbox-epsg-3857}";
+			return layer;
+		}
+	}
+
+	/* -- 3D Mode (Mapbox GL JS terrain overlay) ---------------------------
+	 *
+	 * Toggle that lazily loads mapbox-gl-js, mounts a Mapbox canvas inside
+	 * Leaflet's mapPane (above the now-hidden tile pane, below all the
+	 * overlay/marker panes so dynamic.watch's routes + waypoints continue
+	 * to render on top), enables `mapbox.terrain-rgb` as the DEM source,
+	 * and mirrors the currently-active Leaflet basemap as a Mapbox raster
+	 * layer draped over the terrain. Viewport syncs both directions so
+	 * pans inside Leaflet (e.g. dragging a waypoint) update the 3D view,
+	 * and pans inside the 3D view update Leaflet's logical state.
+	 *
+	 * Overlays that are Leaflet-rendered (vectors, GeoJSON, custom canvas
+	 * tiles like INTVL) still float in 2D pixel space — they don't track
+	 * the terrain. To make them follow the 3D surface they'd need to be
+	 * re-implemented as Mapbox sources; see the scope-2 path in the
+	 * README's roadmap for that.
+	 */
+
+	// dynamic.watch already ships its own Mapbox public token (for route
+	// thumbnails, 3D Preview, etc.); we scrape it instead of embedding
+	// one. Order: react-prop blob → any string in the page HTML → an
+	// inert placeholder (Mapbox GL JS requires *some* non-empty token at
+	// init even when no Mapbox-hosted tiles are requested).
+	function pickMapboxToken() {
+		if (pageWin.mapboxgl?.accessToken && /^pk\./.test(pageWin.mapboxgl.accessToken)) {
+			return pageWin.mapboxgl.accessToken;
+		}
+		try {
+			const html = document.documentElement.outerHTML;
+			const m = html.match(/pk\.eyJ[A-Za-z0-9._-]{30,}/);
+			if (m) return m[0];
+		} catch (_) {}
+		return "pk.no-mapbox-tiles-needed";
+	}
+
+	function ensureMapboxLoaded() {
+		const win = pageWin;
+		if (win.mapboxgl) return Promise.resolve(win.mapboxgl);
+		if (!ensureMapboxLoaded._p) {
+			ensureMapboxLoaded._p = new Promise((resolve, reject) => {
+				// CSS first so the canvas sizing rules are in place before
+				// the script fires its DOM construction.
+				if (!document.getElementById("dw-mb-css")) {
+					const link = document.createElement("link");
+					link.id = "dw-mb-css";
+					link.rel = "stylesheet";
+					link.href = `https://api.mapbox.com/mapbox-gl-js/v${CFG.MAPBOX_GL_VERSION}/mapbox-gl.css`;
+					document.head.appendChild(link);
+				}
+				const script = document.createElement("script");
+				script.src = `https://api.mapbox.com/mapbox-gl-js/v${CFG.MAPBOX_GL_VERSION}/mapbox-gl.js`;
+				script.onload = () => {
+					if (win.mapboxgl) {
+						// Silence telemetry. The borrowed token is URL-restricted
+						// to dynamic.watch, so events.mapbox.com rejects every
+						// beacon with a CORS error — harmless but spammy. Nulling
+						// EVENTS_URL stops the library from firing them at all.
+						try {
+							if (win.mapboxgl.config) win.mapboxgl.config.EVENTS_URL = null;
+							if (typeof win.mapboxgl.setTelemetryEnabled === "function") win.mapboxgl.setTelemetryEnabled(false);
+						} catch (e) { /* best-effort */ }
+						// Register `dw://` so raster sources backed by our
+						// custom Leaflet fetchers (Stamen, ArcGIS Exports,
+						// QLD Roads/Historical, INTVL) can flow through Mapbox.
+						// Firefox's userscript sandbox wraps closures into
+						// XPCNativeWrappers that the page-context Mapbox
+						// can't call — so we use `exportFunction` (when
+						// available) to expose a page-callable shim that
+						// bounces back into our sandbox handler. On Chrome /
+						// Tampermonkey's "main world" mode this is a no-op
+						// and the raw function works directly.
+						try {
+							if (typeof win.mapboxgl.addProtocol === "function") {
+								const handler = typeof exportFunction === "function"
+									? exportFunction(dwMbProtocolHandler, win, { allowCrossOriginArguments: true })
+									: dwMbProtocolHandler;
+								win.mapboxgl.addProtocol("dw", handler);
+								_dwMbHasProtocol = true;
+							} else {
+								console.info(
+									"[CustomTiles] mapboxgl.addProtocol unavailable in this build " +
+									"(v" + (win.mapboxgl.version || "?") + "); Stamen / QLD Historical / " +
+									"Garmin Heatmap will not render in 3D.");
+							}
+						} catch (e) {
+							console.warn("[CustomTiles] addProtocol failed:", e.message);
+						}
+						resolve(win.mapboxgl);
+					}
+					else reject(new Error("mapboxgl global missing after load"));
+				};
+				script.onerror = () => reject(new Error("script tag load failed"));
+				document.head.appendChild(script);
+			});
+		}
+		return ensureMapboxLoaded._p;
+	}
+
+	class Mode3DController {
+		constructor(app) {
+			this._app = app;
+			this._active = false;
+			this._loading = false;
+			this._cancelLoad = false;
+			this._mbMap = null;
+			this._mbContainer = null;
+			this._prevTileOpacity = null;
+			this._syncing = false;
+			this._handler3DMove = null;
+			this._handler2DMove = null;
+			this._baseTracker = null;
+		}
+
+		isActive() { return this._active || this._loading; }
+
+		enable(map) {
+			if (this._active || this._loading) return;
+			this._loading = true;
+			this._cancelLoad = false;
+			ensureMapboxLoaded().then((mapboxgl) => {
+				this._loading = false;
+				if (this._cancelLoad) return;
+				this._mount(map);
+				this._initMbMap(map, mapboxgl);
+				this._wireSync(map);
+				this._wireBasemapTracker(map);
+				this._active = true;
+				console.info("[CustomTiles] 3D Mode enabled");
+			}).catch((e) => {
+				this._loading = false;
+				console.error(
+					"[CustomTiles] 3D Mode: failed to load mapbox-gl-js:",
+					e.message,
+					"\n  Likely cause: dynamic.watch's CSP, or mapbox.com unreachable.");
+			});
+		}
+
+		disable(map) {
+			if (this._loading) { this._cancelLoad = true; return; }
+			if (!this._active) return;
+			this._unwireBasemapTracker(map);
+			this._unwireSync(map);
+			this._unwireMarkerObserver();
+			if (this._mbMap) {
+				try { this._mbMap.remove(); } catch (_) {}
+				this._mbMap = null;
+			}
+			// `_popup` + `_hoverBound` reference the destroyed mbMap;
+			// drop them so the next enable() creates fresh ones.
+			this._popup = null;
+			this._hoverBound = null;
+			this._unmount(map);
+			this._active = false;
+			console.info("[CustomTiles] 3D Mode disabled");
+		}
+
+		_mount(map) {
+			// Hide only the panes we re-render via Mapbox (tile base,
+			// route SVG, custom overlay panes), and keep the marker
+			// pane VISIBLE so the waypoint markers stay draggable —
+			// Leaflet's drag handler needs the icon DOM to receive
+			// pointer events. The waypoints float in 2D pixel space
+			// rather than tracking the terrain mesh, but that's the
+			// price of preserving drag-to-edit during 3D mode.
+			// Custom panes (dwIntvl…, dwInfra, dwGeocaching, etc.)
+			// are walked on demand because dynamic.watch / the
+			// userscript create them lazily.
+			this._hiddenPanes = [];
+			this._hideHiddenable(map);
+		}
+
+		// Walk all panes and hide the ones we shouldn't render in 3D.
+		// Idempotent — call from `_mount` AND from every resync so
+		// panes created AFTER 3D was enabled (user toggles INTVL or
+		// flips a custom-canvas layer mid-session) get hidden too.
+		_hideHiddenable(map) {
+			const tracked = new Set((this._hiddenPanes || []).map(p => p.name));
+			const hide = (name) => {
+				if (tracked.has(name)) return;
+				const pane = map.getPane(name);
+				if (!pane) return;
+				this._hiddenPanes.push({ name, prev: pane.style.opacity });
+				pane.style.opacity = "0";
+				tracked.add(name);
+			};
+			hide("tilePane");
+			hide("overlayPane");
+			hide("shadowPane");
+			for (const key of Object.keys(map._panes || {})) {
+				if (key.startsWith("dw")) hide(key);
+			}
+			// Mount in the leaflet root, NOT in mapPane. mapPane has no
+			// intrinsic size (Leaflet uses it for transforms only), so a
+			// 100% container collapses to 0×0 and Mapbox boots with its
+			// default 400×300 fallback canvas. The leaflet root has the
+			// real viewport size.
+			// Insert as the FIRST child so it stacks below every other
+			// pane (no z-index needed — DOM order wins among siblings
+			// without explicit z-index). pointer-events:auto so Mapbox
+			// owns drag/orbit/zoom while 3D is on. Leaflet controls are
+			// later in DOM order so they still receive clicks.
+			const root = map.getContainer();
+			const div = document.createElement("div");
+			div.id = "dw-mb-container";
+			div.style.cssText =
+				"position:absolute;top:0;left:0;width:100%;height:100%;" +
+				"pointer-events:auto;";
+			if (root.firstChild) root.insertBefore(div, root.firstChild);
+			else root.appendChild(div);
+			this._mbContainer = div;
+		}
+
+		_hidePane(map, paneName, prevKey) {
+			const pane = map.getPane(paneName);
+			if (!pane) return;
+			this[prevKey] = pane.style.opacity;
+			pane.style.opacity = "0";
+		}
+
+		_restorePane(map, paneName, prevKey) {
+			const pane = map.getPane(paneName);
+			if (pane) pane.style.opacity = this[prevKey] || "";
+			this[prevKey] = null;
+		}
+
+		_unmount(map) {
+			if (this._mbContainer && this._mbContainer.parentNode) {
+				this._mbContainer.parentNode.removeChild(this._mbContainer);
+			}
+			this._mbContainer = null;
+			for (const entry of (this._hiddenPanes || [])) {
+				const pane = map.getPane(entry.name);
+				if (pane) pane.style.opacity = entry.prev || "";
+			}
+			this._hiddenPanes = null;
+			// Clear our `!important` transform overrides so Leaflet's
+			// normal repositioning takes effect again. Without this,
+			// the markers would stay frozen at their last 3D position
+			// even after the user toggles 3D off.
+			map.eachLayer((lyr) => {
+				if (!(lyr instanceof L.Marker)) return;
+				const el = lyr._icon || lyr.getElement?.();
+				if (el) el.style.removeProperty("transform");
+			});
+			// Force Leaflet to re-emit positions so the cleared
+			// transforms get repopulated by Leaflet's flat projection.
+			try { map.fire("viewreset"); } catch (_) {}
+		}
+
+		_initMbMap(map, mapboxgl) {
+			// AWS Mapzen Terrarium tiles — no auth, world coverage to z14,
+			// encoded as `(R*256 + G + B/256) - 32768 = metres`. Mapbox GL
+			// handles the decode natively via encoding: "terrarium".
+			const sources = {
+				"mapbox-dem": {
+					type: "raster-dem",
+					tiles: [CFG.TERRARIUM_TILES],
+					tileSize: 256,
+					maxzoom: 14,
+					encoding: "terrarium",
+				},
+			};
+			// Solid background layer FIRST so the canvas always has a
+			// non-transparent fill. Without this, when no basemap is
+			// detected (custom-createTile layers, or before the raster
+			// loads) the canvas stays transparent and Leaflet's default
+			// `#ddd` container background bleeds through — grey screen.
+			const layers = [
+				{ id: "bg", type: "background", paint: { "background-color": "#c8c4b8" } },
+			];
+			const base = this._activeBaseTiles(map);
+			if (base) {
+				sources["active-base"] = {
+					type: "raster",
+					tiles: base.tiles,
+					tileSize: 256,
+					maxzoom: base.maxzoom,
+				};
+				layers.push({
+					id: "active-base",
+					type: "raster",
+					source: "active-base",
+					paint: { "raster-fade-duration": 0 },
+				});
+			} else {
+				console.info(
+					"[CustomTiles] 3D Mode: no URL-template basemap on map; " +
+					"showing bare terrain. Switch to Google Hybrid / QLD Globe " +
+					"/ MapTiler for draped imagery.");
+			}
+			layers.push({
+				id: "sky",
+				type: "sky",
+				paint: { "sky-type": "atmosphere" },
+			});
+
+			const c = map.getCenter();
+			const z = map.getZoom();
+			const mbMap = new mapboxgl.Map({
+				container: this._mbContainer,
+				accessToken: pickMapboxToken(),
+				style: {
+					version: 8,
+					sources,
+					layers,
+					// Mapbox's default font CDN — required so any symbol
+					// layer we later add (distance labels, geocache code
+					// pins, plane callsigns) can render text. The borrowed
+					// token has access; if it ever rotates to a fonts-
+					// restricted scope, the text layers silently 404 and
+					// glyphs stay empty, but other layers still render.
+					glyphs: "mapbox://fonts/mapbox/{fontstack}/{range}.pbf",
+				},
+				center: [c.lng, c.lat],
+				zoom: Math.max(0, z - 1),  // Mapbox zoom is offset 1 below Leaflet
+				pitch: 60,                  // Tilt for the actual 3D effect
+				bearing: 0,
+				antialias: true,
+				attributionControl: false,
+				// Mapbox owns gestures while 3D is on: drag pans, scroll
+				// zooms, right-drag (or ctrl+drag) rotates/pitches.
+				// Leaflet's edit controls are hidden anyway (overlay +
+				// marker panes opacity 0), so there's no conflict.
+				interactive: true,
+				dragRotate: true,
+				touchPitch: true,
+			});
+			mbMap.on("style.load", () => {
+				mbMap.setTerrain({ source: "mapbox-dem", exaggeration: 1.5 });
+				// Belt-and-braces resize: even with the right parent,
+				// Mapbox's first layout pass occasionally beats CSS
+				// settling on slower runs. Force a recomputation.
+				try { mbMap.resize(); } catch (_) {}
+				// Mirror every active Leaflet overlay tile-layer as a
+				// Mapbox raster source so toggling layers in 2D shows
+				// up draped on the 3D terrain. Then render every
+				// Leaflet vector / marker shape (National Parks,
+				// Geocaches, Flights, Vessels, OIM Power / Telecoms /
+				// Water) as Mapbox GeoJSON layers. Route + waypoints
+				// go on top last, then wire hover-popups for the
+				// feature layers (INTVL, geocaches, flights, vessels).
+				this._syncOverlays(map, mbMap);
+				this._renderLeafletShapes(map, mbMap);
+				this._renderRoute(map, mbMap);
+				this._wireHoverPopups(mapboxgl, mbMap);
+				// Initial marker sync — overrides Leaflet's flat-
+				// projection positioning with Mapbox's tilted one so
+				// the waypoint dots land on the correct terrain pixel
+				// from the first frame, not after the user starts panning.
+				this._syncMarkersToMapbox(map, mbMap);
+				// Watch markerPane for any subsequent style mutations
+				// (drag, zoom, programmatic setLatLng) so we re-sync
+				// without depending on a Mapbox `move` event to fire.
+				this._wireMarkerObserver(map, mbMap);
+			});
+			this._mbMap = mbMap;
+			// Reset click-wiring state — handlers on the previous mbMap
+			// (if any) were destroyed by `disable()` calling
+			// `mbMap.remove()`. Fresh map = fresh handler set.
+			this._wiredClick = new Set();
+			// Debug hooks: every reference console snippets need to
+			// introspect the 3D state without re-deriving anything.
+			//   _dwMb        — the Mapbox GL Map instance
+			//   _dwMbBase    — the basemap spec mirrored from Leaflet
+			//   _dwMap       — the Leaflet map (not exposed by dw)
+			//   _dw3D        — this controller (so we can call methods)
+			//   _dwRegistry  — the dw:// fetcher registry
+			try {
+				pageWin._dwMb        = mbMap;
+				pageWin._dwMbBase    = base;
+				pageWin._dwMap       = map;
+				pageWin._dw3D        = this;
+				pageWin._dwRegistry  = _dwMbLayers;
+			} catch (_) {}
+		}
+
+		// Extract dynamic.watch's route polyline(s) + waypoint markers
+		// from Leaflet, return as GeoJSON. Walks every layer on the map
+		// — picks up the SVG path Leaflet uses for the route line plus
+		// every L.Marker (start/end/insert points + distance labels) by
+		// reading their `_latlngs` / `getLatLng()` directly. Marker
+		// colour is sniffed from the icon's CSS class (`circle red` →
+		// red, `circle lightgreen` → start, `dist-marker` → numbered).
+		_extractRouteGeojson(map) {
+			const lineFeatures = [];
+			const pointFeatures = [];
+			map.eachLayer((lyr) => {
+				if (lyr instanceof L.Polyline && !(lyr instanceof L.Polygon)) {
+					const latlngs = lyr.getLatLngs?.();
+					if (!latlngs) return;
+					const flat = (Array.isArray(latlngs[0]) ? latlngs.flat(Infinity) : latlngs)
+						.filter(p => p && typeof p.lat === "number");
+					if (flat.length < 2) return;
+					lineFeatures.push({
+						type: "Feature",
+						geometry: { type: "LineString", coordinates: flat.map(p => [p.lng, p.lat]) },
+						properties: {
+							color: lyr.options?.color || "#9400D3",
+							weight: Math.min(lyr.options?.weight || 5, 8),
+						},
+					});
+				} else if (lyr instanceof L.Marker) {
+					const p = lyr.getLatLng?.();
+					if (!p) return;
+					const el = lyr.getElement?.() || lyr._icon;
+					const cls = el?.className || "";
+					let color = null, radius = 9, label = "";
+					if (cls.includes("dist-marker")) {
+						color = "#9400D3"; radius = 7;
+						label = (el.textContent || el.title || "").trim();
+					} else if (cls.includes("lightgreen")) color = "#7fd14b";
+					else if (cls.includes(" red"))        color = "#ff3030";
+					else if (cls.includes(" blue"))       color = "#3b82f6";
+					else if (cls.includes(" white"))      color = "#ffffff";
+					else if (cls.includes("transparent")) return;
+					else return;  // Skip non-route markers (Flights, Marine, Geocaches, etc.)
+					pointFeatures.push({
+						type: "Feature",
+						geometry: { type: "Point", coordinates: [p.lng, p.lat] },
+						properties: { color, radius, label },
+					});
+				}
+			});
+			return {
+				line:   { type: "FeatureCollection", features: lineFeatures },
+				points: { type: "FeatureCollection", features: pointFeatures },
+			};
+		}
+
+		// Walk every L.Path / L.Marker on the map, group by pane, and
+		// render each group as one or more Mapbox GeoJSON layers. This
+		// is how Geocaches, Live Flights, Marine Vessels, National
+		// Parks, OIM Power / Telecoms / Water all get into 3D —
+		// they're all Leaflet shapes underneath. Live-data panes
+		// (Flights/Vessels) refresh by replacing their child layers,
+		// which fires layeradd/layerremove → our debounced _fullResync
+		// picks it up within 40 ms.
+		_renderLeafletShapes(map, mbMap) {
+			if (!mbMap.isStyleLoaded || !mbMap.isStyleLoaded()) return;
+			const byPane = new Map();
+			const bucket = (pane) => {
+				let b = byPane.get(pane);
+				if (!b) { b = { lines: [], polygons: [], points: [] }; byPane.set(pane, b); }
+				return b;
+			};
+			// Recursive walker — `map.eachLayer` only iterates direct
+			// children of the map, NOT the contents of L.LayerGroup /
+			// L.FeatureGroup containers. Power / Telecoms / Water all
+			// wrap their per-feature L.Polyline/Polygon/Marker
+			// instances inside a feature group, so without the
+			// recursion we'd see only the (empty-shaped) wrapper and
+			// miss every actual feature.
+			const visit = (lyr) => {
+				if (lyr instanceof L.LayerGroup) {
+					lyr.eachLayer(visit);
+					return;
+				}
+				handle(lyr);
+			};
+			const handle = (lyr) => {
+				const opts = lyr.options || {};
+				const pane = opts.pane;
+				if (!pane) return;
+				// Skip the default panes — those are handled elsewhere
+				// (tile pane = base imagery, overlay pane = route SVG,
+				// marker pane = waypoints, mapPane = container only).
+				if (pane === "tilePane" || pane === "overlayPane" ||
+					pane === "markerPane" || pane === "mapPane" ||
+					pane === "tooltipPane" || pane === "popupPane" ||
+					pane === "shadowPane") return;
+
+				if (lyr instanceof L.Polygon) {
+					const ll = lyr.getLatLngs();
+					if (!ll || !ll.length) return;
+					// L.Polygon nesting:
+					//   [LatLng,…]                — simple polygon, one ring
+					//   [[LatLng,…],[LatLng,…]]    — polygon with holes
+					//   [[[LatLng,…],…],…]         — multipolygon
+					const isLatLng = (x) => x && typeof x.lat === "number";
+					let coordinates, type;
+					if (isLatLng(ll[0])) {
+						coordinates = [ll.map(p => [p.lng, p.lat])];
+						coordinates[0].push(coordinates[0][0]);
+						type = "Polygon";
+					} else if (isLatLng(ll[0]?.[0])) {
+						coordinates = ll.map(ring => {
+							const c = ring.map(p => [p.lng, p.lat]);
+							c.push(c[0]);
+							return c;
+						});
+						type = "Polygon";
+					} else {
+						coordinates = ll.map(poly => poly.map(ring => {
+							const c = ring.map(p => [p.lng, p.lat]);
+							c.push(c[0]);
+							return c;
+						}));
+						type = "MultiPolygon";
+					}
+					bucket(pane).polygons.push({
+						type: "Feature",
+						geometry: { type, coordinates },
+						properties: {
+							color:       opts.color       || "#888",
+							fillColor:   opts.fillColor   || opts.color || "#888",
+							fillOpacity: opts.fillOpacity != null ? opts.fillOpacity : 0.25,
+							opacity:     opts.opacity     != null ? opts.opacity : 0.9,
+							weight:      opts.weight      || 1,
+						},
+					});
+				} else if (lyr instanceof L.Polyline) {
+					const ll = lyr.getLatLngs();
+					if (!ll || !ll.length) return;
+					const flat = (Array.isArray(ll[0]) ? ll.flat(Infinity) : ll)
+						.filter(p => p && typeof p.lat === "number");
+					if (flat.length < 2) return;
+					bucket(pane).lines.push({
+						type: "Feature",
+						geometry: { type: "LineString", coordinates: flat.map(p => [p.lng, p.lat]) },
+						properties: {
+							color:   opts.color   || "#888",
+							opacity: opts.opacity != null ? opts.opacity : 1,
+							weight:  opts.weight  || 2,
+						},
+					});
+				} else if (lyr instanceof L.CircleMarker || lyr instanceof L.Circle) {
+					const p = lyr.getLatLng?.();
+					if (!p) return;
+					bucket(pane).points.push({
+						type: "Feature",
+						geometry: { type: "Point", coordinates: [p.lng, p.lat] },
+						properties: {
+							color:  opts.fillColor || opts.color || "#888",
+							radius: opts.radius     || 5,
+						},
+					});
+				} else if (lyr instanceof L.Marker) {
+					const p = lyr.getLatLng?.();
+					if (!p) return;
+					const el  = lyr.getElement?.() || lyr._icon;
+					const cls = el?.className || "";
+					// `_dwData` is the per-layer hook (geocaches +
+					// future planes/vessels). When present it overrides
+					// the per-pane defaults so 3D dots match the 2D
+					// colour-coding (e.g. found-cache grey vs available
+					// type colour) and carry whatever url/code the
+					// click handler needs to open the right page.
+					const dwData = lyr._dwData || null;
+					const paneColor = {
+						dwGeocachingPane: "#2da44e",
+						dwFlightsPane:    "#0066ff",
+						dwMarinePane:     "#00a3c9",
+						dwInfraPane:      "#F0A500",
+						dwTelecomPane:    "#7C3AED",
+						dwWaterPane:      "#0EA5E9",
+					}[pane] || "#888";
+					bucket(pane).points.push({
+						type: "Feature",
+						geometry: { type: "Point", coordinates: [p.lng, p.lat] },
+						properties: {
+							color:  dwData?.color || paneColor,
+							radius: dwData?.radius || 5,
+							label:  dwData?.label || "",
+							url:    dwData?.url   || "",
+							kind:   dwData?.kind  || "",
+							// Full data for hover popups. Mapbox JSON-
+							// serialises feature properties, so primitives
+							// only — booleans + strings + numbers.
+							name:    dwData?.name  || "",
+							code:    dwData?.code  || "",
+							diff:    dwData?.diff,
+							terr:    dwData?.terr,
+							favs:    dwData?.favs,
+							size:    dwData?.size  || "",
+							owner:   dwData?.owner || "",
+							found:   !!dwData?.found,
+							dnf:     !!dwData?.dnf,
+							className: cls,
+						},
+					});
+				}
+			};
+			map.eachLayer(visit);
+
+			// Two-pass drop. Several shape sources have multiple
+			// dependent layers (point + label, polygon fill + outline),
+			// and Mapbox throws if you try to drop a source while a
+			// layer still uses it.
+			const oldIds = this._shapeIds || [];
+			for (const id of oldIds) {
+				try { if (mbMap.getLayer(id)) mbMap.removeLayer(id); } catch (_) {}
+			}
+			for (const id of oldIds) {
+				try { if (mbMap.getSource(id)) mbMap.removeSource(id); } catch (_) {}
+			}
+			this._shapeIds = [];
+
+			const beforeId = mbMap.getLayer("dw-route-line") ? "dw-route-line" :
+				(mbMap.getLayer("sky") ? "sky" : undefined);
+
+			for (const [pane, b] of byPane) {
+				if (b.polygons.length) {
+					const id = `dw-shapes-poly-${pane}`;
+					mbMap.addSource(id, {
+						type: "geojson",
+						data: { type: "FeatureCollection", features: b.polygons },
+					});
+					mbMap.addLayer({
+						id, type: "fill", source: id,
+						paint: {
+							"fill-color":   ["coalesce", ["get", "fillColor"], "#888"],
+							"fill-opacity": ["coalesce", ["get", "fillOpacity"], 0.25],
+						},
+					}, beforeId);
+					this._shapeIds.push(id);
+					const outlineId = id + "-outline";
+					mbMap.addLayer({
+						id: outlineId, type: "line", source: id,
+						paint: {
+							"line-color":   ["coalesce", ["get", "color"], "#888"],
+							"line-width":   ["coalesce", ["get", "weight"], 1],
+							"line-opacity": ["coalesce", ["get", "opacity"], 0.9],
+							"line-emissive-strength": 1,
+						},
+					}, beforeId);
+					this._shapeIds.push(outlineId);
+				}
+				if (b.lines.length) {
+					const id = `dw-shapes-line-${pane}`;
+					mbMap.addSource(id, {
+						type: "geojson",
+						data: { type: "FeatureCollection", features: b.lines },
+					});
+					mbMap.addLayer({
+						id, type: "line", source: id,
+						layout: { "line-cap": "round", "line-join": "round" },
+						paint: {
+							"line-color":   ["coalesce", ["get", "color"], "#888"],
+							"line-width":   ["coalesce", ["get", "weight"], 2],
+							"line-opacity": ["coalesce", ["get", "opacity"], 1],
+							"line-emissive-strength": 1,
+						},
+					}, beforeId);
+					this._shapeIds.push(id);
+				}
+				if (b.points.length) {
+					const id = `dw-shapes-point-${pane}`;
+					mbMap.addSource(id, {
+						type: "geojson",
+						data: { type: "FeatureCollection", features: b.points },
+					});
+					mbMap.addLayer({
+						id, type: "circle", source: id,
+						paint: {
+							"circle-radius":       ["coalesce", ["get", "radius"], 5],
+							"circle-color":        ["coalesce", ["get", "color"], "#888"],
+							"circle-stroke-width": 1,
+							"circle-stroke-color": "#ffffff",
+							"circle-emissive-strength": 1,
+						},
+					}, beforeId);
+					this._shapeIds.push(id);
+					// Add a single-letter type label (caches show G/M/T/etc.,
+					// drone-style; flights/vessels carry empty labels so the
+					// symbol layer renders nothing for them).
+					const labelId = id + "-label";
+					mbMap.addLayer({
+						id: labelId, type: "symbol", source: id,
+						filter: ["all", ["has", "label"], ["!=", ["get", "label"], ""]],
+						layout: {
+							"text-field":            ["get", "label"],
+							"text-font":             ["Open Sans Bold", "Arial Unicode MS Bold"],
+							"text-size":             9,
+							"text-allow-overlap":    true,
+							"text-ignore-placement": true,
+						},
+						paint: {
+							"text-color":             "#ffffff",
+							"text-halo-color":        "#000",
+							"text-halo-width":        1,
+							"text-emissive-strength": 1,
+						},
+					}, beforeId);
+					this._shapeIds.push(labelId);
+					// One click handler per circle layer that opens
+					// whatever URL the source feature carries. Wire it
+					// once per source — Mapbox dedups by (layer, type).
+					if (!this._wiredClick) this._wiredClick = new Set();
+					if (!this._wiredClick.has(id)) {
+						this._wiredClick.add(id);
+						mbMap.on("click", id, (e) => {
+							const url = e.features?.[0]?.properties?.url;
+							if (url) window.open(url, "_blank", "noopener");
+						});
+						mbMap.on("mouseenter", id, () => {
+							mbMap.getCanvas().style.cursor = "pointer";
+						});
+						mbMap.on("mouseleave", id, () => {
+							mbMap.getCanvas().style.cursor = "";
+						});
+					}
+				}
+			}
+		}
+
+		// Add Mapbox sources + layers for the route + waypoints. Idempotent
+		// — safe to call multiple times; existing layers/sources are
+		// dropped first. Uses `*-emissive-strength: 1` so the line and
+		// points stay vivid against the 3D-lit terrain.
+		// Mapbox-side hover popups for the feature layers we render —
+		// INTVL territories (vector fill), geocaches / flights /
+		// vessels (point circles). Wires `mousemove`/`mouseleave` per
+		// layer ID; each layer's formatter pulls the right fields out
+		// of the feature properties. Idempotent — if popups are
+		// already set up, just rebinds the formatters.
+		_wireHoverPopups(mapboxgl, mbMap) {
+			if (!this._popup) {
+				this._popup = new mapboxgl.Popup({
+					closeButton:  false,
+					closeOnClick: false,
+					className:    "dw-mb-popup",
+					offset:       12,
+				});
+			}
+			const popup = this._popup;
+			const bind = (layerId, fmt) => {
+				if (!mbMap.getLayer(layerId)) return;
+				if (!this._hoverBound) this._hoverBound = new Set();
+				if (this._hoverBound.has(layerId)) return;
+				this._hoverBound.add(layerId);
+				mbMap.on("mousemove", layerId, (e) => {
+					if (!e.features?.length) return;
+					const html = fmt(e.features[0]);
+					if (!html) return;
+					popup.setLngLat(e.lngLat).setHTML(html).addTo(mbMap);
+					mbMap.getCanvas().style.cursor = "pointer";
+				});
+				mbMap.on("mouseleave", layerId, () => {
+					popup.remove();
+					mbMap.getCanvas().style.cursor = "";
+				});
+			};
+
+			// INTVL territories — currentArea (m²), startTime (day
+			// offset), colour, activityId (cuid → precise time).
+			bind("dw-cust-0-fill", (f) => {
+				const p = f.properties || {};
+				const swatch = p.colour
+					? `<span style="display:inline-block;width:12px;height:12px;background:${p.colour};border:1px solid #888;vertical-align:middle;margin-right:6px;"></span>`
+					: "";
+				const area = p.currentArea != null ? intvlArea(p.currentArea) : "?";
+				const dt   = p.activityId ? intvlActivityTime(p.activityId) : null;
+				const ago  = dt ? intvlAgo(dt) : "";
+				return `${swatch}<b>${area}</b>` +
+					(ago ? `<br><span style="font-size:11px;color:#666">${ago}</span>` : "");
+			});
+
+			// Geocaches — name, code, D/T, size, favs, owner.
+			bind("dw-shapes-point-dwGeocachingPane", (f) => {
+				const p = f.properties || {};
+				if (!p.name && !p.code) return "";
+				const lines = [`<b>${_escHtml(p.name || p.code)}</b>` +
+					(p.found ? " ✓" : p.dnf ? " ✗" : "")];
+				const meta = [];
+				if (p.code) meta.push(_escHtml(p.code));
+				if (p.diff != null && p.terr != null) meta.push(`D ${p.diff} / T ${p.terr}`);
+				if (p.size) meta.push(_escHtml(String(p.size)));
+				if (p.favs) meta.push(`♥ ${p.favs}`);
+				if (meta.length) lines.push(
+					`<span style="font-size:11px;color:#666">${meta.join(" · ")}</span>`);
+				if (p.owner) lines.push(
+					`<span style="font-size:11px;color:#666">by ${_escHtml(p.owner)}</span>`);
+				return lines.join("<br>");
+			});
+
+			// Flights — currently just a placeholder dot; richer data
+			// would come from the layer provider attaching _dwData.
+			bind("dw-shapes-point-dwFlightsPane", (f) => {
+				const p = f.properties || {};
+				return p.label || p.name || "Aircraft";
+			});
+
+			// Marine vessels — same placeholder.
+			bind("dw-shapes-point-dwMarinePane", (f) => {
+				const p = f.properties || {};
+				return p.label || p.name || "Vessel";
+			});
+		}
+
+		_renderRoute(map, mbMap) {
+			// Don't gate on `isStyleLoaded()` — Mapbox sometimes
+			// returns false INSIDE the very `style.load` callback that
+			// called us. `mbMap.once("style.load", ...)` then schedules
+			// a handler that never fires (style.load already fired),
+			// and the route line silently never gets added. Same race
+			// already fixed for `_syncOverlays`. Probe via `getStyle()`
+			// which returns truthy as soon as the style object exists,
+			// and re-poll on the next frame if not.
+			if (!mbMap.getStyle?.()) {
+				requestAnimationFrame(() => this._renderRoute(map, mbMap));
+				return;
+			}
+			const { line } = this._extractRouteGeojson(map);
+			// Only the line layer is Mapbox-rendered now — the
+			// waypoint dots + distance numbers come from Leaflet's
+			// markerPane (which we no longer hide in 3D mode) so
+			// drag-to-edit keeps working. Avoid double-rendering by
+			// dropping the dw-route-points / dw-route-labels layers.
+			for (const id of ["dw-route-line", "dw-route-points", "dw-route-labels"]) {
+				try { if (mbMap.getLayer(id)) mbMap.removeLayer(id); } catch (_) {}
+			}
+			for (const id of ["dw-route-line", "dw-route-points"]) {
+				try { if (mbMap.getSource(id)) mbMap.removeSource(id); } catch (_) {}
+			}
+			const beforeId = mbMap.getLayer("sky") ? "sky" : undefined;
+			mbMap.addSource("dw-route-line", { type: "geojson", data: line });
+			mbMap.addLayer({
+				id: "dw-route-line", type: "line", source: "dw-route-line",
+				layout: { "line-cap": "round", "line-join": "round" },
+				paint: {
+					"line-color":   ["coalesce", ["get", "color"], "#9400D3"],
+					"line-width":   ["coalesce", ["get", "weight"], 6],
+					"line-opacity": 0.9,
+					"line-emissive-strength": 1,
+				},
+			}, beforeId);
+		}
+
+		// Hook layer-internal events that should trigger a re-sync.
+		// Used by QLD Historical's `capturechange` (scrubber moved) so
+		// the 3D mirror swaps to the new mosaicRule URL. Idempotent —
+		// listeners are tracked per (layer, event) pair so we don't
+		// double-hook on repeat syncs.
+		_wireReloadEvents(map, mbMap) {
+			if (!this._reloadHooks) this._reloadHooks = new WeakSet();
+			map.eachLayer((lyr) => {
+				const events = lyr._dwMb3DReloadOn;
+				if (!events || !events.length) return;
+				if (this._reloadHooks.has(lyr)) return;
+				this._reloadHooks.add(lyr);
+				const handler = () => {
+					if (!this._mbMap) return;
+					this._fullResync(map, this._mbMap);
+				};
+				for (const evt of events) {
+					try { lyr.on(evt, handler); } catch (_) {}
+				}
+			});
+		}
+
+		// Inspect a single L.TileLayer and return a Mapbox-ready
+		// raster-source spec, or null if it can't be mirrored. Handles
+		// subdomain substitution per the layer's own options.subdomains
+		// (Google uses "0123", OSM uses "abc", etc.) and the {r} retina
+		// flag MapTiler-style templates expose.
+		_layerToMbSpec(lyr) {
+			if (!lyr) return null;
+			const opts = lyr.options || {};
+			const paneEl = opts.pane ? lyr._map?.getPane(opts.pane) : null;
+			const zIndex = parseInt(paneEl?.style.zIndex || "200", 10) || 200;
+			// Authoritative base/overlay split via the layer control's
+			// own registry. Falls back to a pane heuristic (default
+			// tilePane → base) if the control isn't reachable yet.
+			let isBase = !opts.pane || opts.pane === "tilePane";
+			const ctrl = this._app?._ctrl;
+			if (ctrl?._layers) {
+				const entry = ctrl._layers.find((l) => l.layer === lyr);
+				if (entry) isBase = !entry.overlay;
+			}
+			const base = {
+				maxzoom: opts.maxNativeZoom || opts.maxZoom || 22,
+				opacity: typeof opts.opacity === "number" ? opts.opacity : 1,
+				zIndex,
+				isBase,
+			};
+			// Layers that publish a full Mapbox style spec (INTVL
+			// vector, future OIM vector ports) are added separately by
+			// _syncOverlays' custom-style walker — skip the raster
+			// path so we don't add a redundant (and wrongly-shaped)
+			// raster source too.
+			if (lyr._dwMb3DStyle) return null;
+			// Getter form — evaluated at every sync so token-aware
+			// URLs (QLD Roads, QLD Globe — tokens rotate every few
+			// hours) always reflect the current credential. Empty /
+			// nullish return drops the layer for this sync; the
+			// pending flag triggers a 3s retry from _syncOverlays so
+			// the layer pops into 3D once the dependency resolves.
+			if (typeof lyr._dwMb3DGetUrl === "function") {
+				const url = lyr._dwMb3DGetUrl();
+				if (url) return { ...base, url };
+				this._hadPendingGetter = true;
+				return null;
+			}
+			// Static Mapbox-native URL template (`{z}/{x}/{y}` or
+			// `{bbox-epsg-3857}`). For layers whose URL doesn't depend
+			// on anything that changes mid-session.
+			if (lyr._dwMb3DUrl) {
+				return { ...base, url: lyr._dwMb3DUrl };
+			}
+			// dw:// — only usable when Mapbox's addProtocol is alive.
+			// Skip entirely when it isn't: Mapbox would otherwise pass
+			// the dw:// URL straight to native fetch, which throws a
+			// CORS error per tile.
+			if (lyr._dwMbKey && _dwMbHasProtocol) {
+				return { ...base, url: `dw://${lyr._dwMbKey}/{z}/{x}/{y}.png` };
+			}
+			// Plain L.TileLayer with a `{z}/{x}/{y}` URL template.
+			if (!(lyr instanceof L.TileLayer)) return null;
+			const url = lyr._url;
+			if (typeof url !== "string" || url.length < 5) return null;
+			if (!/\{z\}/.test(url)) return null;
+			if (!/\{[xy]\}/.test(url)) return null;
+			const subs = opts.subdomains;
+			const sub = Array.isArray(subs) ? subs[0] :
+				(typeof subs === "string" && subs.length ? subs[0] : "a");
+			let cleaned = url.replace(/\{s\}/g, sub).replace(/\{r\}/g, "@2x");
+			if (/\{[^}]+\}/.test(cleaned.replace(/\{[xyz]\}/g, ""))) return null;
+			return { ...base, url: cleaned };
+		}
+
+		// Find the active base layer (lowest-z TileLayer in default
+		// tilePane). Used by the basemap-tracker swap path.
+		_activeBaseTiles(map) {
+			let found = null;
+			map.eachLayer((lyr) => {
+				if (found) return;
+				const spec = this._layerToMbSpec(lyr);
+				if (!spec || !spec.isBase) return;
+				found = { tiles: [spec.url], maxzoom: spec.maxzoom };
+			});
+			return found;
+		}
+
+		// Walk every active TileLayer and return all that can be
+		// mirrored, sorted by pane z-index (ascending = bottom-up draw
+		// order in Mapbox).
+		_extractOverlayLayers(map) {
+			const overlays = [];
+			map.eachLayer((lyr) => {
+				const spec = this._layerToMbSpec(lyr);
+				if (!spec || spec.isBase) return;
+				overlays.push(spec);
+			});
+			overlays.sort((a, b) => a.zIndex - b.zIndex);
+			return overlays;
+		}
+
+		// Drop every previously-mirrored overlay, then re-add the
+		// currently active ones. Called on layeradd/layerremove so
+		// toggling a Leaflet layer mirrors live into the 3D scene.
+		_syncOverlays(map, mbMap) {
+			// Standalone entry — `_fullResync` calls the same code but
+			// owns the `_hadPendingGetter` reset because it ALSO calls
+			// `_activeBaseTiles` (which can set the flag). Re-zero it
+			// here only when invoked directly (e.g. from style.load).
+			if (!this._inFullResync) this._hadPendingGetter = false;
+			return this._syncOverlaysImpl(map, mbMap);
+		}
+
+		_syncOverlaysImpl(map, mbMap) {
+			if (!mbMap) return;
+			// Don't gate on `isStyleLoaded()` — Mapbox sometimes
+			// returns false *inside* the style.load callback (race
+			// between event dispatch and the internal flag). Instead
+			// wrap the actual addSource/addLayer calls in try/catch
+			// and re-run on next animation frame if Mapbox isn't ready.
+			if (!mbMap.getStyle?.()) {
+				requestAnimationFrame(() => this._syncOverlaysImpl(map, mbMap));
+				return;
+			}
+			// Re-hide any panes created since the last sync (e.g.
+			// when a custom-canvas layer like INTVL or OIM Power is
+			// toggled on AFTER 3D was enabled — its onAdd creates a
+			// custom pane that defaults to opacity 1, so without
+			// this it would render its 2D content on top of the
+			// 3D scene, producing the double-render artefact).
+			this._hideHiddenable(map);
+			// Hook any `_dwMb3DReloadOn` events so layer-internal
+			// state changes (e.g. QLD Historical's `capturechange`
+			// when the scrubber moves to a different date) trigger a
+			// resync — which re-runs the URL getter and refetches
+			// tiles for the new capture.
+			this._wireReloadEvents(map, mbMap);
+			// Two-pass remove (layers, then sources). INTVL's vector
+			// source has a dependent fill layer; OIM future port will
+			// have multiple. Without two passes, source removal fails.
+			const oldIds = this._overlayIds || [];
+			for (const id of oldIds) {
+				try { if (mbMap.getLayer(id)) mbMap.removeLayer(id); } catch (_) {}
+			}
+			for (const id of oldIds) {
+				try { if (mbMap.getSource(id)) mbMap.removeSource(id); } catch (_) {}
+			}
+			this._overlayIds = [];
+			// Insert overlay layers BEFORE the route line so the route
+			// stays visible on top. Sky stays above everything.
+			const beforeId = mbMap.getLayer("dw-route-line") ? "dw-route-line" :
+				(mbMap.getLayer("sky") ? "sky" : undefined);
+			const specs = this._extractOverlayLayers(map);
+			specs.forEach((spec, i) => {
+				const id = `dw-overlay-${i}`;
+				try {
+					mbMap.addSource(id, {
+						type: "raster", tiles: [spec.url],
+						tileSize: 256, maxzoom: spec.maxzoom,
+					});
+					mbMap.addLayer({
+						id, type: "raster", source: id,
+						paint: {
+							"raster-opacity": spec.opacity,
+							"raster-fade-duration": 0,
+						},
+					}, beforeId);
+					this._overlayIds.push(id);
+				} catch (e) {
+					console.warn("[CustomTiles] 3D overlay mirror failed:", spec.url, e.message);
+				}
+			});
+			// Custom Mapbox styles attached via `_dwMb3DStyle` (e.g.
+			// INTVL's vector source). Each prefix-namespaces its
+			// sources / layer ids so multiple layers don't collide,
+			// and IDs are tracked on `_overlayIds` for the next purge.
+			let cIdx = 0;
+			map.eachLayer((lyr) => {
+				const style = lyr?._dwMb3DStyle;
+				if (!style) return;
+				const prefix = `dw-cust-${cIdx++}`;
+				const srcMap = {};
+				for (const [k, src] of Object.entries(style.sources || {})) {
+					const id = `${prefix}-${k}`;
+					srcMap[k] = id;
+					try {
+						mbMap.addSource(id, src);
+						this._overlayIds.push(id);
+					} catch (e) {
+						console.warn("[CustomTiles] 3D custom source:", id, e.message);
+					}
+				}
+				for (const layer of (style.layers || [])) {
+					const layerId = `${prefix}-${layer.id}`;
+					const layerSpec = { ...layer, id: layerId };
+					if (layer.source && srcMap[layer.source]) {
+						layerSpec.source = srcMap[layer.source];
+					}
+					try {
+						mbMap.addLayer(layerSpec, beforeId);
+						this._overlayIds.push(layerId);
+					} catch (e) {
+						console.warn("[CustomTiles] 3D custom layer:", layerId, e.message);
+					}
+				}
+			});
+			// One-shot retry if any token-aware getter returned null
+			// — gives the QLD CSRF/token bootstrap time to complete on
+			// its async path, then re-mirrors so QLD Roads / QLD Globe
+			// pop in once their tokens land.
+			if (this._hadPendingGetter && !this._pendingRetry) {
+				this._pendingRetry = setTimeout(() => {
+					this._pendingRetry = null;
+					if (this._active && this._mbMap) {
+						this._syncOverlays(map, this._mbMap);
+					}
+				}, 3000);
+			}
+		}
+
+		// Bi-directional viewport sync. The `_syncing` flag prevents the
+		// ping-pong: when our handler programmatically moves one map, the
+		// other map's resulting `moveend` is ignored.
+		// While 3D is on, the camera can be tilted + rotated but
+		// Leaflet's marker positioning is flat (north-up Mercator).
+		// Without this sync, waypoints + distance labels drift away
+		// from where they should land on the tilted terrain as the
+		// user pitches or orbits. Override each marker's CSS
+		// `transform` to whatever Mapbox would project it to, taking
+		// the parent mapPane's translate into account so the position
+		// is expressed in mapPane's local coordinate frame.
+		_syncMarkersToMapbox(map, mbMap) {
+			const mapPane    = map.getPane("mapPane");
+			const markerPane = map.getPane("markerPane");
+			if (!mapPane || !markerPane) return;
+			const t = mapPane.style.transform || "";
+			const m = /translate3d\(\s*(-?[\d.]+)px,\s*(-?[\d.]+)px/.exec(t);
+			const tx = m ? parseFloat(m[1]) : 0;
+			const ty = m ? parseFloat(m[2]) : 0;
+			map.eachLayer((lyr) => {
+				if (!(lyr instanceof L.Marker)) return;
+				const el = lyr._icon || lyr.getElement?.();
+				if (!el) return;
+				const latlng = lyr.getLatLng?.();
+				if (!latlng) return;
+				const point = mbMap.project([latlng.lng, latlng.lat]);
+				const px = Math.round(point.x - tx);
+				const py = Math.round(point.y - ty);
+				el.style.transform = `translate3d(${px}px, ${py}px, 0)`;
+			});
+		}
+
+		// MutationObserver on markerPane re-applies the Mapbox sync
+		// every time Leaflet mutates a marker's `style` attribute —
+		// which it does on every drag mousemove, on every zoom/pan
+		// step, and on the queued raf-batched reposition pass.
+		// Without this hook, dragging a waypoint leaves it visually
+		// stranded at Leaflet's flat-projection position (the user's
+		// reported "marker appears off the grid until you rotate the
+		// view"). The `syncing` guard prevents our own override from
+		// triggering the observer in an infinite loop.
+		_wireMarkerObserver(map, mbMap) {
+			if (this._markerObserver) return;
+			const markerPane = map.getPane("markerPane");
+			if (!markerPane) return;
+			let syncing = false;
+			this._markerObserver = new MutationObserver(() => {
+				if (syncing || !this._mbMap) return;
+				syncing = true;
+				try { this._syncMarkersToMapbox(map, mbMap); }
+				finally {
+					requestAnimationFrame(() => { syncing = false; });
+				}
+			});
+			this._markerObserver.observe(markerPane, {
+				attributes: true,
+				subtree: true,
+				attributeFilter: ["style"],
+			});
+		}
+
+		_unwireMarkerObserver() {
+			if (this._markerObserver) {
+				this._markerObserver.disconnect();
+				this._markerObserver = null;
+			}
+		}
+
+		_wireSync(map) {
+			// One-way sync: Mapbox → Leaflet. Every Mapbox `move` frame
+			// (drag, scroll, orbit, fly) feeds back into Leaflet so the
+			// underlying 2D state stays in sync — when the user toggles
+			// 3D off, Leaflet is already where the Mapbox camera left
+			// it. The reverse direction (Leaflet → Mapbox) is NOT
+			// wired: while 3D is on Mapbox owns gestures and Leaflet's
+			// `zoomend` events from our own sync would snap Mapbox back
+			// mid-animation, producing a double-zoom artefact.
+			this._handler3DMove = () => {
+				try {
+					const c = this._mbMap.getCenter();
+					const z = this._mbMap.getZoom();
+					// Mapbox z = Leaflet z - 1 because our raster sources
+					// declare tileSize: 256 while Mapbox defaults to 512.
+					// Without the +1, the mirrored basemap renders at
+					// half the user's expected scale.
+					map.setView([c.lat, c.lng], Math.round(z + 1),
+						{ animate: false });
+					// Reproject all Leaflet markers AFTER Leaflet has
+					// repositioned them per its own (flat) projection.
+					// Our override wins because it sets style.transform
+					// directly on the icon element.
+					this._syncMarkersToMapbox(map, this._mbMap);
+				} catch (_) {}
+			};
+			this._handlerResize = () => {
+				if (!this._mbMap) return;
+				try { this._mbMap.resize(); } catch (_) {}
+			};
+			// `move` (every frame) — keeps Leaflet state attached to
+			// the live Mapbox camera so the route polyline (which we
+			// re-extract on toggles) always has the current viewport.
+			this._mbMap.on("move", this._handler3DMove);
+			map.on("resize", this._handlerResize);
+		}
+
+		_unwireSync(map) {
+			if (this._mbMap && this._handler3DMove) {
+				try { this._mbMap.off("move", this._handler3DMove); } catch (_) {}
+			}
+			if (this._handlerResize) {
+				map.off("resize", this._handlerResize);
+			}
+			this._handler3DMove = this._handlerResize = null;
+		}
+
+		// Track Leaflet layer toggles. Split into two re-sync paths:
+		//
+		//   1. Tile/base/vector layer changes → `_fullResync` (heavy:
+		//      wipes overlay raster sources and re-adds, which makes
+		//      Mapbox refetch every tile). Trigger only when the
+		//      changed layer is something we actually mirror as a
+		//      Mapbox source — never for transient hover markers,
+		//      route SVG vertex pings, or popup pane churn.
+		//   2. Shape/marker layer changes (route edits, live-data
+		//      poll, vector decode arriving) → lightweight
+		//      `_renderLeafletShapes` + `_renderRoute` re-run. These
+		//      just rebuild the GeoJSON sources; no raster reload.
+		//
+		// Without this split, dynamic.watch's mouseover hover-indicator
+		// layer toggling on every mouse-enter/leave was triggering a
+		// full overlay reload — the user-reported "tileset keeps
+		// reloading whenever the mouse leaves the window" bug.
+		_wireBasemapTracker(map) {
+			let heavyDebounce = null, lightDebounce = null;
+			const needsFullResync = (lyr) => {
+				if (!lyr) return false;
+				if (lyr instanceof L.TileLayer) return true;
+				if (lyr._dwMb3DStyle) return true;
+				return false;
+			};
+			this._baseTracker = (e) => {
+				const mb = this._mbMap;
+				if (!mb || !mb.isStyleLoaded || !mb.isStyleLoaded()) return;
+				const isBase = e?.type === "baselayerchange";
+				const wantsFull = isBase || needsFullResync(e?.layer);
+				if (wantsFull) {
+					clearTimeout(heavyDebounce);
+					heavyDebounce = setTimeout(() => this._fullResync(map, mb), 80);
+				} else {
+					clearTimeout(lightDebounce);
+					lightDebounce = setTimeout(() => {
+						this._renderLeafletShapes(map, mb);
+						this._renderRoute(map, mb);
+					}, 80);
+				}
+			};
+			map.on("baselayerchange layeradd layerremove", this._baseTracker);
+		}
+
+		// Swap the active base + re-mirror all overlays + redraw the
+		// route. The base goes via setTiles() if available, otherwise a
+		// remove-and-re-add. All wrapped in try/catch because Mapbox v3
+		// throws on a stale-source mutation if the user is toggling
+		// rapidly.
+		_fullResync(map, mb) {
+			// Own the pending-getter reset for this whole pass so the
+			// base + overlay flag tracking are unified — otherwise
+			// `_syncOverlays` would reset the flag set by
+			// `_activeBaseTiles` and we'd lose the retry signal.
+			this._hadPendingGetter = false;
+			this._inFullResync = true;
+			try {
+				const t = this._activeBaseTiles(map);
+				// Always tear down + re-add the base in a known order
+				// rather than `setTiles`-in-place. The reason: when
+				// QLD Historical's catalog resolves AFTER overlays
+				// have been added, an in-place addLayer (beforeId:
+				// "sky") lands between the overlays and sky — i.e.
+				// ON TOP of the overlays. Re-inserting it just above
+				// `bg` guarantees the correct stacking regardless of
+				// the order events arrived in.
+				if (mb.getLayer("active-base")) mb.removeLayer("active-base");
+				if (mb.getSource("active-base")) mb.removeSource("active-base");
+				if (t) {
+					mb.addSource("active-base", {
+						type: "raster", tiles: t.tiles,
+						tileSize: 256, maxzoom: t.maxzoom,
+					});
+					// Insert immediately after `bg` (the background
+					// solid colour). Without `bg` (it should always
+					// exist) fall back to whatever's first.
+					const allLayers = mb.getStyle().layers;
+					const bgIdx = allLayers.findIndex(l => l.id === "bg");
+					const afterBgId = allLayers[bgIdx + 1]?.id;
+					mb.addLayer({
+						id: "active-base", type: "raster",
+						source: "active-base",
+						paint: { "raster-fade-duration": 0 },
+					}, afterBgId);
+				}
+			} catch (e) {
+				console.warn("[CustomTiles] 3D basemap swap failed:", e.message);
+			}
+			this._syncOverlays(map, mb);
+			this._renderLeafletShapes(map, mb);
+			this._renderRoute(map, mb);
+			this._inFullResync = false;
+		}
+
+		_unwireBasemapTracker(map) {
+			if (this._baseTracker) {
+				map.off("baselayerchange layeradd layerremove", this._baseTracker);
+				this._baseTracker = null;
+			}
+		}
+	}
+
+	// Injects a 3D-toggle button into dynamic.watch's native
+	// `.leaflet-planner-controls` row (the bar with travel-mode / undo /
+	// save / elevation / distance). The row is rendered late by the
+	// site's planner React tree, so we wait for it via MutationObserver.
+	// The button mimics the native `btn btn-default fixed-width` styling
+	// so it sits flush; an `active` class darkens it when 3D is on.
+	class Mode3DButton {
+		static attach(map, controller) {
+			const tryMount = () => {
+				const row = document.querySelector(".leaflet-planner-controls");
+				if (!row || row.querySelector(".dw-3d-btn")) return false;
+				const btn = document.createElement("button");
+				btn.type = "button";
+				btn.className = "btn btn-default fixed-width dw-3d-btn";
+				btn.id = "dw-3d-btn";
+				btn.title = "Toggle 3D terrain";
+				btn.setAttribute("aria-pressed", "false");
+				btn.innerHTML = '<i class="fa fa-cube"></i>';
+				const distance = row.querySelector(".distance");
+				if (distance) row.insertBefore(btn, distance);
+				else row.appendChild(btn);
+				btn.addEventListener("click", (e) => {
+					e.preventDefault();
+					const turningOn = !controller.isActive();
+					if (turningOn) {
+						controller.enable(map);
+						btn.classList.add("active");
+						btn.setAttribute("aria-pressed", "true");
+					} else {
+						controller.disable(map);
+						btn.classList.remove("active");
+						btn.setAttribute("aria-pressed", "false");
+					}
+					GM_setValue(CFG.MODE_3D_STATE_KEY, turningOn);
+				});
+				// Restore prior on/off state. Defer the actual enable so the
+				// site's planner finishes initialising — Mapbox GL grabbing
+				// the canvas before Leaflet is settled tends to thrash.
+				if (GM_getValue(CFG.MODE_3D_STATE_KEY, false)) {
+					setTimeout(() => {
+						if (controller.isActive()) return;
+						controller.enable(map);
+						btn.classList.add("active");
+						btn.setAttribute("aria-pressed", "true");
+					}, 300);
+				}
+				return true;
+			};
+			if (tryMount()) return;
+			const obs = new MutationObserver(() => {
+				if (tryMount()) obs.disconnect();
+			});
+			obs.observe(document.body, { childList: true, subtree: true });
 		}
 	}
 
@@ -4909,6 +6500,19 @@
 		_injectLayers(ctrl, map) {
 			if (this.injected) return;
 			this.injected = true;
+			// Mode3DController reads `this._app._ctrl` to decide which
+			// layers are bases vs overlays (the L.Control.Layers
+			// internal registry has the authoritative `overlay`
+			// boolean — needed to correctly classify overlays that
+			// LIVE in tilePane like Strava Heatmap). Set here so the
+			// `_layerToMbSpec` path doesn't fall back to the pane
+			// heuristic, which would misclassify Strava as a base.
+			this._ctrl = ctrl;
+			// Expose for the e2e harness (Playwright) so it can flip
+			// overlays directly via Leaflet's control registry without
+			// fighting the DOM layer-panel that's covered by modals at
+			// boot. Harmless in production.
+			try { pageWin._dwLayerCtrl = ctrl; } catch (_) {}
 
 			try {
 				this.layers[CFG.LAYER_GOOGLE] =
@@ -4995,10 +6599,6 @@
 				this.layers[CFG.LAYER_TELECOM] = new TelecomsLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_TELECOM], CFG.LAYER_TELECOM);
 
-				this.layers[CFG.LAYER_PARKS] =
-					new NationalParksLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_PARKS], CFG.LAYER_PARKS);
-
 				this.layers[CFG.LAYER_LIGHTPOL] =
 					new LightPollutionLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_LIGHTPOL], CFG.LAYER_LIGHTPOL);
@@ -5010,15 +6610,15 @@
 				this.layers[CFG.LAYER_QPWS] = new QpwsLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_QPWS], CFG.LAYER_QPWS);
 
-				this.layers[CFG.LAYER_RELIEF] = new QldReliefLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_RELIEF], CFG.LAYER_RELIEF);
-
 				this.layers[CFG.LAYER_INTVL_GLOBAL] =
 					new IntvlGlobalTilesLayerProvider().create();
 				ctrl.addOverlay(
 					this.layers[CFG.LAYER_INTVL_GLOBAL],
 					CFG.LAYER_INTVL_GLOBAL,
 				);
+
+				this._mode3DController = new Mode3DController(this);
+				Mode3DButton.attach(map, this._mode3DController);
 
 				if (!map.getPane("dwRoadsPane")) {
 					map.createPane("dwRoadsPane");
@@ -5056,6 +6656,34 @@
 						this._syncZoomLevel(map);
 					}
 				});
+
+				// Defensive try/catch wrap on every injected layer's
+				// onAdd/onRemove so a thrown error during async setup
+				// (e.g. token bootstrap fails, in-flight fetch aborts
+				// mid-decode) doesn't break Leaflet's L.Control.Layers
+				// state. Without this, if `removeLayer` throws inside
+				// the control's _onInputClick loop, the rest of the
+				// loop never runs and the checkbox / map.hasLayer
+				// state can desync — the user sees the toggle move
+				// but the layer doesn't actually add or remove,
+				// and the layer becomes "stuck".
+				for (const [name, layer] of Object.entries(this.layers || {})) {
+					if (!layer) continue;
+					const origOnAdd    = layer.onAdd;
+					const origOnRemove = layer.onRemove;
+					if (typeof origOnAdd === "function") {
+						layer.onAdd = function (m) {
+							try { return origOnAdd.call(this, m); }
+							catch (e) { console.warn(`[CustomTiles] onAdd '${name}':`, e); }
+						};
+					}
+					if (typeof origOnRemove === "function") {
+						layer.onRemove = function (m) {
+							try { return origOnRemove.call(this, m); }
+							catch (e) { console.warn(`[CustomTiles] onRemove '${name}':`, e); }
+						};
+					}
+				}
 
 				this._restoreLayer(map);
 				this._restoreOverlays(map, ctrl);
@@ -5480,6 +7108,11 @@
 				".popup-on-location .dw-sv-btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; margin: 6px 0 0; padding: 12px 16px; font-size: 14px; font-family: inherit; font-weight: 500; line-height: 1.2; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; border-radius: 10px; cursor: pointer; box-sizing: border-box; }",
 				".popup-on-location .dw-sv-btn:hover { background: #dbeafe; border-color: #93c5fd; }",
 				".popup-on-location .dw-sv-btn svg { flex-shrink: 0; }",
+				// 3D toggle in the planner action row. Matches the native
+				// btn-default look; `.active` darkens it the same way
+				// Bootstrap 3 does for pressed buttons.
+				".dw-3d-btn { padding: 5px 8px; }",
+				".dw-3d-btn.active { background: #e0e0e0; border-color: #999; box-shadow: inset 0 3px 5px rgba(0,0,0,.125); }",
 				".dw-flight-icon { background: none !important; border: none !important; }",
 				".dw-flight-tip { font-size: 11px; line-height: 1.4; }",
 				// Geocache icon — overflow:visible so the favourites-points
