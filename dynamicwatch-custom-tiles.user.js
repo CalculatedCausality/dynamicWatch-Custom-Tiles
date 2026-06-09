@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.23
+// @version      7.9.25
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -26,6 +26,7 @@
 // @connect      www2.lightpollutionmap.info
 // @connect      www.onthehouse.com.au
 // @connect      d1yalngj9nsyl4.cloudfront.net
+// @connect      www.geocaching.com
 // @run-at       document-start
 // ==/UserScript==
 
@@ -118,7 +119,18 @@
 		LAYER_TOPO:    "QLD Topo",
 		LAYER_RELIEF:  "QLD Relief",
 		LAYER_INTVL_GLOBAL: "INTVL Global Map",
+		LAYER_GEOCACHING: "Geocaches",
 		OVERLAY_STATE_KEY: "dw_active_overlays",
+
+		// Geocaching.com's web map endpoint. POSTed with a JSON body
+		// containing a bbox; reuses the user's existing session cookie via
+		// GM_xmlhttpRequest's privileged cross-origin send. Not a public
+		// API — Groundspeak may change the shape at any time. Requires the
+		// user to be logged in to geocaching.com in the same browser; if
+		// they're not, the endpoint 302s to a login page and we render
+		// nothing with a one-time console hint.
+		GEOCACHING_MAP_ENDPOINT:
+			"https://www.geocaching.com/api/proxy/web/search/v2",
 
 		// INTVL global Mapbox Vector Tile (MVT) CDN. Each tile is a PBF
 		// containing a 'territories' layer of POLYGON features with
@@ -261,7 +273,7 @@
 		{
 			header: "Live data",
 			names:  [CFG.LAYER_FLIGHTS, CFG.LAYER_MARINE,
-			         CFG.LAYER_INTVL_GLOBAL],
+			         CFG.LAYER_INTVL_GLOBAL, CFG.LAYER_GEOCACHING],
 		},
 		{
 			header: "Heatmaps",
@@ -2073,6 +2085,257 @@
 			});
 
 			return new MTLayer();
+		}
+	}
+
+	/* -- Geocaching.com -----------------------------------------------------
+	 *
+	 * Queries the public web map endpoint with the user's existing
+	 * geocaching.com session cookie via GM_xmlhttpRequest. No public API —
+	 * Groundspeak treats the proxy endpoints as private, so the shape can
+	 * change without notice and we keep the fetch behind a generation
+	 * counter + debounce so a fast pan doesn't flood the host.
+	 *
+	 * Login required: if the user isn't authenticated, the endpoint 302s to
+	 * a login page. We surface a single console hint on the first such
+	 * response and render nothing — toggling the layer off and on after
+	 * logging in retries cleanly.
+	 *
+	 * Hard-zoomed in: at world view geocaching.com itself clusters; we
+	 * gate the fetch at minZoom=10 so we don't pull the entire country.
+	 */
+	class GeocachingLayerProvider extends LayerProvider {
+		create() {
+			const MIN_ZOOM     = 10;
+			const TAKE         = 500;     // server-side cap, ~enough for any city block
+			const DEBOUNCE_MS  = 500;
+
+			// Single-letter type codes used by geocaching.com — kept short
+			// so the marker label fits inside a 20px divIcon.
+			const TYPE_LABELS = {
+				2:  "T",   // Traditional
+				3:  "M",   // Multi
+				8:  "?",   // Mystery / Unknown
+				5:  "L",   // Letterbox Hybrid
+				6:  "E",   // Event
+				11: "C",   // Webcam
+				137:"E",   // Earthcache
+				1858:"W",  // Wherigo
+				4:  "V",   // Virtual
+				13: "C",   // Cache In Trash Out Event
+			};
+			const TYPE_COLOR = {
+				2: "#1f8e3e", 3: "#fcb900", 8: "#1e3fae",
+				5: "#5b2a86", 6: "#d33a3a", 11:"#444",
+				137:"#7d5a2a", 1858:"#2aa198",
+				4: "#888",   13:"#d33a3a",
+			};
+
+			let warnedAuth = false;
+
+			const GeoLayer = L.Layer.extend({
+				initialize() {
+					this._group     = null;
+					this._debounce  = null;
+					this._gen       = 0;
+					this._inflight  = null;
+				},
+
+				onAdd(map) {
+					if (!map.getPane("dwGeocachingPane")) {
+						map.createPane("dwGeocachingPane");
+						map.getPane("dwGeocachingPane").style.zIndex = "445";
+					}
+					this._group = L.layerGroup().addTo(map);
+					this._fetchSoon();
+					map.on("moveend zoomend", this._onViewChange, this);
+				},
+
+				onRemove(map) {
+					clearTimeout(this._debounce);
+					this._debounce = null;
+					map.off("moveend zoomend", this._onViewChange, this);
+					if (this._inflight) {
+						gmCancel(this._inflight);
+						this._inflight = null;
+					}
+					if (this._group) {
+						this._group.remove();
+						this._group = null;
+					}
+				},
+
+				_onViewChange() { this._fetchSoon(); },
+
+				_fetchSoon() {
+					clearTimeout(this._debounce);
+					this._debounce = setTimeout(() => this._fetch(), DEBOUNCE_MS);
+				},
+
+				_fetch() {
+					const map = this._map;
+					if (!map || !this._group) return;
+					if (map.getZoom() < MIN_ZOOM) {
+						this._group.clearLayers();
+						return;
+					}
+
+					const myGen = ++this._gen;
+					if (this._inflight) gmCancel(this._inflight);
+
+					const b = map.getBounds();
+					// search/v2 takes box=NW_lat,NW_lng,SE_lat,SE_lng plus a
+					// few sort/paging params. Origin is the map centre — used
+					// server-side to populate distance fields we ignore.
+					const c = map.getCenter();
+					// Parameter shape is taken from cgeo (the open-source
+					// reverse-engineered geocaching.com client) — same path,
+					// same box format (N,W,S,E), same origin/rad pair.
+					// Do NOT pass `app=` — the proxy 401s certain whitelisted
+					// values (notably `app=cgeo`).
+					const origin =
+						`${c.lat.toFixed(6)},${c.lng.toFixed(6)}`;
+					const params = new URLSearchParams({
+						box: [
+							b.getNorth().toFixed(6),
+							b.getWest().toFixed(6),
+							b.getSouth().toFixed(6),
+							b.getEast().toFixed(6),
+						].join(","),
+						take:    String(TAKE),
+						skip:    "0",
+						asc:     "true",
+						sort:    "distance",
+						origin,
+						dorigin: origin,
+						rad:     "16000",
+					});
+					const url = `${CFG.GEOCACHING_MAP_ENDPOINT}?${params}`;
+
+					this._inflight = gmJsonGet(url, {
+						headers: {
+							"Accept":           "application/json",
+							"X-Requested-With": "XMLHttpRequest",
+							"Referer":          "https://www.geocaching.com/play/map",
+						},
+						timeout: 20000,
+					}, (err, data, raw) => {
+						this._inflight = null;
+						if (myGen !== this._gen || !this._group) return;
+
+						if (err) {
+							// 401/403 == not logged in. Most common failure
+							// mode for new users — surface once so they
+							// know to log in, then stay quiet.
+							const status = raw && raw.status;
+							if ((status === 401 || status === 403) && !warnedAuth) {
+								warnedAuth = true;
+								console.warn(
+									"[CustomTiles] Geocaches: log in to " +
+									"geocaching.com in this browser to load caches");
+							} else if (status !== 401 && status !== 403) {
+								console.warn("[CustomTiles] Geocaches fetch:",
+									err.message, status || "");
+							}
+							this._group.clearLayers();
+							return;
+						}
+						// search/v2 returns a top-level array; older Map/Filter
+						// builds wrapped it in {results}/{data}. Accept any.
+						const list = Array.isArray(data)
+							? data
+							: (data && (data.results || data.data)) || [];
+						this._render(list);
+					});
+				},
+
+				_render(rows) {
+					if (!this._group) return;
+					this._group.clearLayers();
+					for (const c of rows) {
+						// Owner-corrected coords win over the listing's posted
+						// coords (mystery caches in particular relocate to
+						// their solved location once you've logged a find).
+						const pc = c.userCorrectedCoordinates ||
+							c.postedCoordinates || c.coordinates;
+						if (!pc) continue;
+						const lat = pc.latitude, lon = pc.longitude;
+						if (lat == null || lon == null) continue;
+
+						// cacheStatus: 0 = active, others = disabled/archived.
+						// Hide archived; render disabled with reduced opacity.
+						if (c.cacheStatus != null && c.cacheStatus > 1) continue;
+						const disabled = c.cacheStatus === 1;
+
+						const typeId = c.geocacheType || c.type || 2;
+						const label  = TYPE_LABELS[typeId] || "G";
+						const color  = TYPE_COLOR[typeId]  || "#1f8e3e";
+						const found  = !!c.userFound;
+						const dnf    = !!c.userDidNotFind;
+						const fill   = found ? "#888" : dnf ? "#aa3333" : color;
+						const opacity = disabled ? 0.5 : 1;
+
+						const html =
+							`<div class="dw-geo-pin" style="` +
+							`background:${fill};color:#fff;opacity:${opacity};` +
+							`width:20px;height:20px;border-radius:50%;` +
+							`display:flex;align-items:center;justify-content:center;` +
+							`font:bold 11px/1 sans-serif;` +
+							`border:1px solid #222;` +
+							`box-shadow:0 0 1px rgba(0,0,0,.6);` +
+							`">${label}</div>`;
+
+						const icon = L.divIcon({
+							className: "dw-geo-icon",
+							html,
+							iconSize:   [20, 20],
+							iconAnchor: [10, 10],
+						});
+
+						const code  = c.code || c.referenceCode || "";
+						const name  = c.name || code;
+						const diff  = c.difficulty != null ? c.difficulty : "?";
+						const terr  = c.terrain    != null ? c.terrain    : "?";
+						const size  = c.containerType || c.size || "";
+						const owner = c.owner && c.owner.username || "";
+						const favs  = c.favoritePoints || 0;
+						const tipHtml =
+							`<b>${_escHtml(name)}</b>` +
+							(found ? " ✓" : dnf ? " ✗" : "") +
+							(disabled ? " <i>(disabled)</i>" : "") +
+							`<br><span class="dw-cad-sub">` +
+							`${_escHtml(code)} · D ${diff} / T ${terr}` +
+							(size ? " · " + _escHtml(String(size)) : "") +
+							(favs ? ` · ♥ ${favs}` : "") +
+							(owner ? "<br>by " + _escHtml(owner) : "") +
+							`</span>`;
+
+						const marker = L.marker([lat, lon], {
+							icon,
+							pane:        "dwGeocachingPane",
+							interactive: true,
+						}).bindTooltip(tipHtml, {
+							className: "dw-flight-tip",
+							sticky:    true,
+						});
+
+						if (code) {
+							marker.on("click", () => {
+								window.open(
+									`https://www.geocaching.com/geocache/${code}`,
+									"_blank", "noopener");
+							});
+						}
+						marker.addTo(this._group);
+					}
+				},
+
+				getAttribution() {
+					return 'Caches © <a href="https://www.geocaching.com" target="_blank" rel="noreferrer">Geocaching.com</a>';
+				},
+			});
+
+			return new GeoLayer();
 		}
 	}
 
@@ -4593,6 +4856,11 @@
 				this.layers[CFG.LAYER_MARINE] =
 					new MarineTrafficLayerProvider().create();
 				ctrl.addOverlay(this.layers[CFG.LAYER_MARINE], CFG.LAYER_MARINE);
+
+				this.layers[CFG.LAYER_GEOCACHING] =
+					new GeocachingLayerProvider().create();
+				ctrl.addOverlay(
+					this.layers[CFG.LAYER_GEOCACHING], CFG.LAYER_GEOCACHING);
 
 				this.layers[CFG.LAYER_MOBILE] =
 					new MobileCoverageLayerProvider().create();
