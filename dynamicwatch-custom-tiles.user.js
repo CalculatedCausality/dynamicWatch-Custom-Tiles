@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.57
+// @version      7.9.58
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -4943,6 +4943,16 @@
 
 		enable(map) {
 			if (this._active || this._loading) return;
+			// Defensive cleanup of any leftover state from a prior
+			// session that didn't fully tear down (e.g. fast-toggle
+			// race where disable fired while enable was still loading,
+			// then the cancel-path bailed and left orphaned DOM /
+			// pane state behind). Without this, the second enable can
+			// mount a fresh Mapbox container on top of a previous one
+			// and end up with the view stuck in a half-2D / half-3D
+			// state where the camera can't rotate.
+			const stale = document.getElementById("dw-mb-container");
+			if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
 			this._loading = true;
 			this._cancelLoad = false;
 			ensureMapboxLoaded().then((mapboxgl) => {
@@ -4964,7 +4974,15 @@
 		}
 
 		disable(map) {
-			if (this._loading) { this._cancelLoad = true; return; }
+			if (this._loading) {
+				// Tell the in-flight enable to bail when it resolves,
+				// but ALSO scrub any partial DOM the parallel race
+				// might have left (the mount/init steps are async).
+				this._cancelLoad = true;
+				const stale = document.getElementById("dw-mb-container");
+				if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
+				return;
+			}
 			if (!this._active) return;
 			this._unwireBasemapTracker(map);
 			this._unwireSync(map);
@@ -4977,6 +4995,14 @@
 			// drop them so the next enable() creates fresh ones.
 			this._popup = null;
 			this._hoverBound = null;
+			// Cancel any pending getter-retry timer that was scheduled
+			// while 3D was active (would otherwise fire after we've
+			// already torn the controller down and call into a null
+			// `_mbMap`).
+			if (this._pendingRetry) {
+				clearTimeout(this._pendingRetry);
+				this._pendingRetry = null;
+			}
 			this._unmount(map);
 			this._active = false;
 			console.info("[CustomTiles] 3D Mode disabled");
