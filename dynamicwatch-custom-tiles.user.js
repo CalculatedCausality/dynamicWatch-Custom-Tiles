@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.65
+// @version      7.9.68
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -5038,7 +5038,32 @@
 		// panes created AFTER 3D was enabled (user toggles INTVL or
 		// flips a custom-canvas layer mid-session) get hidden too.
 		_hideHiddenable(map) {
-			const tracked = new Set((this._hiddenPanes || []).map(p => p.name));
+			// Inject a global CSS rule with `!important` so even if
+			// Leaflet (or dynamic.watch) resets pane.style.opacity
+			// inline during a setView / animation, the hidden panes
+			// stay invisible. Without `!important`, the route SVG in
+			// overlayPane and the basemap tiles in tilePane briefly
+			// flash through the Mapbox canvas mid-motion — that's the
+			// "route shows as 2D while in motion before snapping" bug.
+			// The class `dw-3d-active` is added to the leaflet root in
+			// the mount block below; removed on `disable`.
+			if (!document.getElementById("dw-3d-hide-styles")) {
+				const css = document.createElement("style");
+				css.id = "dw-3d-hide-styles";
+				css.textContent = `
+					.dw-3d-active .leaflet-tile-pane,
+					.dw-3d-active .leaflet-overlay-pane,
+					.dw-3d-active .leaflet-shadow-pane,
+					.dw-3d-active .leaflet-tooltip-pane,
+					.dw-3d-active [class*="leaflet-pane"][class*="dw"] {
+						opacity: 0 !important;
+					}
+				`;
+				document.head.appendChild(css);
+			}
+			map.getContainer().classList.add("dw-3d-active");
+			this._hiddenPanes ??= [];
+			const tracked = new Set(this._hiddenPanes.map(p => p.name));
 			const hide = (name) => {
 				if (tracked.has(name)) return;
 				const pane = map.getPane(name);
@@ -5103,6 +5128,7 @@
 				this._mbContainer.parentNode.removeChild(this._mbContainer);
 			}
 			this._mbContainer = null;
+			map.getContainer().classList.remove("dw-3d-active");
 			for (const entry of (this._hiddenPanes || [])) {
 				const pane = map.getPane(entry.name);
 				if (pane) pane.style.opacity = entry.prev || "";
@@ -5917,6 +5943,16 @@
 						paint: {
 							"raster-opacity": spec.opacity,
 							"raster-fade-duration": 0,
+							// Make the raster emit at full strength so
+							// Mapbox's terrain-lighting model doesn't
+							// dim it. Without this, an overlay with
+							// the same opacity as the 2D version (0.8
+							// for Strava) looks ~40% darker in 3D
+							// because the terrain shader treats it
+							// like an unlit surface. emissive=1 makes
+							// the raster behave like a self-lit decal
+							// — colors come through as designed.
+							"raster-emissive-strength": 1,
 						},
 					}, beforeId);
 					this._overlayIds.push(id);
@@ -6000,6 +6036,31 @@
 			const tx = mapPanePos.x, ty = mapPanePos.y;
 			const cache = this._markerCache;
 			if (!cache) return;
+			// Self-pruning: when dynamic.watch removes a marker via
+			// a path that DOESN'T fire `layerremove` (e.g. inside a
+			// LayerGroup whose parent is removed, or a marker reused
+			// for a different waypoint), the icon ends up detached
+			// from the markerPane but our cache still holds it. We
+			// then keep writing translate3d() to a detached DOM
+			// node — invisible but cosmetic garbage. Worse, if the
+			// marker's icon is re-attached later (Leaflet caches
+			// elements), we re-position a phantom that the user
+			// thought was deleted. Pruning at sync time keeps the
+			// cache honest with no per-frame DOM cost beyond what
+			// we're already doing for the live markers.
+			const toPrune = [];
+			for (const lyr of cache) {
+				if (!lyr._map) {
+					toPrune.push(lyr);
+					continue;
+				}
+				const el = lyr._icon || lyr.getElement?.();
+				if (!el || !el.parentNode) {
+					toPrune.push(lyr);
+					continue;
+				}
+			}
+			for (const lyr of toPrune) cache.delete(lyr);
 			// Project markers via plain `mb.project([lng, lat])`. This
 			// puts them at the sea-level pixel for the lng/lat, which
 			// is what the Mapbox line layer also uses for the route
@@ -6286,10 +6347,15 @@
 					// half the user's expected scale.
 					map.setView([c.lat, c.lng], Math.round(z + 1),
 						{ animate: false });
-					// Reproject all Leaflet markers via the rAF-batched
-					// scheduler so multiple Mapbox `move` events per
-					// frame coalesce into a single sync per paint.
-					this._requestMarkerSync(map, this._mbMap);
+					// SYNCHRONOUS sync on Mapbox `move` — rAF batching
+					// is for the MutationObserver path (where multiple
+					// observers can fire per frame). On `move` we know
+					// exactly that we need to sync THIS frame, and the
+					// rAF deferral leaves Leaflet's flat-projected
+					// positions visible for one paint — that's the
+					// "km markers show in 2D before snapping back to
+					// the correct 3D spot upon release" symptom.
+					this._syncMarkersToMapbox(map, this._mbMap);
 				} catch (_) {}
 			};
 			this._handlerResize = () => {
@@ -6429,6 +6495,26 @@
 			this._syncOverlays(map, mb);
 			this._renderLeafletShapes(map, mb);
 			this._renderRoute(map, mb);
+			// Enforce final layer order so neither a late addLayer
+			// (Strava re-mirrored after active-base was rebuilt) nor
+			// a Mapbox style-load reorder can leave the base painted
+			// ON TOP of the overlays. The "Strava heatmap not
+			// rendering above the base" symptom was exactly this
+			// race. Bottom-to-top:
+			//   bg → active-base → overlays → shapes → route → sky
+			try {
+				const want = ["bg", "active-base",
+					...(this._overlayIds || []),
+					...(this._shapeIds   || []),
+					"dw-route-line", "sky"];
+				for (let i = 0; i < want.length - 1; i++) {
+					const id = want[i], next = want[i + 1];
+					if (mb.getLayer(id) && mb.getLayer(next)) {
+						mb.moveLayer(id, next);
+					}
+				}
+				if (mb.getLayer("sky")) mb.moveLayer("sky");
+			} catch (_) {}
 			this._inFullResync = false;
 		}
 
