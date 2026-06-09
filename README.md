@@ -2,6 +2,14 @@
 
 A Tampermonkey userscript that improves the [dynamicWatch](https://dynamic.watch) trip planner with better map layers and a few quality-of-life tweaks.
 
+### Install
+
+[<img src="https://www.tampermonkey.net/images/icon128.png" width="48" alt="Tampermonkey" align="left">](https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles/raw/main/dynamicwatch-custom-tiles.user.js)
+
+Already have Tampermonkey? **[Click here to install](https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles/raw/main/dynamicwatch-custom-tiles.user.js)** — the link opens Tampermonkey's install dialog directly. No need to copy-paste anything.
+
+Don't have Tampermonkey yet? [Get it for your browser](https://www.tampermonkey.net/) (Chrome, Firefox, Edge, Safari, Opera), then come back and click the install link.
+
 ---
 
 ## Features
@@ -23,9 +31,9 @@ The stock dynamicWatch map only ships with OpenStreetMap/topo. This script adds 
 
 **QLD Labels** and **QLD Roads** are injected as overlays and toggle on/off automatically when you switch to or away from a QLD base layer. **VIC Labels** and **NT Labels** work the same way for their respective base layers. None of these clutter the layer switcher.
 
-| QLD Globe + Strava Heatmap | QLD Historical (1972) |
-|---|---|
-| ![QLD Globe aerial imagery with Strava heatmap overlay showing trail activity](images/screenshot-strava.png) | ![QLD Historical layer showing a 1972 aerial capture with the date navigator control](images/screenshot-historical.png) |
+| QLD Globe + Strava Heatmap | QLD Historical (1972) | INTVL Territories + Geocaches |
+|---|---|---|
+| ![QLD Globe aerial imagery with Strava heatmap overlay showing trail activity](images/screenshot-strava.png) | ![QLD Historical layer showing a 1972 aerial capture with the date navigator control](images/screenshot-historical.png) | ![INTVL Global Map running-territory polygons rendered alongside Geocaching.com cache markers, with a hover tooltip showing the territory's area and capture time](images/screenshot-INTVL-Geocaching.png) |
 
 ### Historical imagery navigator
 
@@ -45,7 +53,9 @@ The ⚙ **Manage layers** link at the bottom of the layer switcher lets you hide
 
 ---
 
-## Installation
+## Manual install (if the one-click link above doesn't work)
+
+If Tampermonkey doesn't pop the install dialog for some reason — for example, because the GitHub raw URL hits a download instead of an `installable` redirect:
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) for your browser.
 2. Open Tampermonkey → **Create a new script**.
