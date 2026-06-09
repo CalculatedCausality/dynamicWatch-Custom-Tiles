@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.69
+// @version      7.9.71
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -662,6 +662,15 @@
 			data: opts.data,
 			responseType: opts.responseType,
 			timeout: opts.timeout || 25000,
+			// Explicitly opt INTO same-domain cookies. Desktop
+			// Tampermonkey defaults to `anonymous: false` (cookies
+			// included) but several mobile userscript managers —
+			// notably "Userscripts" on iOS Safari — default to
+			// `true` (cookies stripped). That's the silent reason
+			// geocaching.com fetches return 401 only on mobile:
+			// the session cookie never gets sent. Setting the flag
+			// explicitly normalises behaviour across managers.
+			anonymous: opts.anonymous === true ? true : false,
 			onload: (r) => {
 				if (handle.aborted) return;
 				cb(null, r);
@@ -2567,18 +2576,26 @@
 						if (myGen !== this._gen || !this._group) return;
 
 						if (err) {
-							// 401/403 == not logged in. Most common failure
-							// mode for new users — surface once so they
-							// know to log in, then stay quiet.
 							const status = raw && raw.status;
+							// 401/403 = no session cookie. On desktop
+							// this usually means "not logged in". On
+							// mobile it can ALSO mean "userscript
+							// manager stripped the cookie" — log the
+							// distinction so the user can debug.
 							if ((status === 401 || status === 403) && !warnedAuth) {
 								warnedAuth = true;
+								const isMobile = /Mobi|Android|iPhone|iPad/i.test(
+									navigator.userAgent);
 								console.warn(
-									"[CustomTiles] Geocaches: log in to " +
-									"geocaching.com in this browser to load caches");
+									"[CustomTiles] Geocaches: HTTP " + status +
+									" from geocaching.com — " +
+									(isMobile
+										? "either you're not logged in to geocaching.com in this browser, OR the mobile userscript manager isn't forwarding cookies (try toggling \"Allow cross-origin cookies\" in the manager's settings). Confirm by visiting geocaching.com/play/map directly in this browser — if it loads caches there, the userscript manager is the issue."
+										: "log in to geocaching.com in this browser to load caches."));
 							} else if (status !== 401 && status !== 403) {
 								console.warn("[CustomTiles] Geocaches fetch:",
-									err.message, status || "");
+									err.message, "status=" + (status || "?"),
+									(raw?.responseText || "").slice(0, 200));
 							}
 							this._group.clearLayers();
 							return;
@@ -5278,6 +5295,13 @@
 			// MUST run on its first call.
 			this._wiredClick   = new Set();
 			this._lastRouteSig = null;
+			// Reset move-state flags so a previous session that
+			// disabled mid-move can't leave the new session thinking
+			// it's already moving (which would suppress marker sync
+			// and keep markerPane hidden).
+			this._isMoving = false;
+			this._markerPanePrevVis = null;
+			this._syncRequested = false;
 			// Patch Leaflet's flat (Point → LatLng) methods to route
 			// through Mapbox's terrain-aware unproject — fixes clicks
 			// landing at the wrong terrain spot AND keeps dragged
@@ -6344,6 +6368,23 @@
 			// wired: while 3D is on Mapbox owns gestures and Leaflet's
 			// `zoomend` events from our own sync would snap Mapbox back
 			// mid-animation, producing a double-zoom artefact.
+			// Hide markerPane on movestart, show + resync on moveend.
+			// Per-frame Mapbox→Leaflet reprojection of every marker
+			// can't keep up cleanly during fast rotation / zoom —
+			// markers visually slide along curves that look glitchy
+			// even when the math is right (Leaflet's marker icon is a
+			// CSS-positioned div that doesn't share Mapbox's 3D
+			// projection pipeline). Hiding the whole pane during
+			// motion is both perfect-looking (no slide) AND much
+			// cheaper than projecting N markers at 60 Hz.
+			this._handler3DMoveStart = () => {
+				this._isMoving = true;
+				const p = map.getPane("markerPane");
+				if (p && this._markerPanePrevVis == null) {
+					this._markerPanePrevVis = p.style.visibility || "";
+					p.style.visibility = "hidden";
+				}
+			};
 			this._handler3DMove = () => {
 				try {
 					const c = this._mbMap.getCenter();
@@ -6354,36 +6395,54 @@
 					// half the user's expected scale.
 					map.setView([c.lat, c.lng], Math.round(z + 1),
 						{ animate: false });
-					// SYNCHRONOUS sync on Mapbox `move` — rAF batching
-					// is for the MutationObserver path (where multiple
-					// observers can fire per frame). On `move` we know
-					// exactly that we need to sync THIS frame, and the
-					// rAF deferral leaves Leaflet's flat-projected
-					// positions visible for one paint — that's the
-					// "km markers show in 2D before snapping back to
-					// the correct 3D spot upon release" symptom.
-					this._syncMarkersToMapbox(map, this._mbMap);
+					// Skip the per-frame marker sync while the pane is
+					// hidden — it's invisible, no point projecting.
+					if (!this._isMoving) {
+						this._syncMarkersToMapbox(map, this._mbMap);
+					}
 				} catch (_) {}
+			};
+			this._handler3DMoveEnd = () => {
+				this._isMoving = false;
+				const p = map.getPane("markerPane");
+				if (p && this._markerPanePrevVis != null) {
+					p.style.visibility = this._markerPanePrevVis;
+					this._markerPanePrevVis = null;
+				}
+				// Final sync at rest so markers land on the new
+				// camera state before the pane unhides.
+				try { this._syncMarkersToMapbox(map, this._mbMap); } catch (_) {}
 			};
 			this._handlerResize = () => {
 				if (!this._mbMap) return;
 				try { this._mbMap.resize(); } catch (_) {}
 			};
-			// `move` (every frame) — keeps Leaflet state attached to
-			// the live Mapbox camera so the route polyline (which we
-			// re-extract on toggles) always has the current viewport.
-			this._mbMap.on("move", this._handler3DMove);
+			this._mbMap.on("movestart", this._handler3DMoveStart);
+			this._mbMap.on("move",      this._handler3DMove);
+			this._mbMap.on("moveend",   this._handler3DMoveEnd);
 			map.on("resize", this._handlerResize);
 		}
 
 		_unwireSync(map) {
-			if (this._mbMap && this._handler3DMove) {
-				try { this._mbMap.off("move", this._handler3DMove); } catch (_) {}
+			if (this._mbMap) {
+				try { if (this._handler3DMoveStart) this._mbMap.off("movestart", this._handler3DMoveStart); } catch (_) {}
+				try { if (this._handler3DMove)      this._mbMap.off("move",      this._handler3DMove); } catch (_) {}
+				try { if (this._handler3DMoveEnd)   this._mbMap.off("moveend",   this._handler3DMoveEnd); } catch (_) {}
 			}
 			if (this._handlerResize) {
 				map.off("resize", this._handlerResize);
 			}
-			this._handler3DMove = this._handlerResize = null;
+			// Restore markerPane visibility if we were in a mid-move
+			// state when disable fired (no moveend would arrive after
+			// mbMap is gone).
+			const p = map.getPane?.("markerPane");
+			if (p && this._markerPanePrevVis != null) {
+				p.style.visibility = this._markerPanePrevVis;
+				this._markerPanePrevVis = null;
+			}
+			this._isMoving = false;
+			this._handler3DMoveStart = this._handler3DMove = null;
+			this._handler3DMoveEnd = this._handlerResize = null;
 		}
 
 		// Track Leaflet layer toggles. Split into two re-sync paths:
