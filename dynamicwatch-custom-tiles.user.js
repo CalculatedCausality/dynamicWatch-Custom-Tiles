@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.58
+// @version      7.9.65
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -4944,41 +4944,49 @@
 		enable(map) {
 			if (this._active || this._loading) return;
 			// Defensive cleanup of any leftover state from a prior
-			// session that didn't fully tear down (e.g. fast-toggle
-			// race where disable fired while enable was still loading,
-			// then the cancel-path bailed and left orphaned DOM /
-			// pane state behind). Without this, the second enable can
-			// mount a fresh Mapbox container on top of a previous one
-			// and end up with the view stuck in a half-2D / half-3D
-			// state where the camera can't rotate.
+			// session that didn't fully tear down (fast-toggle race).
 			const stale = document.getElementById("dw-mb-container");
 			if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
 			this._loading = true;
-			this._cancelLoad = false;
+			// Generation counter — every enable starts a new "session"
+			// and every disable bumps the gen so any in-flight async
+			// path (e.g. mapbox-gl.js still loading from a previous
+			// enable, layer fetches, deferred mounts) checks `myGen
+			// !== this._gen` and bails. This is what makes rapid
+			// stress-toggling stable: superseded enables/disables
+			// silently no-op rather than racing each other to mount
+			// or tear down DOM the other side is already touching.
+			this._gen = (this._gen || 0) + 1;
+			const myGen = this._gen;
 			ensureMapboxLoaded().then((mapboxgl) => {
+				if (myGen !== this._gen) return;  // superseded
 				this._loading = false;
-				if (this._cancelLoad) return;
 				this._mount(map);
 				this._initMbMap(map, mapboxgl);
+				this._wireMarkerCache(map);
 				this._wireSync(map);
 				this._wireBasemapTracker(map);
 				this._active = true;
 				console.info("[CustomTiles] 3D Mode enabled");
 			}).catch((e) => {
+				if (myGen !== this._gen) return;
 				this._loading = false;
 				console.error(
 					"[CustomTiles] 3D Mode: failed to load mapbox-gl-js:",
-					e.message,
-					"\n  Likely cause: dynamic.watch's CSP, or mapbox.com unreachable.");
+					e.message);
 			});
 		}
 
 		disable(map) {
 			if (this._loading) {
-				// Tell the in-flight enable to bail when it resolves,
-				// but ALSO scrub any partial DOM the parallel race
-				// might have left (the mount/init steps are async).
-				this._cancelLoad = true;
+				// Bump gen so the in-flight enable's `.then` bails,
+				// reset _loading so the NEXT click on the toggle can
+				// proceed (without this, the controller stays stuck
+				// in "loading" forever and isActive() keeps returning
+				// true — exactly the rapid-toggle stuck state the
+				// stress test was hitting).
+				this._gen = (this._gen || 0) + 1;
+				this._loading = false;
 				const stale = document.getElementById("dw-mb-container");
 				if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
 				return;
@@ -4987,6 +4995,8 @@
 			this._unwireBasemapTracker(map);
 			this._unwireSync(map);
 			this._unwireMarkerObserver();
+			this._unwireMarkerCache(map);
+			this._unpatchLeafletProjection();
 			if (this._mbMap) {
 				try { this._mbMap.remove(); } catch (_) {}
 				this._mbMap = null;
@@ -5040,6 +5050,17 @@
 			hide("tilePane");
 			hide("overlayPane");
 			hide("shadowPane");
+			// Hide tooltipPane — every layer with hover-identify
+			// (Cadastre, QPWS, INTVL) drops its tooltip here, and in
+			// 3D they all fire on every mousemove regardless of which
+			// hidden pane the tile data lives in, so the user ends up
+			// seeing multiple stacked popovers for the same hover. The
+			// Mapbox-side popups for ported layers (INTVL, geocaches,
+			// flights, vessels) render through the Mapbox canvas, not
+			// tooltipPane, so they still show. `popupPane` stays
+			// visible so click-driven popups (Cadastre Sales link,
+			// Street View, etc.) keep working.
+			hide("tooltipPane");
 			for (const key of Object.keys(map._panes || {})) {
 				if (key.startsWith("dw")) hide(key);
 			}
@@ -5102,16 +5123,23 @@
 		}
 
 		_initMbMap(map, mapboxgl) {
-			// AWS Mapzen Terrarium tiles — no auth, world coverage to z14,
-			// encoded as `(R*256 + G + B/256) - 32768 = metres`. Mapbox GL
-			// handles the decode natively via encoding: "terrarium".
+			// Mapbox Terrain-DEM v1 — Mapbox's current global DEM
+			// (replaces the legacy `mapbox.terrain-rgb`). Higher
+			// effective resolution than AWS Terrarium, especially in
+			// blended/lidar regions, and tiles serve as 512px WebP so
+			// fewer requests per visible area. Using the `mapbox://`
+			// URL form lets Mapbox GL JS fetch the TileJSON and
+			// inject the access_token automatically — no addProtocol
+			// needed, which is critical for the build dynamic.watch
+			// ships (no addProtocol export). If the borrowed page
+			// token doesn't have terrain-dem-v1 scope, fall back via
+			// the `error` listener wired below.
 			const sources = {
 				"mapbox-dem": {
 					type: "raster-dem",
-					tiles: [CFG.TERRARIUM_TILES],
-					tileSize: 256,
+					url: "mapbox://mapbox.mapbox-terrain-dem-v1",
+					tileSize: 512,
 					maxzoom: 14,
-					encoding: "terrarium",
 				},
 			};
 			// Solid background layer FIRST so the canvas always has a
@@ -5206,12 +5234,22 @@
 				// (drag, zoom, programmatic setLatLng) so we re-sync
 				// without depending on a Mapbox `move` event to fire.
 				this._wireMarkerObserver(map, mbMap);
+				// Watch the route's SVG path for in-place `setLatLngs`
+				// updates (waypoint added / removed / re-routed) so the
+				// 3D-rendered line stays in lock-step.
+				this._wireRoutePathObserver(map, mbMap);
 			});
 			this._mbMap = mbMap;
-			// Reset click-wiring state — handlers on the previous mbMap
-			// (if any) were destroyed by `disable()` calling
-			// `mbMap.remove()`. Fresh map = fresh handler set.
-			this._wiredClick = new Set();
+			// Reset per-session caches: a fresh Mapbox instance has
+			// no layers yet, so any "skip if signature matches" path
+			// MUST run on its first call.
+			this._wiredClick   = new Set();
+			this._lastRouteSig = null;
+			// Patch Leaflet's flat (Point → LatLng) methods to route
+			// through Mapbox's terrain-aware unproject — fixes clicks
+			// landing at the wrong terrain spot AND keeps dragged
+			// marker latLngs honest.
+			this._patchLeafletProjection(map);
 			// Debug hooks: every reference console snippets need to
 			// introspect the 3D state without re-deriving anything.
 			//   _dwMb        — the Mapbox GL Map instance
@@ -5655,6 +5693,22 @@
 				return;
 			}
 			const { line } = this._extractRouteGeojson(map);
+			// Cheap content-equality check — skip the source-remove +
+			// re-add cycle if nothing about the geometry changed.
+			// Per feature we hash: coord count + first coord + last
+			// coord + mid coord. Catches every kind of in-place edit
+			// (waypoint add/remove changes counts; midpoint drag
+			// changes the mid; endpoint drag changes first/last)
+			// without serialising every coord.
+			const sig = line.features.map((f) => {
+				const c = f.geometry.coordinates;
+				const n = c.length;
+				if (!n) return "0";
+				const fst = c[0],   lst = c[n - 1], mid = c[n >> 1];
+				return `${n}:${fst[0]},${fst[1]}|${mid[0]},${mid[1]}|${lst[0]},${lst[1]}`;
+			}).join(";");
+			if (sig === this._lastRouteSig) return;
+			this._lastRouteSig = sig;
 			// Only the line layer is Mapbox-rendered now — the
 			// waypoint dots + distance numbers come from Leaflet's
 			// markerPane (which we no longer hide in 3D mode) so
@@ -5929,25 +5983,178 @@
 		// `transform` to whatever Mapbox would project it to, taking
 		// the parent mapPane's translate into account so the position
 		// is expressed in mapPane's local coordinate frame.
+		//
+		// Performance: this runs on every Mapbox `move` frame plus
+		// MutationObserver and body-class triggers — easily 60Hz×N
+		// during a zoom animation. Two optimisations:
+		//   1. `_markerCache` is a Set populated on layeradd /
+		//      layerremove so we don't walk `map.eachLayer` (which
+		//      iterates EVERY layer, including 100s of OIM polylines)
+		//      on every sync.
+		//   2. `_requestMarkerSync` rAF-batches multiple triggers
+		//      down to one sync per browser paint.
 		_syncMarkersToMapbox(map, mbMap) {
-			const mapPane    = map.getPane("mapPane");
-			const markerPane = map.getPane("markerPane");
-			if (!mapPane || !markerPane) return;
-			const t = mapPane.style.transform || "";
-			const m = /translate3d\(\s*(-?[\d.]+)px,\s*(-?[\d.]+)px/.exec(t);
-			const tx = m ? parseFloat(m[1]) : 0;
-			const ty = m ? parseFloat(m[2]) : 0;
-			map.eachLayer((lyr) => {
-				if (!(lyr instanceof L.Marker)) return;
+			const mapPane = map.getPane("mapPane");
+			if (!mapPane) return;
+			const mapPanePos = map._getMapPanePos?.() || L.point(0, 0);
+			const tx = mapPanePos.x, ty = mapPanePos.y;
+			const cache = this._markerCache;
+			if (!cache) return;
+			// Project markers via plain `mb.project([lng, lat])`. This
+			// puts them at the sea-level pixel for the lng/lat, which
+			// is what the Mapbox line layer also uses for the route
+			// without `line-elevation-reference: "ground"`. The
+			// terrain-aware path through `transform.locationPoint3D`
+			// returns coordinates in a different space and pushes
+			// markers off-screen — keeping plain project for now.
+			const elevProj = (lng, lat) => mbMap.project([lng, lat]);
+			this._elevProj = elevProj;
+			for (const lyr of cache) {
 				const el = lyr._icon || lyr.getElement?.();
-				if (!el) return;
+				if (!el) continue;
 				const latlng = lyr.getLatLng?.();
-				if (!latlng) return;
-				const point = mbMap.project([latlng.lng, latlng.lat]);
+				if (!latlng) continue;
+				const point = elevProj(latlng.lng, latlng.lat);
 				const px = Math.round(point.x - tx);
 				const py = Math.round(point.y - ty);
 				el.style.transform = `translate3d(${px}px, ${py}px, 0)`;
+				// Keep Leaflet's tracked position in lock-step with
+				// the visual transform — L.Draggable's drag math
+				// reads it as `_startPos`, so leaving it stale at
+				// Leaflet's flat-projection value causes the drag
+				// to compute a cursor position offset from where
+				// the user actually sees the marker.
+				el._leaflet_pos = L.point(px, py);
+			}
+		}
+
+		// Coalesces multiple sync triggers per frame down to one.
+		// Triggered by Mapbox `move`, MutationObserver, body-class
+		// observer — all can fire several times per frame during a
+		// drag or zoom animation. Without batching, every trigger
+		// re-walks the marker cache + Mapbox-projects each one.
+		_requestMarkerSync(map, mbMap) {
+			if (this._syncRequested) return;
+			this._syncRequested = true;
+			requestAnimationFrame(() => {
+				this._syncRequested = false;
+				if (this._active && this._mbMap === mbMap) {
+					this._syncMarkersToMapbox(map, mbMap);
+				}
 			});
+		}
+
+		// Populate / maintain the marker cache. On enable: one walk
+		// of `map.eachLayer` to seed. After that, layeradd / layerremove
+		// listeners keep it in sync — far cheaper than re-walking the
+		// whole map per Mapbox frame.
+		//
+		// Every add/remove also schedules a marker sync so a newly-
+		// added marker gets Mapbox-projected immediately rather than
+		// sitting at Leaflet's flat position until the next Mapbox
+		// move event fires. This is the fix for the
+		// "open an existing route, 3D auto-enables, waypoints stuck at
+		// the 2D ground positions until you rotate" symptom.
+		_wireMarkerCache(map) {
+			this._markerCache = new Set();
+			map.eachLayer((lyr) => {
+				if (lyr instanceof L.Marker) this._markerCache.add(lyr);
+			});
+			this._onMarkerAdd = (e) => {
+				if (!(e.layer instanceof L.Marker)) return;
+				this._markerCache.add(e.layer);
+				if (this._active && this._mbMap) {
+					this._requestMarkerSync(map, this._mbMap);
+				}
+			};
+			this._onMarkerRemove = (e) => {
+				if (!(e.layer instanceof L.Marker)) return;
+				this._markerCache.delete(e.layer);
+				if (this._active && this._mbMap) {
+					this._requestMarkerSync(map, this._mbMap);
+				}
+			};
+			map.on("layeradd",    this._onMarkerAdd);
+			map.on("layerremove", this._onMarkerRemove);
+		}
+
+		_unwireMarkerCache(map) {
+			if (this._onMarkerAdd)    map.off("layeradd",    this._onMarkerAdd);
+			if (this._onMarkerRemove) map.off("layerremove", this._onMarkerRemove);
+			this._onMarkerAdd = this._onMarkerRemove = null;
+			this._markerCache = null;
+		}
+
+		// Override Leaflet's flat (2D Mercator) `layerPointToLatLng`
+		// and `containerPointToLatLng` to use Mapbox's terrain-aware
+		// `unproject` while 3D is active. This is the inverse of
+		// `_syncMarkersToMapbox` (which projects latLng → screen
+		// pixels via Mapbox). Without it:
+		//   • Tapping at the top of the 3D view places a waypoint
+		//     wherever Leaflet's flat unproject lands (much closer
+		//     than the terrain pixel the user actually tapped).
+		//   • Dragging a marker stores `marker._latlng` via Leaflet's
+		//     flat layerPointToLatLng — so the moment the drag ends
+		//     and the marker re-syncs through Mapbox.project, it
+		//     jumps to a different terrain position than where it
+		//     was released.
+		// Both fix transparently: dynamic.watch's planner reads
+		// `e.latlng` from `map.click`, which chains through the
+		// patched methods.
+		_patchLeafletProjection(map) {
+			if (this._unpatchProj) return;
+			const controller = this;
+			const origCPtoLL = map.containerPointToLatLng.bind(map);
+			const origLPtoLL = map.layerPointToLatLng.bind(map);
+			// Mapbox can return extreme (or NaN) lat/lng when asked
+			// to unproject a screen point above the horizon in a
+			// pitched view, or any pixel beyond the canvas. Falling
+			// back to Leaflet's flat unproject in those cases stops
+			// dragged waypoints from jumping to the antipode.
+			const project = (sx, sy) => {
+				const mb = controller._mbMap;
+				const canvas = mb.getCanvas?.();
+				const w = canvas?.clientWidth  || 0;
+				const h = canvas?.clientHeight || 0;
+				if (sx < 0 || sy < 0 || (w && sx > w) || (h && sy > h)) return null;
+				const ll = mb.unproject([sx, sy]);
+				if (!ll || !isFinite(ll.lat) || !isFinite(ll.lng)) return null;
+				if (Math.abs(ll.lat) > 85 || Math.abs(ll.lng) > 180) return null;
+				return L.latLng(ll.lat, ll.lng);
+			};
+			map.containerPointToLatLng = function (point) {
+				if (controller._active && controller._mbMap) {
+					try {
+						const ll = project(point.x, point.y);
+						if (ll) return ll;
+					} catch (_) {}
+				}
+				return origCPtoLL(point);
+			};
+			map.layerPointToLatLng = function (point) {
+				if (controller._active && controller._mbMap) {
+					try {
+						// `_getMapPanePos()` reads Leaflet's own
+						// authoritative `_leaflet_pos` on the
+						// mapPane — more reliable than parsing the
+						// `style.transform` CSS (different browsers
+						// sometimes serialise the value differently).
+						const pp = map._getMapPanePos?.() || L.point(0, 0);
+						const ll = project(point.x + pp.x, point.y + pp.y);
+						if (ll) return ll;
+					} catch (_) {}
+				}
+				return origLPtoLL(point);
+			};
+			this._unpatchProj = () => {
+				map.containerPointToLatLng = origCPtoLL;
+				map.layerPointToLatLng = origLPtoLL;
+				this._unpatchProj = null;
+			};
+		}
+
+		_unpatchLeafletProjection() {
+			if (this._unpatchProj) this._unpatchProj();
 		}
 
 		// MutationObserver on markerPane re-applies the Mapbox sync
@@ -5979,7 +6186,7 @@
 				if (syncing || !this._mbMap) return;
 				if (isDragging()) return;
 				syncing = true;
-				try { this._syncMarkersToMapbox(map, mbMap); }
+				try { this._requestMarkerSync(map, mbMap); }
 				finally {
 					requestAnimationFrame(() => { syncing = false; });
 				}
@@ -6000,7 +6207,7 @@
 					const wasDragging = m.oldValue?.includes("leaflet-dragging");
 					const nowDragging = isDragging();
 					if (wasDragging && !nowDragging) {
-						this._syncMarkersToMapbox(map, mbMap);
+						this._requestMarkerSync(map, mbMap);
 						return;
 					}
 				}
@@ -6021,6 +6228,43 @@
 				this._bodyObserver.disconnect();
 				this._bodyObserver = null;
 			}
+			if (this._routePathObserver) {
+				this._routePathObserver.disconnect();
+				this._routePathObserver = null;
+			}
+			if (this._routePathDebounce) {
+				clearTimeout(this._routePathDebounce);
+				this._routePathDebounce = null;
+			}
+		}
+
+		// Watch for route SVG path mutations. Leaflet's L.Polyline
+		// `setLatLngs(...)` updates the SVG path's `d` attribute in
+		// place — no `layeradd` / `layerremove` event fires, so our
+		// existing tracker never knows the route changed (a removed
+		// waypoint leaves the Mapbox-rendered line drawn through the
+		// deleted point). Observing the `d` attribute on every path
+		// in overlayPane catches every in-place edit and triggers a
+		// debounced re-render.
+		_wireRoutePathObserver(map, mbMap) {
+			if (this._routePathObserver) return;
+			const overlayPane = map.getPane("overlayPane");
+			if (!overlayPane) return;
+			this._routePathObserver = new MutationObserver(() => {
+				if (!this._mbMap || !this._active) return;
+				clearTimeout(this._routePathDebounce);
+				this._routePathDebounce = setTimeout(() => {
+					this._routePathDebounce = null;
+					if (this._active && this._mbMap === mbMap) {
+						this._renderRoute(map, mbMap);
+					}
+				}, 80);
+			});
+			this._routePathObserver.observe(overlayPane, {
+				attributes: true,
+				subtree: true,
+				attributeFilter: ["d"],
+			});
 		}
 
 		_wireSync(map) {
@@ -6042,11 +6286,10 @@
 					// half the user's expected scale.
 					map.setView([c.lat, c.lng], Math.round(z + 1),
 						{ animate: false });
-					// Reproject all Leaflet markers AFTER Leaflet has
-					// repositioned them per its own (flat) projection.
-					// Our override wins because it sets style.transform
-					// directly on the icon element.
-					this._syncMarkersToMapbox(map, this._mbMap);
+					// Reproject all Leaflet markers via the rAF-batched
+					// scheduler so multiple Mapbox `move` events per
+					// frame coalesce into a single sync per paint.
+					this._requestMarkerSync(map, this._mbMap);
 				} catch (_) {}
 			};
 			this._handlerResize = () => {
@@ -6095,21 +6338,46 @@
 				if (lyr._dwMb3DStyle) return true;
 				return false;
 			};
+			// `aliveCheck` runs inside every queued setTimeout so a
+			// debounce that was scheduled while 3D was active but
+			// fires after `disable()` (mbMap removed, _active=false)
+			// becomes a silent no-op rather than calling into a
+			// destroyed Mapbox style. The "Cannot read properties of
+			// undefined (reading 'getOwnLayer')" warnings the stress
+			// test was seeing came from this race.
+			const aliveCheck = (mb) =>
+				this._active && this._mbMap === mb && mb.getStyle?.();
 			this._baseTracker = (e) => {
 				const mb = this._mbMap;
 				if (!mb || !mb.isStyleLoaded || !mb.isStyleLoaded()) return;
+				// Synchronously hide any newly-created pane BEFORE
+				// the 80ms debounce fires. Cadastre / QPWS / Mobile
+				// Coverage etc. create their custom pane in onAdd;
+				// during the debounce window the pane is visible and
+				// the Leaflet tile cache paints into it as a flat
+				// overlay — visible to the user as the layer "showing
+				// in 2D" until the next sync finally hides the pane.
+				this._hideHiddenable(map);
 				const isBase = e?.type === "baselayerchange";
 				const wantsFull = isBase || needsFullResync(e?.layer);
 				if (wantsFull) {
 					clearTimeout(heavyDebounce);
-					heavyDebounce = setTimeout(() => this._fullResync(map, mb), 80);
+					heavyDebounce = setTimeout(() => {
+						if (!aliveCheck(mb)) return;
+						this._fullResync(map, mb);
+					}, 80);
 				} else {
 					clearTimeout(lightDebounce);
 					lightDebounce = setTimeout(() => {
+						if (!aliveCheck(mb)) return;
 						this._renderLeafletShapes(map, mb);
 						this._renderRoute(map, mb);
 					}, 80);
 				}
+			};
+			this._baseTrackerTimers = () => {
+				clearTimeout(heavyDebounce);
+				clearTimeout(lightDebounce);
 			};
 			map.on("baselayerchange layeradd layerremove", this._baseTracker);
 		}
@@ -6168,6 +6436,10 @@
 			if (this._baseTracker) {
 				map.off("baselayerchange layeradd layerremove", this._baseTracker);
 				this._baseTracker = null;
+			}
+			if (this._baseTrackerTimers) {
+				this._baseTrackerTimers();
+				this._baseTrackerTimers = null;
 			}
 		}
 	}
