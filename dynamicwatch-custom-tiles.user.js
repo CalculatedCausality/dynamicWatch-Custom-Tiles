@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.56
+// @version      7.9.57
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -5926,20 +5926,32 @@
 
 		// MutationObserver on markerPane re-applies the Mapbox sync
 		// every time Leaflet mutates a marker's `style` attribute —
-		// which it does on every drag mousemove, on every zoom/pan
-		// step, and on the queued raf-batched reposition pass.
+		// drag, zoom, or programmatic setLatLng all trigger it.
 		// Without this hook, dragging a waypoint leaves it visually
-		// stranded at Leaflet's flat-projection position (the user's
-		// reported "marker appears off the grid until you rotate the
-		// view"). The `syncing` guard prevents our own override from
-		// triggering the observer in an infinite loop.
+		// stranded at Leaflet's flat-projection position. The
+		// `syncing` flag prevents our own override from triggering
+		// the observer in an infinite loop.
+		//
+		// IMPORTANT exception: while Leaflet is mid-drag (`document
+		// .body.leaflet-dragging` class is set), we DO NOT sync.
+		// Letting our Mapbox projection win during drag makes the
+		// marker follow a curved path instead of the cursor — the
+		// mouse moves linearly through Leaflet's flat coordinate
+		// space, but Mapbox-projecting each frame's flat-derived
+		// latLng pushes the icon onto a non-linear trajectory. A
+		// second observer on `document.body` re-syncs the moment
+		// the drag class clears, so the marker lands in the right
+		// 3D spot once the user releases.
 		_wireMarkerObserver(map, mbMap) {
 			if (this._markerObserver) return;
 			const markerPane = map.getPane("markerPane");
 			if (!markerPane) return;
 			let syncing = false;
+			const isDragging = () =>
+				document.body.classList.contains("leaflet-dragging");
 			this._markerObserver = new MutationObserver(() => {
 				if (syncing || !this._mbMap) return;
+				if (isDragging()) return;
 				syncing = true;
 				try { this._syncMarkersToMapbox(map, mbMap); }
 				finally {
@@ -5951,12 +5963,37 @@
 				subtree: true,
 				attributeFilter: ["style"],
 			});
+			// Body-class observer: catches the transition from
+			// `leaflet-dragging` → not-dragging so we can re-sync
+			// once after a drag ends (the marker-pane observer
+			// doesn't fire again on its own at that moment because
+			// Leaflet's finishDrag doesn't mutate marker styles).
+			this._bodyObserver = new MutationObserver((muts) => {
+				if (!this._mbMap) return;
+				for (const m of muts) {
+					const wasDragging = m.oldValue?.includes("leaflet-dragging");
+					const nowDragging = isDragging();
+					if (wasDragging && !nowDragging) {
+						this._syncMarkersToMapbox(map, mbMap);
+						return;
+					}
+				}
+			});
+			this._bodyObserver.observe(document.body, {
+				attributes: true,
+				attributeOldValue: true,
+				attributeFilter: ["class"],
+			});
 		}
 
 		_unwireMarkerObserver() {
 			if (this._markerObserver) {
 				this._markerObserver.disconnect();
 				this._markerObserver = null;
+			}
+			if (this._bodyObserver) {
+				this._bodyObserver.disconnect();
+				this._bodyObserver = null;
 			}
 		}
 
