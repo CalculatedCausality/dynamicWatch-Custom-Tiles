@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.28
-// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Toner, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels, Live Flights, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
+// @version      7.9.30
+// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
 // @grant        GM_xmlhttpRequest
@@ -41,7 +41,7 @@
 		LAYER_QLD: "QLD Globe",
 		LAYER_GOOGLE: "Google Hybrid",
 		LAYER_APPLE: "Apple Maps",
-		LAYER_STAMEN_TONER: "Stamen Toner",
+		LAYER_STAMEN_TERRAIN: "Stamen Terrain",
 		LAYER_WAYBACK: "Esri Wayback",
 
 		WAYBACK_CONFIG_URL:
@@ -239,7 +239,7 @@
 			names: [
 				CFG.LAYER_GOOGLE,
 				CFG.LAYER_APPLE,
-				CFG.LAYER_STAMEN_TONER,
+				CFG.LAYER_STAMEN_TERRAIN,
 				CFG.LAYER_WAYBACK,
 			],
 		},
@@ -1128,13 +1128,17 @@
 
 	// -- Stamen Toner (via Stadia Maps, localhost-spoofed) -------------------
 
-	class StamenTonerLayerProvider extends LayerProvider {
+	class StamenTerrainLayerProvider extends LayerProvider {
 		create() {
 			const TILE_PX = 256;
-			const TILE_BASE = "https://tiles.stadiamaps.com/tiles/stamen_toner/";
+			// Stamen Terrain — colour-shaded relief with optional labels.
+			// Stadia's path is `stamen_terrain` (Toner was hard-to-read
+			// black-and-white; Terrain serves the "topo context" purpose
+			// the Toner slot used to fill, with much better legibility).
+			const TILE_BASE = "https://tiles.stadiamaps.com/tiles/stamen_terrain/";
 			const spoofOrigin = CFG.STADIA_SPOOF_ORIGIN;
 
-			const TonerGrid = L.GridLayer.extend({
+			const TerrainGrid = L.GridLayer.extend({
 				createTile(coords, done) {
 					const img = document.createElement("img");
 					img.setAttribute("role", "presentation");
@@ -1170,9 +1174,9 @@
 				},
 			});
 
-			const layer = new TonerGrid({
+			const layer = new TerrainGrid({
 				tileSize: TILE_PX,
-				maxNativeZoom: 20,
+				maxNativeZoom: 18,    // Terrain caps at 18; tiles past 20 ship empty placeholders
 				maxZoom: 22,
 				attribution:
 					'&copy; <a href="https://stadiamaps.com/" target="_blank" rel="noreferrer">Stadia Maps</a> ' +
@@ -2029,6 +2033,8 @@
 
 				_render(rows) {
 					if (!this._group) return;
+					const map = this._map;
+					if (!map) return;
 					this._group.clearLayers();
 					// MarineTraffic flips between UPPER/lower keys depending
 					// on the endpoint variant — pick walks the candidates.
@@ -2039,6 +2045,12 @@
 						}
 						return "";
 					};
+
+					// Normalise rows → vessel objects once. The old per-vessel
+					// loop did the pick() lookups + SVG construction inline,
+					// and at heavily-trafficked ports the resulting N L.marker
+					// creations were the visible hot spot.
+					const vessels = [];
 					for (const v of rows) {
 						const lat = parseFloat(pick(v, "LAT", "lat"));
 						const lon = parseFloat(pick(v, "LON", "lon"));
@@ -2052,32 +2064,118 @@
 						const hdg  = parseFloat(pick(v,
 							"HEADING", "heading", "COURSE", "course") || "0") || 0;
 						const rawSpd = parseFloat(pick(v, "SPEED", "speed") || "0") || 0;
-						// AIS speed is in 1/10 knots; guard against pre-divided values
+						// AIS speed is in 1/10 knots; guard pre-divided values.
 						const spdKts =
 							rawSpd > 102 ? (rawSpd / 10).toFixed(1) : rawSpd.toFixed(1);
-						const fill = shipColor(type);
-						const svg =
-							`<svg viewBox="0 0 14 20" width="14" height="20" xmlns="http://www.w3.org/2000/svg">` +
-							`<g transform="translate(7,10) rotate(${hdg})">` +
-							`<polygon points="0,-9 4.5,8 0,5 -4.5,8" fill="${fill}" stroke="#333" stroke-width="0.7"/>` +
-							`</g></svg>`;
-						const icon = L.divIcon({
-							className: "dw-marine-icon",
-							html: svg,
-							iconSize: [14, 20],
-							iconAnchor: [7, 10],
-						});
-						L.marker([lat, lon], {
-							icon,
-							pane: "dwMarinePane",
-							interactive: true,
-						})
-							.bindTooltip(
-								`<b>${name}</b><br>MMSI: ${mmsi}<br>Speed: ${spdKts}\u202fkts\u2002Hdg: ${Math.round(hdg)}\u00b0`,
-								{ className: "dw-marine-tip", sticky: true },
-							)
-							.addTo(this._group);
+						vessels.push({ lat, lon, name, mmsi, type, hdg, spdKts });
 					}
+					if (!vessels.length) return;
+
+					// Screen-grid clustering: bin vessels by pixel-coord cell at
+					// the current zoom. CELL_PX=50 means cells are ~50 screen
+					// pixels — wide enough that overlapping vessels collapse
+					// into one badge, narrow enough that a vessel in open water
+					// stays solo. Clusters expand naturally on zoom-in because
+					// cell coverage shrinks geographically.
+					const CELL_PX = 50;
+					const zoom = map.getZoom();
+					const cells = new Map();
+					for (const v of vessels) {
+						const pt = map.project([v.lat, v.lon], zoom);
+						const key =
+							Math.floor(pt.x / CELL_PX) + "/" +
+							Math.floor(pt.y / CELL_PX);
+						let cell = cells.get(key);
+						if (!cell) {
+							cell = { vessels: [], sumLat: 0, sumLon: 0 };
+							cells.set(key, cell);
+						}
+						cell.vessels.push(v);
+						cell.sumLat += v.lat;
+						cell.sumLon += v.lon;
+					}
+
+					for (const cell of cells.values()) {
+						if (cell.vessels.length === 1) {
+							this._renderShip(cell.vessels[0]);
+						} else {
+							const lat = cell.sumLat / cell.vessels.length;
+							const lon = cell.sumLon / cell.vessels.length;
+							this._renderCluster(map, lat, lon, cell.vessels);
+						}
+					}
+				},
+
+				_renderShip(v) {
+					const fill = shipColor(v.type);
+					const svg =
+						`<svg viewBox="0 0 14 20" width="14" height="20" xmlns="http://www.w3.org/2000/svg">` +
+						`<g transform="translate(7,10) rotate(${v.hdg})">` +
+						`<polygon points="0,-9 4.5,8 0,5 -4.5,8" fill="${fill}" stroke="#333" stroke-width="0.7"/>` +
+						`</g></svg>`;
+					const icon = L.divIcon({
+						className: "dw-marine-icon",
+						html: svg,
+						iconSize: [14, 20],
+						iconAnchor: [7, 10],
+					});
+					L.marker([v.lat, v.lon], {
+						icon,
+						pane: "dwMarinePane",
+						interactive: true,
+					})
+						.bindTooltip(
+							`<b>${v.name}</b><br>MMSI: ${v.mmsi}<br>Speed: ${v.spdKts}\u202fkts\u2002Hdg: ${Math.round(v.hdg)}\u00b0`,
+							{ className: "dw-marine-tip", sticky: true },
+						)
+						.addTo(this._group);
+				},
+
+				_renderCluster(map, lat, lon, vessels) {
+					const count = vessels.length;
+					// Size + colour scale with count so a quick visual scan
+					// distinguishes a small cluster from a major port.
+					const size = count < 6 ? 22 : count < 21 ? 28 : 36;
+					const fontPx = Math.round(size * 0.42);
+					const fill = count < 6 ? "#5b9bd5"
+						: count < 21 ? "#2e6a98"
+						: "#1c4870";
+					const icon = L.divIcon({
+						className: "dw-marine-cluster",
+						html:
+							`<div style="background:${fill};color:#fff;` +
+							`width:${size}px;height:${size}px;border-radius:50%;` +
+							`display:flex;align-items:center;justify-content:center;` +
+							`font:bold ${fontPx}px/1 sans-serif;` +
+							`border:2px solid rgba(255,255,255,0.85);` +
+							`box-shadow:0 0 4px rgba(0,0,0,.5);` +
+							`">${count}</div>`,
+						iconSize:   [size, size],
+						iconAnchor: [size / 2, size / 2],
+					});
+					// Tooltip previews up to 5 sample names; click expands the
+					// cluster by flying in two zoom steps (capped at the map's
+					// max zoom). flyTo's easing makes the cluster→spread
+					// transition read as intentional rather than abrupt.
+					const sample = vessels.slice(0, 5)
+						.map((v) => v.name).join("<br>");
+					const more = vessels.length > 5
+						? `<br><i>+${vessels.length - 5} more</i>` : "";
+					L.marker([lat, lon], {
+						icon,
+						pane: "dwMarinePane",
+						interactive: true,
+					})
+						.bindTooltip(
+							`<b>${count} vessels</b>` +
+							`<br><span class="dw-cad-sub">${sample}${more}</span>`,
+							{ className: "dw-marine-tip", sticky: true },
+						)
+						.on("click", () => {
+							const targetZ = Math.min(map.getZoom() + 2, map.getMaxZoom());
+							map.flyTo([lat, lon], targetZ, { duration: 0.5 });
+						})
+						.addTo(this._group);
 				},
 
 				getAttribution() {
@@ -2275,8 +2373,27 @@
 						const dnf    = !!c.userDidNotFind;
 						const fill   = found ? "#888" : dnf ? "#aa3333" : color;
 						const opacity = disabled ? 0.5 : 1;
+						const favs  = c.favoritePoints || 0;
+
+						// Favourite-points badge sits above the pin's top-right
+						// corner. `pointer-events:none` so clicks pass through
+						// to the pin underneath (which opens the cache page).
+						// Clamp display to "99+" so popular caches don't blow
+						// out the icon's footprint and overlap neighbours.
+						const favBadge = favs > 0
+							? `<div style="position:absolute;top:-6px;right:-8px;` +
+							  `background:#d33;color:#fff;` +
+							  `font:bold 9px/1 sans-serif;` +
+							  `padding:2px 4px;border-radius:8px;` +
+							  `border:1px solid #fff;white-space:nowrap;` +
+							  `box-shadow:0 0 2px rgba(0,0,0,.45);` +
+							  `pointer-events:none;">` +
+							  `♥${favs > 99 ? "99+" : favs}</div>`
+							: "";
 
 						const html =
+							`<div style="position:relative;width:20px;height:20px;` +
+							`overflow:visible;">` +
 							`<div class="dw-geo-pin" style="` +
 							`background:${fill};color:#fff;opacity:${opacity};` +
 							`width:20px;height:20px;border-radius:50%;` +
@@ -2284,7 +2401,9 @@
 							`font:bold 11px/1 sans-serif;` +
 							`border:1px solid #222;` +
 							`box-shadow:0 0 1px rgba(0,0,0,.6);` +
-							`">${label}</div>`;
+							`">${label}</div>` +
+							favBadge +
+							`</div>`;
 
 						const icon = L.divIcon({
 							className: "dw-geo-icon",
@@ -2299,7 +2418,6 @@
 						const terr  = c.terrain    != null ? c.terrain    : "?";
 						const size  = c.containerType || c.size || "";
 						const owner = c.owner && c.owner.username || "";
-						const favs  = c.favoritePoints || 0;
 						const tipHtml =
 							`<b>${_escHtml(name)}</b>` +
 							(found ? " ✓" : dnf ? " ✗" : "") +
@@ -4798,8 +4916,8 @@
 				this.layers[CFG.LAYER_APPLE] = new AppleMapsLayerProvider(
 					this.appleToken,
 				).create();
-				this.layers[CFG.LAYER_STAMEN_TONER] =
-					new StamenTonerLayerProvider().create();
+				this.layers[CFG.LAYER_STAMEN_TERRAIN] =
+					new StamenTerrainLayerProvider().create();
 				this.layers[CFG.LAYER_WAYBACK] = new WaybackLayerProvider().create();
 				const wayLyr = this.layers[CFG.LAYER_WAYBACK];
 				this.waybackHistControl = this._makeHistoryBar({
@@ -4829,8 +4947,8 @@
 				ctrl.addBaseLayer(this.layers[CFG.LAYER_GOOGLE], CFG.LAYER_GOOGLE);
 				ctrl.addBaseLayer(this.layers[CFG.LAYER_APPLE], CFG.LAYER_APPLE);
 				ctrl.addBaseLayer(
-					this.layers[CFG.LAYER_STAMEN_TONER],
-					CFG.LAYER_STAMEN_TONER,
+					this.layers[CFG.LAYER_STAMEN_TERRAIN],
+					CFG.LAYER_STAMEN_TERRAIN,
 				);
 				ctrl.addBaseLayer(this.layers[CFG.LAYER_WAYBACK], CFG.LAYER_WAYBACK);
 				ctrl.addBaseLayer(this.layers[CFG.LAYER_QLD],  CFG.LAYER_QLD);
@@ -5364,7 +5482,12 @@
 				".popup-on-location .dw-sv-btn svg { flex-shrink: 0; }",
 				".dw-flight-icon { background: none !important; border: none !important; }",
 				".dw-flight-tip { font-size: 11px; line-height: 1.4; }",
+				// Geocache icon — overflow:visible so the favourites-points
+				// badge can sit above the pin's top-right corner without
+				// being clipped by Leaflet's marker container.
+				".dw-geo-icon { background: none !important; border: none !important; overflow: visible !important; }",
 				".dw-marine-icon { background: none !important; border: none !important; }",
+				".dw-marine-cluster { background: none !important; border: none !important; overflow: visible !important; cursor: pointer; }",
 				".dw-marine-tip { font-size: 11px; line-height: 1.4; }",
 				".dw-cad-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
 				".dw-cad-tip b { font-weight: 700; }",
