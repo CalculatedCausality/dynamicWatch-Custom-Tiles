@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.71
+// @version      7.9.76
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -898,6 +898,48 @@
 		}
 	}
 
+	function tileProvider(url, opts = {}) {
+		return class extends LayerProvider {
+			create() {
+				return L.tileLayer(url, {
+					tileSize: 256, maxNativeZoom: 18, maxZoom: 22,
+					crossOrigin: true, ...opts,
+				});
+			}
+		};
+	}
+
+	// Pass-through wrapper for layers whose entire body is
+	// `makeArcgisExportTileLayer(opts)` — Cadastre, QPWS, Mobile Coverage.
+	function arcgisExportProvider(opts) {
+		return class extends LayerProvider {
+			create() { return makeArcgisExportTileLayer(opts); }
+		};
+	}
+
+	// Token-aware variant: `buildUrl(token)` is called both at create-time
+	// (BLANK_TILE if the token isn't ready yet) and again in `tok.get()`'s
+	// callback to setUrl(...) once the bootstrap resolves.
+	function tokenTileProvider(buildUrl, opts = {}) {
+		return class extends LayerProvider {
+			constructor(tokenMgr) { super(); this._token = tokenMgr; }
+			create() {
+				const tok = this._token;
+				const layer = L.tileLayer(
+					tok.isValid() ? buildUrl(tok.token) : BLANK_TILE,
+					{ tileSize: 256, maxNativeZoom: 21, maxZoom: 25,
+					  crossOrigin: true, ...opts },
+				);
+				if (!tok.isValid()) {
+					tok.get((err, token) => {
+						if (!err) layer.setUrl(buildUrl(token));
+					});
+				}
+				return layer;
+			}
+		};
+	}
+
 	// Factory for the ArcGIS MapServer `export?` pattern shared by Mobile
 	// Coverage, QPWS, and Cadastre overlays. Renders a transparent PNG per
 	// Leaflet tile with the requested sublayers shown.
@@ -1144,53 +1186,19 @@
 
 	// -- QLD Globe -----------------------------------------------------------
 
-	class QldGlobeLayerProvider extends LayerProvider {
-		constructor(qldToken) {
-			super();
-			this._token = qldToken;
-		}
-
-		static tileUrl(token) {
-			return CFG.QLD_TILE_TPL + (token ? "?token=" + token : "");
-		}
-
-		create() {
-			const url = this._token.isValid()
-				? QldGlobeLayerProvider.tileUrl(this._token.token)
-				: BLANK_TILE;
-			const layer = L.tileLayer(url, {
-				maxNativeZoom: 21,
-				maxZoom: 25,
-				tileSize: 256,
-				crossOrigin: true,
-				attribution: "&copy; State of Queensland (Department of Resources)",
-			});
-			if (!this._token.isValid()) {
-				this._token.get((err, token) => {
-					if (!err) layer.setUrl(QldGlobeLayerProvider.tileUrl(token));
-				});
-			}
-			return layer;
-		}
-	}
+	const QldGlobeLayerProvider = tokenTileProvider(
+		(token) => CFG.QLD_TILE_TPL + (token ? "?token=" + token : ""),
+		{ maxNativeZoom: 21, maxZoom: 25,
+		  attribution: "&copy; State of Queensland (Department of Resources)" },
+	);
 
 	// -- Google Hybrid --------------------------------------------------------
 
-	class GoogleHybridLayerProvider extends LayerProvider {
-		create() {
-			return L.tileLayer(
-				"https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
-				{
-					subdomains: ["0", "1", "2", "3"],
-					maxNativeZoom: 21,
-					maxZoom: 22,
-					tileSize: 256,
-					crossOrigin: true,
-					attribution: "&copy; Google",
-				},
-			);
-		}
-	}
+	const GoogleHybridLayerProvider = tileProvider(
+		"https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+		{ subdomains: ["0","1","2","3"], maxNativeZoom: 21,
+		  attribution: "&copy; Google" },
+	);
 
 	// -- Apple Maps ----------------------------------------------------------
 
@@ -1409,22 +1417,11 @@
 
 	// -- QLD Labels ----------------------------------------------------------
 
-	class QldLabelsLayerProvider extends LayerProvider {
-		create() {
-			return L.tileLayer(CFG.QLD_LABELS_TILE, {
-				maxNativeZoom: 19,
-				// 25 to match the deep-zoom map ceiling when QLD basemaps
-				// are active; native zoom stays at 19 so Leaflet stretches
-				// the z=19 tiles rather than 404ing at higher zooms.
-				maxZoom: 25,
-				tileSize: 256,
-				crossOrigin: true,
-				opacity: 1,
-				pane: "dwLabelsPane",
-				attribution: "&copy; State of Queensland (Department of Resources)",
-			});
-		}
-	}
+	// maxZoom 25 (vs native 19) so Leaflet stretches z=19 instead of 404ing.
+	const QldLabelsLayerProvider = tileProvider(CFG.QLD_LABELS_TILE, {
+		maxNativeZoom: 19, maxZoom: 25, pane: "dwLabelsPane",
+		attribution: "&copy; State of Queensland (Department of Resources)",
+	});
 
 	// -- QLD Roads -----------------------------------------------------------
 
@@ -1885,20 +1882,11 @@
 
 	// -- Strava Heatmap (anonymous tiles only) ----------------------------
 
-	class StravaHeatmapLayerProvider extends LayerProvider {
-		create() {
-			return L.tileLayer(
-				"https://content-a.strava.com/anon/globalheat/all/blue/{z}/{x}/{y}@2x.png?v=19",
-				{
-					tileSize: 256,
-					maxNativeZoom: 10,
-					maxZoom: 25,
-					opacity: 0.8,
-					attribution: "© Strava",
-				},
-			);
-		}
-	}
+	const StravaHeatmapLayerProvider = tileProvider(
+		"https://content-a.strava.com/anon/globalheat/all/blue/{z}/{x}/{y}@2x.png?v=19",
+		{ maxNativeZoom: 10, maxZoom: 25, opacity: 0.8,
+		  attribution: "© Strava" },
+	);
 
 	// -- Garmin Heatmap ---------------------------------------------------
 
@@ -2005,82 +1993,68 @@
 		}
 	}
 
+	/* -- Polling-data layer scaffold -------------------------------------
+	 * Captures the identical L.Layer.extend skeleton used by Flights and
+	 * Marine: create a pane, manage a layerGroup, poll on a timer, restart
+	 * the timer on map move/zoom (debounced), guard fetches by min zoom.
+	 * opts.fetch(map, group, self) does the actual data load + render.
+	 */
+	function pollingDataLayer(opts) {
+		return L.Layer.extend({
+			initialize() {
+				this._group = null;
+				this._timer = null;
+				this._debounce = null;
+			},
+			onAdd(map) {
+				if (!map.getPane(opts.pane)) {
+					map.createPane(opts.pane);
+					map.getPane(opts.pane).style.zIndex = String(opts.paneZIndex);
+				}
+				this._group = L.layerGroup().addTo(map);
+				this._startPoll();
+				map.on("moveend zoomend", this._onViewChange, this);
+			},
+			onRemove(map) {
+				clearInterval(this._timer);
+				clearTimeout(this._debounce);
+				this._timer = this._debounce = null;
+				map.off("moveend zoomend", this._onViewChange, this);
+				if (this._group) { this._group.remove(); this._group = null; }
+			},
+			_startPoll() {
+				clearInterval(this._timer);
+				this._fetchGuarded();
+				if (opts.pollMs) {
+					this._timer = setInterval(() => this._fetchGuarded(), opts.pollMs);
+				}
+			},
+			_onViewChange() {
+				clearInterval(this._timer);
+				clearTimeout(this._debounce);
+				this._timer = null;
+				this._debounce = setTimeout(() => this._startPoll(), opts.debounceMs || 400);
+			},
+			_fetchGuarded() {
+				const map = this._map;
+				if (!map || !this._group) return;
+				if (map.getZoom() < opts.minZoom) {
+					this._group.clearLayers();
+					return;
+				}
+				opts.fetch(map, this._group, this);
+			},
+			getAttribution() { return opts.attribution; },
+		});
+	}
+
 	/* -- Live Flights (OpenSky Network) ------------------------------------ */
 
 	class FlightsLayerProvider extends LayerProvider {
 		create() {
-			const POLL_MS = 10000;
-			const MIN_ZOOM = 1;
 			const OPENSKY = "https://opensky-network.org/api/states/all";
-
-			const FlightsLayer = L.Layer.extend({
-				initialize() {
-					this._group = null;
-					this._timer = null;
-					this._debounce = null;
-				},
-
-				onAdd(map) {
-					if (!map.getPane("dwFlightsPane")) {
-						map.createPane("dwFlightsPane");
-						map.getPane("dwFlightsPane").style.zIndex = "450";
-					}
-					this._group = L.layerGroup().addTo(map);
-					this._startPoll();
-					map.on("moveend zoomend", this._onViewChange, this);
-				},
-
-				onRemove(map) {
-					clearInterval(this._timer);
-					clearTimeout(this._debounce);
-					this._timer = this._debounce = null;
-					map.off("moveend zoomend", this._onViewChange, this);
-					if (this._group) {
-						this._group.remove();
-						this._group = null;
-					}
-				},
-
-				_startPoll() {
-					clearInterval(this._timer);
-					this._fetch();
-					this._timer = setInterval(() => this._fetch(), POLL_MS);
-				},
-
-				_onViewChange() {
-					clearInterval(this._timer);
-					clearTimeout(this._debounce);
-					this._timer = null;
-					this._debounce = setTimeout(() => this._startPoll(), 400);
-				},
-
-				_fetch() {
-					const map = this._map;
-					if (!map || !this._group) return;
-					if (map.getZoom() < MIN_ZOOM) {
-						this._group.clearLayers();
-						return;
-					}
-					const b = map.getBounds();
-					const url =
-						OPENSKY +
-						"?lamin=" +
-						b.getSouth().toFixed(3) +
-						"&lomin=" +
-						b.getWest().toFixed(3) +
-						"&lamax=" +
-						b.getNorth().toFixed(3) +
-						"&lomax=" +
-						b.getEast().toFixed(3);
-					gmJsonGet(url, (err, data) => {
-						if (err || !this._group) return;
-						this._render(data.states || []);
-					});
-				},
-
-				_render(states) {
-					if (!this._group) return;
-					this._group.clearLayers();
+			const renderStates = (group, states) => {
+					group.clearLayers();
 					for (const s of states) {
 						const lon = s[5],
 							lat = s[6];
@@ -2121,15 +2095,27 @@
 								`<b>${callsign}</b><br>Alt: ${altStr}&nbsp; Speed: ${spdStr}<br>${country}`,
 								{ className: "dw-flight-tip", sticky: true },
 							)
-							.addTo(this._group);
+							.addTo(group);
 					}
-				},
+			};
 
-				getAttribution() {
-					return 'Flights \u00a9 <a href="https://opensky-network.org" target="_blank" rel="noreferrer">OpenSky Network</a>';
+			const FlightsLayer = pollingDataLayer({
+				pane: "dwFlightsPane", paneZIndex: 450,
+				minZoom: 1, pollMs: 10000,
+				attribution: 'Flights \u00a9 <a href="https://opensky-network.org" target="_blank" rel="noreferrer">OpenSky Network</a>',
+				fetch: (map, group) => {
+					const b = map.getBounds();
+					const url = OPENSKY +
+						"?lamin=" + b.getSouth().toFixed(3) +
+						"&lomin=" + b.getWest().toFixed(3) +
+						"&lamax=" + b.getNorth().toFixed(3) +
+						"&lomax=" + b.getEast().toFixed(3);
+					gmJsonGet(url, (err, data) => {
+						if (err || !group._map) return;
+						renderStates(group, data.states || []);
+					});
 				},
 			});
-
 			return new FlightsLayer();
 		}
 	}
@@ -2138,8 +2124,6 @@
 
 	class MarineTrafficLayerProvider extends LayerProvider {
 		create() {
-			const POLL_MS = 20000;
-			const MIN_ZOOM = 1;
 			const MAX_TILES = 25;
 			const MT_BASE = "https://www.marinetraffic.com/getData/get_data_json_4";
 
@@ -2159,72 +2143,114 @@
 
 			function shipColor(type) {
 				const t = parseInt(type) || 0;
-				// MarineTraffic internal single-digit codes
-				if (t === 7) return "#5B9BD5"; // Cargo
-				if (t === 8) return "#D9534F"; // Tanker
-				if (t === 6) return "#9B59B6"; // Passenger
-				if (t === 4) return "#F0A500"; // High speed craft
-				if (t === 3) return "#2ECC71"; // Fishing / special
-				if (t === 5) return "#2980B9"; // Sailing / pleasure
-				// AIS standard codes (fallback)
-				if (t >= 70 && t < 80) return "#5B9BD5"; // Cargo
-				if (t >= 80 && t < 90) return "#D9534F"; // Tanker
-				if (t >= 60 && t < 70) return "#9B59B6"; // Passenger
-				if (t >= 40 && t < 50) return "#F0A500"; // High speed craft
-				if (t === 30) return "#2ECC71"; // Fishing
-				if (t >= 36 && t <= 37) return "#2980B9"; // Sailing / pleasure
-				return "#90A4AE"; // Other / unknown
+				if (t === 7) return "#5B9BD5";
+				if (t === 8) return "#D9534F";
+				if (t === 6) return "#9B59B6";
+				if (t === 4) return "#F0A500";
+				if (t === 3) return "#2ECC71";
+				if (t === 5) return "#2980B9";
+				if (t >= 70 && t < 80) return "#5B9BD5";
+				if (t >= 80 && t < 90) return "#D9534F";
+				if (t >= 60 && t < 70) return "#9B59B6";
+				if (t >= 40 && t < 50) return "#F0A500";
+				if (t === 30) return "#2ECC71";
+				if (t >= 36 && t <= 37) return "#2980B9";
+				return "#90A4AE";
 			}
 
-			const MTLayer = L.Layer.extend({
-				initialize() {
-					this._group = null;
-					this._timer = null;
-					this._debounce = null;
-				},
+			function renderShip(group, v) {
+				const fill = shipColor(v.type);
+				const svg =
+					`<svg viewBox="0 0 14 20" width="14" height="20" xmlns="http://www.w3.org/2000/svg">` +
+					`<g transform="translate(7,10) rotate(${v.hdg})">` +
+					`<polygon points="0,-9 4.5,8 0,5 -4.5,8" fill="${fill}" stroke="#333" stroke-width="0.7"/>` +
+					`</g></svg>`;
+				const icon = L.divIcon({ className: "dw-marine-icon", html: svg,
+					iconSize: [14, 20], iconAnchor: [7, 10] });
+				L.marker([v.lat, v.lon], { icon, pane: "dwMarinePane", interactive: true })
+					.bindTooltip(
+						`<b>${v.name}</b><br>MMSI: ${v.mmsi}<br>Speed: ${v.spdKts} kts Hdg: ${Math.round(v.hdg)}°`,
+						{ className: "dw-marine-tip", sticky: true })
+					.addTo(group);
+			}
 
-				onAdd(map) {
-					if (!map.getPane("dwMarinePane")) {
-						map.createPane("dwMarinePane");
-						map.getPane("dwMarinePane").style.zIndex = "440";
+			function renderCluster(group, map, lat, lon, vessels) {
+				const count = vessels.length;
+				const size = count < 6 ? 22 : count < 21 ? 28 : 36;
+				const fontPx = Math.round(size * 0.42);
+				const fill = count < 6 ? "#5b9bd5" : count < 21 ? "#2e6a98" : "#1c4870";
+				const icon = L.divIcon({
+					className: "dw-marine-cluster",
+					html: `<div style="background:${fill};color:#fff;width:${size}px;height:${size}px;border-radius:50%;display:flex;align-items:center;justify-content:center;font:bold ${fontPx}px/1 sans-serif;border:2px solid rgba(255,255,255,0.85);box-shadow:0 0 4px rgba(0,0,0,.5);">${count}</div>`,
+					iconSize: [size, size], iconAnchor: [size / 2, size / 2],
+				});
+				const sample = vessels.slice(0, 5).map((v) => v.name).join("<br>");
+				const more = vessels.length > 5 ? `<br><i>+${vessels.length - 5} more</i>` : "";
+				L.marker([lat, lon], { icon, pane: "dwMarinePane", interactive: true })
+					.bindTooltip(
+						`<b>${count} vessels</b><br><span class="dw-cad-sub">${sample}${more}</span>`,
+						{ className: "dw-marine-tip", sticky: true })
+					.on("click", () => {
+						map.flyTo([lat, lon],
+							Math.min(map.getZoom() + 2, map.getMaxZoom()),
+							{ duration: 0.5 });
+					})
+					.addTo(group);
+			}
+
+			function renderRows(group, map, rows) {
+				group.clearLayers();
+				const pick = (obj, ...keys) => {
+					for (const k of keys) {
+						const v = obj[k];
+						if (v !== undefined && v !== null && v !== "") return v;
 					}
-					this._group = L.layerGroup().addTo(map);
-					this._startPoll();
-					map.on("moveend zoomend", this._onViewChange, this);
-				},
-
-				onRemove(map) {
-					clearInterval(this._timer);
-					clearTimeout(this._debounce);
-					this._timer = this._debounce = null;
-					map.off("moveend zoomend", this._onViewChange, this);
-					if (this._group) {
-						this._group.remove();
-						this._group = null;
+					return "";
+				};
+				const vessels = [];
+				for (const v of rows) {
+					const lat = parseFloat(pick(v, "LAT", "lat"));
+					const lon = parseFloat(pick(v, "LON", "lon"));
+					if (!isFinite(lat) || !isFinite(lon)) continue;
+					const name = String(pick(v, "SHIPNAME", "shipname", "NAME", "name", "MMSI") || "").trim() || "Unknown";
+					const mmsi = pick(v, "MMSI", "mmsi") || "";
+					const type = parseInt(pick(v, "SHIPTYPE", "shiptype", "TYPE", "type") || "0") || 0;
+					const hdg  = parseFloat(pick(v, "HEADING", "heading", "COURSE", "course") || "0") || 0;
+					const rawSpd = parseFloat(pick(v, "SPEED", "speed") || "0") || 0;
+					const spdKts = rawSpd > 102 ? (rawSpd / 10).toFixed(1) : rawSpd.toFixed(1);
+					vessels.push({ lat, lon, name, mmsi, type, hdg, spdKts });
+				}
+				if (!vessels.length) return;
+				// 50px screen-grid clustering — overlapping vessels coalesce into a count badge.
+				const CELL_PX = 50;
+				const zoom = map.getZoom();
+				const cells = new Map();
+				for (const v of vessels) {
+					const pt = map.project([v.lat, v.lon], zoom);
+					const key = Math.floor(pt.x / CELL_PX) + "/" + Math.floor(pt.y / CELL_PX);
+					let cell = cells.get(key);
+					if (!cell) { cell = { vessels: [], sumLat: 0, sumLon: 0 }; cells.set(key, cell); }
+					cell.vessels.push(v);
+					cell.sumLat += v.lat;
+					cell.sumLon += v.lon;
+				}
+				for (const cell of cells.values()) {
+					if (cell.vessels.length === 1) {
+						renderShip(group, cell.vessels[0]);
+					} else {
+						renderCluster(group, map,
+							cell.sumLat / cell.vessels.length,
+							cell.sumLon / cell.vessels.length,
+							cell.vessels);
 					}
-				},
+				}
+			}
 
-				_startPoll() {
-					clearInterval(this._timer);
-					this._fetch();
-					this._timer = setInterval(() => this._fetch(), POLL_MS);
-				},
-
-				_onViewChange() {
-					clearInterval(this._timer);
-					clearTimeout(this._debounce);
-					this._timer = null;
-					this._debounce = setTimeout(() => this._startPoll(), 400);
-				},
-
-				_fetch() {
-					const map = this._map;
-					if (!map || !this._group) return;
-					if (map.getZoom() < MIN_ZOOM) {
-						this._group.clearLayers();
-						return;
-					}
-					// MT API z parameter is one more than the OSM tile zoom used for X/Y
+			const MTLayer = pollingDataLayer({
+				pane: "dwMarinePane", paneZIndex: 440,
+				minZoom: 1, pollMs: 20000,
+				attribution: 'Vessels © <a href="https://www.marinetraffic.com" target="_blank" rel="noreferrer">MarineTraffic</a>',
+				fetch: (map, group) => {
 					const tileZ = Math.max(4, Math.min(map.getZoom(), 8));
 					const apiZ = tileZ + 1;
 					const b = map.getBounds();
@@ -2240,31 +2266,28 @@
 					if (!tiles.length) return;
 					const vessels = new Map();
 					let remaining = tiles.length;
-					const referer =
-						`https://www.marinetraffic.com/en/ais/home` +
-						`/centerx:${center.lng.toFixed(1)}/centery:${center.lat.toFixed(1)}/zoom:${tileZ}`;
+					const referer = `https://www.marinetraffic.com/en/ais/home/centerx:${center.lng.toFixed(1)}/centery:${center.lat.toFixed(1)}/zoom:${tileZ}`;
 					const done = () => {
-						if (--remaining === 0 && this._group)
-							this._render([...vessels.values()]);
+						if (--remaining === 0 && group._map) {
+							renderRows(group, map, [...vessels.values()]);
+						}
 					};
 					for (const { x, y } of tiles) {
 						const url = `${MT_BASE}/z:${apiZ}/X:${x}/Y:${y}/station:0`;
 						gmJsonGet(url, {
 							headers: {
-								"Accept":           "*/*",
+								"Accept": "*/*",
 								"X-Requested-With": "XMLHttpRequest",
-								"Referer":          referer,
+								"Referer": referer,
 							},
 						}, (err, parsed) => {
 							if (err) { done(); return; }
-							// Format: { type, data: { rows: [...], areaShips: N } }
 							const raw =
 								(parsed.data && parsed.data.rows) ||
 								(Array.isArray(parsed.data) ? parsed.data : null) ||
 								(Array.isArray(parsed) ? parsed : null);
 							if (!Array.isArray(raw)) { done(); return; }
 							let rows = raw;
-							// Normalise array-of-arrays (first row = column headers)
 							if (rows.length && Array.isArray(rows[0])) {
 								const hdrs = rows[0];
 								rows = rows.slice(1).map((row) => {
@@ -2274,8 +2297,7 @@
 								});
 							}
 							for (const v of rows) {
-								const key =
-									v.MMSI || v.mmsi ||
+								const key = v.MMSI || v.mmsi ||
 									String(v.LAT || v.lat) + "," + String(v.LON || v.lon);
 								if (key && !vessels.has(key)) vessels.set(key, v);
 							}
@@ -2283,159 +2305,7 @@
 						});
 					}
 				},
-
-				_render(rows) {
-					if (!this._group) return;
-					const map = this._map;
-					if (!map) return;
-					this._group.clearLayers();
-					// MarineTraffic flips between UPPER/lower keys depending
-					// on the endpoint variant — pick walks the candidates.
-					const pick = (obj, ...keys) => {
-						for (const k of keys) {
-							const v = obj[k];
-							if (v !== undefined && v !== null && v !== "") return v;
-						}
-						return "";
-					};
-
-					// Normalise rows → vessel objects once. The old per-vessel
-					// loop did the pick() lookups + SVG construction inline,
-					// and at heavily-trafficked ports the resulting N L.marker
-					// creations were the visible hot spot.
-					const vessels = [];
-					for (const v of rows) {
-						const lat = parseFloat(pick(v, "LAT", "lat"));
-						const lon = parseFloat(pick(v, "LON", "lon"));
-						if (!isFinite(lat) || !isFinite(lon)) continue;
-						const name = String(pick(v,
-							"SHIPNAME", "shipname", "NAME", "name", "MMSI") || ""
-						).trim() || "Unknown";
-						const mmsi = pick(v, "MMSI", "mmsi") || "";
-						const type = parseInt(pick(v,
-							"SHIPTYPE", "shiptype", "TYPE", "type") || "0") || 0;
-						const hdg  = parseFloat(pick(v,
-							"HEADING", "heading", "COURSE", "course") || "0") || 0;
-						const rawSpd = parseFloat(pick(v, "SPEED", "speed") || "0") || 0;
-						// AIS speed is in 1/10 knots; guard pre-divided values.
-						const spdKts =
-							rawSpd > 102 ? (rawSpd / 10).toFixed(1) : rawSpd.toFixed(1);
-						vessels.push({ lat, lon, name, mmsi, type, hdg, spdKts });
-					}
-					if (!vessels.length) return;
-
-					// Screen-grid clustering: bin vessels by pixel-coord cell at
-					// the current zoom. CELL_PX=50 means cells are ~50 screen
-					// pixels — wide enough that overlapping vessels collapse
-					// into one badge, narrow enough that a vessel in open water
-					// stays solo. Clusters expand naturally on zoom-in because
-					// cell coverage shrinks geographically.
-					const CELL_PX = 50;
-					const zoom = map.getZoom();
-					const cells = new Map();
-					for (const v of vessels) {
-						const pt = map.project([v.lat, v.lon], zoom);
-						const key =
-							Math.floor(pt.x / CELL_PX) + "/" +
-							Math.floor(pt.y / CELL_PX);
-						let cell = cells.get(key);
-						if (!cell) {
-							cell = { vessels: [], sumLat: 0, sumLon: 0 };
-							cells.set(key, cell);
-						}
-						cell.vessels.push(v);
-						cell.sumLat += v.lat;
-						cell.sumLon += v.lon;
-					}
-
-					for (const cell of cells.values()) {
-						if (cell.vessels.length === 1) {
-							this._renderShip(cell.vessels[0]);
-						} else {
-							const lat = cell.sumLat / cell.vessels.length;
-							const lon = cell.sumLon / cell.vessels.length;
-							this._renderCluster(map, lat, lon, cell.vessels);
-						}
-					}
-				},
-
-				_renderShip(v) {
-					const fill = shipColor(v.type);
-					const svg =
-						`<svg viewBox="0 0 14 20" width="14" height="20" xmlns="http://www.w3.org/2000/svg">` +
-						`<g transform="translate(7,10) rotate(${v.hdg})">` +
-						`<polygon points="0,-9 4.5,8 0,5 -4.5,8" fill="${fill}" stroke="#333" stroke-width="0.7"/>` +
-						`</g></svg>`;
-					const icon = L.divIcon({
-						className: "dw-marine-icon",
-						html: svg,
-						iconSize: [14, 20],
-						iconAnchor: [7, 10],
-					});
-					L.marker([v.lat, v.lon], {
-						icon,
-						pane: "dwMarinePane",
-						interactive: true,
-					})
-						.bindTooltip(
-							`<b>${v.name}</b><br>MMSI: ${v.mmsi}<br>Speed: ${v.spdKts}\u202fkts\u2002Hdg: ${Math.round(v.hdg)}\u00b0`,
-							{ className: "dw-marine-tip", sticky: true },
-						)
-						.addTo(this._group);
-				},
-
-				_renderCluster(map, lat, lon, vessels) {
-					const count = vessels.length;
-					// Size + colour scale with count so a quick visual scan
-					// distinguishes a small cluster from a major port.
-					const size = count < 6 ? 22 : count < 21 ? 28 : 36;
-					const fontPx = Math.round(size * 0.42);
-					const fill = count < 6 ? "#5b9bd5"
-						: count < 21 ? "#2e6a98"
-						: "#1c4870";
-					const icon = L.divIcon({
-						className: "dw-marine-cluster",
-						html:
-							`<div style="background:${fill};color:#fff;` +
-							`width:${size}px;height:${size}px;border-radius:50%;` +
-							`display:flex;align-items:center;justify-content:center;` +
-							`font:bold ${fontPx}px/1 sans-serif;` +
-							`border:2px solid rgba(255,255,255,0.85);` +
-							`box-shadow:0 0 4px rgba(0,0,0,.5);` +
-							`">${count}</div>`,
-						iconSize:   [size, size],
-						iconAnchor: [size / 2, size / 2],
-					});
-					// Tooltip previews up to 5 sample names; click expands the
-					// cluster by flying in two zoom steps (capped at the map's
-					// max zoom). flyTo's easing makes the cluster→spread
-					// transition read as intentional rather than abrupt.
-					const sample = vessels.slice(0, 5)
-						.map((v) => v.name).join("<br>");
-					const more = vessels.length > 5
-						? `<br><i>+${vessels.length - 5} more</i>` : "";
-					L.marker([lat, lon], {
-						icon,
-						pane: "dwMarinePane",
-						interactive: true,
-					})
-						.bindTooltip(
-							`<b>${count} vessels</b>` +
-							`<br><span class="dw-cad-sub">${sample}${more}</span>`,
-							{ className: "dw-marine-tip", sticky: true },
-						)
-						.on("click", () => {
-							const targetZ = Math.min(map.getZoom() + 2, map.getMaxZoom());
-							map.flyTo([lat, lon], targetZ, { duration: 0.5 });
-						})
-						.addTo(this._group);
-				},
-
-				getAttribution() {
-					return 'Vessels \u00a9 <a href="https://www.marinetraffic.com" target="_blank" rel="noreferrer">MarineTraffic</a>';
-				},
 			});
-
 			return new MTLayer();
 		}
 	}
@@ -2747,44 +2617,23 @@
 
 	// ACCC Mobile Sites and Coverages (national AU). Sublayer 2 = "All
 	// Network Operators 4G Outdoor Mobile Coverage".
-	class MobileCoverageLayerProvider extends LayerProvider {
-		create() {
-			return makeArcgisExportTileLayer({
-				baseUrl:
-					"https://spatial.infrastructure.gov.au/server/rest/services/" +
-					"ACCC_Mobile_Sites_and_Coverages/MapServer",
-				showLayers: "2",
-				pane: "dwMobilePane",
-				paneZIndex: 380,
-				opacity: 0.5,
-				minZoom: 5,
-				// ACCC's coverage grid is intrinsically coarse (~100 m cells),
-				// so cap the native query at z=18 and let Leaflet stretch the
-				// z=18 tile beyond that — saves the export endpoint from
-				// generating tinier bboxes that render the same blocky pixels.
-				maxNativeZoom: 18,
-				maxZoom: 25,
-				attribution:
-					'Mobile coverage \u00a9 <a href="https://data.gov.au" target="_blank" rel="noreferrer">ACCC / Dept. of Infrastructure</a>',
-			});
-		}
-	}
+	// maxNativeZoom 18: ACCC's grid is ~100 m cells, finer queries return
+	// the same blocky pixels — let Leaflet stretch z=18 instead.
+	const MobileCoverageLayerProvider = arcgisExportProvider({
+		baseUrl: "https://spatial.infrastructure.gov.au/server/rest/services/ACCC_Mobile_Sites_and_Coverages/MapServer",
+		showLayers: "2", pane: "dwMobilePane", paneZIndex: 380,
+		opacity: 0.5, minZoom: 5, maxNativeZoom: 18, maxZoom: 25,
+		attribution: 'Mobile coverage © <a href="https://data.gov.au" target="_blank" rel="noreferrer">ACCC / Dept. of Infrastructure</a>',
+	});
+
 
 	/* -- QLD Topo basemap ------------------------------------------------- */
 
-	class QldTopoLayerProvider extends LayerProvider {
-		create() {
-			return L.tileLayer(CFG.QLD_TOPO_TILE, {
-				maxNativeZoom: 16,
-				// Topo is one of the deep-zoom-eligible bases (see
-				// _syncZoomLevel), so it needs to cover the 25 ceiling.
-				maxZoom: 25,
-				tileSize: 256,
-				crossOrigin: true,
-				attribution: "&copy; State of Queensland (Department of Resources)",
-			});
-		}
-	}
+	// Deep-zoom-eligible base; maxZoom 25 (vs native 16) lets Leaflet stretch.
+	const QldTopoLayerProvider = tileProvider(CFG.QLD_TOPO_TILE, {
+		maxNativeZoom: 16, maxZoom: 25,
+		attribution: "&copy; State of Queensland (Department of Resources)",
+	});
 
 	/* -- Hover-identify factory ------------------------------------------
 	 *
@@ -3464,28 +3313,17 @@
 		_installCadastreHoverInner(layer, map);
 	}
 
-	class QldCadastreLayerProvider extends LayerProvider {
-		create() {
-			return makeArcgisExportTileLayer({
-				baseUrl: CFG.QLD_CADASTRE_SERVICE,
-				showLayers: String(CFG.QLD_CADASTRE_LAYER_ID),
-				pane: "dwCadastrePane",
-				paneZIndex: 385,
-				opacity: 0.75,
-				minZoom: 11,
-				maxZoom: 25,
-				attribution:
-					'Cadastre &copy; <a href="https://www.qld.gov.au/dnrme" target="_blank" rel="noreferrer">State of Queensland (DCDB)</a>',
-				onAdd: (layer, map) => installCadastreHover(layer, map),
-				onRemove: (layer) => {
-					if (layer._dwHoverOff) {
-						layer._dwHoverOff();
-						layer._dwHoverOff = null;
-					}
-				},
-			});
-		}
-	}
+	const QldCadastreLayerProvider = arcgisExportProvider({
+		baseUrl: CFG.QLD_CADASTRE_SERVICE,
+		showLayers: String(CFG.QLD_CADASTRE_LAYER_ID),
+		pane: "dwCadastrePane", paneZIndex: 385,
+		opacity: 0.75, minZoom: 11, maxZoom: 25,
+		attribution: 'Cadastre &copy; <a href="https://www.qld.gov.au/dnrme" target="_blank" rel="noreferrer">State of Queensland (DCDB)</a>',
+		onAdd: (layer, map) => installCadastreHover(layer, map),
+		onRemove: (layer) => {
+			if (layer._dwHoverOff) { layer._dwHoverOff(); layer._dwHoverOff = null; }
+		},
+	});
 
 	/* -- QPWS Estate (QLD Parks & Wildlife) ------------------------------- */
 
@@ -3513,43 +3351,42 @@
 	// Cadastre/MobileCoverage. Suppressed below zoom 9 — the polygons
 	// dominate the view at small scales and the trails aren't visible
 	// anyway.
-	class QpwsLayerProvider extends LayerProvider {
-		create() {
-			return makeArcgisExportTileLayer({
-				baseUrl:    CFG.QLD_QPWS_SERVICE,
-				showLayers: CFG.QLD_QPWS_LAYER_IDS,
-				pane:       "dwQpwsPane",
-				paneZIndex: 396,
-				opacity:    0.85,
-				minZoom:    9,
-				maxZoom:    25,
-				attribution: 'QPWS &copy; <a href="https://parks.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (DETSI)</a>',
-				onAdd:    (layer, map) => installQpwsHover(layer, map),
-				onRemove: (layer) => {
-					if (layer._dwHoverOff) { layer._dwHoverOff(); layer._dwHoverOff = null; }
-				},
-			});
-		}
-	}
+	const QpwsLayerProvider = arcgisExportProvider({
+		baseUrl: CFG.QLD_QPWS_SERVICE,
+		showLayers: CFG.QLD_QPWS_LAYER_IDS,
+		pane: "dwQpwsPane", paneZIndex: 396,
+		opacity: 0.85, minZoom: 9, maxZoom: 25,
+		attribution: 'QPWS &copy; <a href="https://parks.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (DETSI)</a>',
+		onAdd: (layer, map) => installQpwsHover(layer, map),
+		onRemove: (layer) => {
+			if (layer._dwHoverOff) { layer._dwHoverOff(); layer._dwHoverOff = null; }
+		},
+	});
 
 	/* -- OpenSeaMap -------------------------------------------------------- */
 
 	// Public transparent overlay tiles — nautical seamarks (buoys, lights,
 	// lanes, harbour features). No key required, polite to cache.
-	class OpenSeaMapLayerProvider extends LayerProvider {
-		create() {
-			return L.tileLayer(
-				"https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
-				{
-					tileSize: 256,
-					maxNativeZoom: 18,
-					maxZoom: 25,
-					opacity: 1,
-					attribution:
-						'&copy; <a href="https://www.openseamap.org/" target="_blank" rel="noreferrer">OpenSeaMap</a> contributors',
-				},
-			);
-		}
+	const OpenSeaMapLayerProvider = tileProvider(
+		"https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
+		{ maxNativeZoom: 18, maxZoom: 25,
+		  attribution: '&copy; <a href="https://www.openseamap.org/" target="_blank" rel="noreferrer">OpenSeaMap</a> contributors' },
+	);
+
+	/* -- OpenInfraMap shared helpers -------------------------------------- */
+
+	// Shared svg-circle-with-glyph icon used by Power, Telecoms, Water.
+	// `className` is the only meaningful per-layer variant (CSS hook).
+	function oimIcon(className, glyph, fill, size) {
+		size = size || 15;
+		return L.divIcon({
+			className,
+			html: `<svg viewBox="0 0 16 16" width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">` +
+				  `<circle cx="8" cy="8" r="6.5" fill="${fill}" stroke="#222" stroke-width="1" opacity="0.92"/>` +
+				  `<text x="8" y="11.5" text-anchor="middle" font-size="9" font-family="sans-serif" fill="#fff">${glyph}</text>` +
+				  `</svg>`,
+			iconSize: [size, size], iconAnchor: [size / 2, size / 2],
+		});
 	}
 
 	/* -- Power Infrastructure (OpenInfraMap vector tiles) ---------------- */
@@ -3588,18 +3425,7 @@
 				return 1.2; // minor_line
 			}
 
-			function pointIcon(glyph, fill, size) {
-				size = size || 16;
-				return L.divIcon({
-					className: "dw-infra-icon",
-					html: `<svg viewBox="0 0 16 16" width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">` +
-					      `<circle cx="8" cy="8" r="6.5" fill="${fill}" stroke="#222" stroke-width="1" opacity="0.92"/>` +
-					      `<text x="8" y="11.5" text-anchor="middle" font-size="9" font-family="sans-serif" fill="#fff">${glyph}</text>` +
-					      `</svg>`,
-					iconSize:   [size, size],
-					iconAnchor: [size / 2, size / 2],
-				});
-			}
+			const pointIcon = (g, f, s) => oimIcon("dw-infra-icon", g, f, s || 16);
 
 			// OpenInfraMap stores voltage in kV and output in MW; the renderer
 			// (and lineColor/fmtVoltage) expect OSM-style volts, so convert.
@@ -3795,18 +3621,7 @@
 	// wins). Masts/antennas are usually unnamed points.
 	class TelecomsLayerProvider extends LayerProvider {
 		create() {
-			function dotIcon(glyph, fill, size) {
-				size = size || 15;
-				return L.divIcon({
-					className: "dw-telecom-icon",
-					html: `<svg viewBox="0 0 16 16" width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">` +
-					      `<circle cx="8" cy="8" r="6.5" fill="${fill}" stroke="#222" stroke-width="1" opacity="0.92"/>` +
-					      `<text x="8" y="11.5" text-anchor="middle" font-size="9" font-family="sans-serif" fill="#fff">${glyph}</text>` +
-					      `</svg>`,
-					iconSize:   [size, size],
-					iconAnchor: [size / 2, size / 2],
-				});
-			}
+			const dotIcon = (g, f, s) => oimIcon("dw-telecom-icon", g, f, s || 15);
 			const DC_FILL = "#00897B";   // teal — data centre / exchange
 			const MAST_FILL = "#26A69A";
 
@@ -3895,17 +3710,7 @@
 	// pairs share an `_id` so the polygon wins.
 	class WaterLayerProvider extends LayerProvider {
 		create() {
-			function dotIcon(glyph, fill, size) {
-				size = size || 14;
-				return L.divIcon({
-					className: "dw-water-icon",
-					html: `<svg viewBox="0 0 16 16" width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">` +
-					      `<circle cx="8" cy="8" r="6.5" fill="${fill}" stroke="#222" stroke-width="1" opacity="0.92"/>` +
-					      `<text x="8" y="11.5" text-anchor="middle" font-size="9" font-family="sans-serif" fill="#fff">${glyph}</text>` +
-					      `</svg>`,
-					iconSize: [size, size], iconAnchor: [size / 2, size / 2],
-				});
-			}
+			const dotIcon = (g, f, s) => oimIcon("dw-water-icon", g, f, s || 14);
 			// water-kind → marker glyph/colour + label (pipelines styled below).
 			const STYLE = {
 				plant_water: { fill: "#0277BD", glyph: "≈", label: "Water treatment plant" },
@@ -4763,6 +4568,14 @@
 			return layer;
 		}
 	}
+
+	/* -- INTVL canvas + hit-test helpers ---------------------------------
+	 * These are INTVL-internal — hexAlpha is consumed by the canvas
+	 * fill in `IntvlGlobalTilesLayerProvider`, and pointInRing is the
+	 * hover-hit-test for picking which territory is under the cursor.
+	 * Kept after the class because they're tiny + function-declared
+	 * (hoisted), but logically they belong with the INTVL block above.
+	 */
 
 	// Append alpha to a #rrggbb colour → 'rgba(r,g,b,a)' for canvas fill.
 	function hexAlpha(hex, a) {
