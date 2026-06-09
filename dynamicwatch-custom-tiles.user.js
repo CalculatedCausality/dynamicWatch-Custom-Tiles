@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.68
+// @version      7.9.69
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -5019,18 +5019,38 @@
 		}
 
 		_mount(map) {
-			// Hide only the panes we re-render via Mapbox (tile base,
-			// route SVG, custom overlay panes), and keep the marker
-			// pane VISIBLE so the waypoint markers stay draggable —
-			// Leaflet's drag handler needs the icon DOM to receive
-			// pointer events. The waypoints float in 2D pixel space
-			// rather than tracking the terrain mesh, but that's the
-			// price of preserving drag-to-edit during 3D mode.
-			// Custom panes (dwIntvl…, dwInfra, dwGeocaching, etc.)
-			// are walked on demand because dynamic.watch / the
-			// userscript create them lazily.
 			this._hiddenPanes = [];
 			this._hideHiddenable(map);
+			// Mount the Mapbox container ONCE per enable. Previously
+			// this happened inside `_hideHiddenable` which is also
+			// called from `_baseTracker` and `_syncOverlaysImpl` on
+			// every layer event — so a second/third dw-mb-container
+			// could end up in DOM with the same id while
+			// `this._mbContainer` only tracked the most recent one.
+			// On disable, `_unmount` removed the tracked div but the
+			// older one (still parenting the live Mapbox canvas)
+			// leaked. On re-enable, a fresh container went IN FRONT
+			// of the leaked one — and the leaked Leaflet panes /
+			// list items on top of it intercepted pointer events,
+			// which is what made the camera "unable to be moved".
+			// Cleanup is now strictly enable→mount, disable→unmount.
+			if (!document.getElementById("dw-mb-container")) {
+				const root = map.getContainer();
+				const div = document.createElement("div");
+				div.id = "dw-mb-container";
+				div.style.cssText =
+					"position:absolute;top:0;left:0;width:100%;height:100%;" +
+					// `z-index: 200` lifts us above Leaflet's tilePane
+					// (z-index 200 too — equal beats nothing) and below
+					// the marker / popup panes (600+) so user-clickable
+					// UI still works.
+					"z-index:200;pointer-events:auto;";
+				if (root.firstChild) root.insertBefore(div, root.firstChild);
+				else root.appendChild(div);
+				this._mbContainer = div;
+			} else {
+				this._mbContainer = document.getElementById("dw-mb-container");
+			}
 		}
 
 		// Walk all panes and hide the ones we shouldn't render in 3D.
@@ -5089,25 +5109,6 @@
 			for (const key of Object.keys(map._panes || {})) {
 				if (key.startsWith("dw")) hide(key);
 			}
-			// Mount in the leaflet root, NOT in mapPane. mapPane has no
-			// intrinsic size (Leaflet uses it for transforms only), so a
-			// 100% container collapses to 0×0 and Mapbox boots with its
-			// default 400×300 fallback canvas. The leaflet root has the
-			// real viewport size.
-			// Insert as the FIRST child so it stacks below every other
-			// pane (no z-index needed — DOM order wins among siblings
-			// without explicit z-index). pointer-events:auto so Mapbox
-			// owns drag/orbit/zoom while 3D is on. Leaflet controls are
-			// later in DOM order so they still receive clicks.
-			const root = map.getContainer();
-			const div = document.createElement("div");
-			div.id = "dw-mb-container";
-			div.style.cssText =
-				"position:absolute;top:0;left:0;width:100%;height:100%;" +
-				"pointer-events:auto;";
-			if (root.firstChild) root.insertBefore(div, root.firstChild);
-			else root.appendChild(div);
-			this._mbContainer = div;
 		}
 
 		_hidePane(map, paneName, prevKey) {
@@ -5124,8 +5125,14 @@
 		}
 
 		_unmount(map) {
-			if (this._mbContainer && this._mbContainer.parentNode) {
-				this._mbContainer.parentNode.removeChild(this._mbContainer);
+			// Belt + braces: remove every dw-mb-container in the DOM,
+			// not just the one we tracked. If anything (a stale enable
+			// from a prior session, an external script, etc.) left a
+			// stray container behind, we don't want it leaking past
+			// disable and intercepting pointer events on the next
+			// enable.
+			for (const el of document.querySelectorAll("#dw-mb-container")) {
+				el.parentNode?.removeChild(el);
 			}
 			this._mbContainer = null;
 			map.getContainer().classList.remove("dw-3d-active");
