@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.76
+// @version      7.9.79
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -134,12 +134,6 @@
 		// No embedded Mapbox token — dynamic.watch already serves its own
 		// public pk.eyJ... in the page payload (mapOptions.k[0] for /me,
 		// route-thumbnail URLs everywhere); pickMapboxToken() scrapes it
-		// at runtime. We only need *some* token to satisfy mapbox-gl-js's
-		// init check; all our tile sources are non-Mapbox (Terrarium DEM
-		// on AWS, basemaps mirrored from Leaflet templates).
-		TERRARIUM_TILES:
-			"https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
-
 		// Geocaching.com's web map endpoint. POSTed with a JSON body
 		// containing a bbox; reuses the user's existing session cookie via
 		// GM_xmlhttpRequest's privileged cross-origin send. Not a public
@@ -917,22 +911,22 @@
 		};
 	}
 
-	// Token-aware variant: `buildUrl(token)` is called both at create-time
-	// (BLANK_TILE if the token isn't ready yet) and again in `tok.get()`'s
-	// callback to setUrl(...) once the bootstrap resolves.
+	// Token-aware variant: `buildUrl(tokenMgr)` is passed the whole token
+	// manager so providers with multi-field credentials (Apple uses
+	// accessKey + version) can read what they need.
 	function tokenTileProvider(buildUrl, opts = {}) {
 		return class extends LayerProvider {
 			constructor(tokenMgr) { super(); this._token = tokenMgr; }
 			create() {
 				const tok = this._token;
 				const layer = L.tileLayer(
-					tok.isValid() ? buildUrl(tok.token) : BLANK_TILE,
+					tok.isValid() ? buildUrl(tok) : BLANK_TILE,
 					{ tileSize: 256, maxNativeZoom: 21, maxZoom: 25,
 					  crossOrigin: true, ...opts },
 				);
 				if (!tok.isValid()) {
-					tok.get((err, token) => {
-						if (!err) layer.setUrl(buildUrl(token));
+					tok.get(() => {
+						if (tok.isValid()) layer.setUrl(buildUrl(tok));
 					});
 				}
 				return layer;
@@ -1187,7 +1181,7 @@
 	// -- QLD Globe -----------------------------------------------------------
 
 	const QldGlobeLayerProvider = tokenTileProvider(
-		(token) => CFG.QLD_TILE_TPL + (token ? "?token=" + token : ""),
+		(tok) => CFG.QLD_TILE_TPL + (tok.token ? "?token=" + tok.token : ""),
 		{ maxNativeZoom: 21, maxZoom: 25,
 		  attribution: "&copy; State of Queensland (Department of Resources)" },
 	);
@@ -2740,15 +2734,12 @@
 		};
 	}
 
-	/* -- QLD Cadastre (Digital Cadastral Database) ------------------------ */
+	/* -- QLD Cadastre + OnTheHouse Sales ----------------------------------
+	 * Cadastre hover-identify renders a tooltip with a "Sales ↗" link;
+	 * clicking it fires the OnTheHouse fetch pipeline + opens a popup.
+	 * `installCadastreHover` is the entry point that wires both.
+	 */
 
-	// Property/parcel boundaries from the QLD Planning Cadastre MapServer,
-	// rendered via makeArcgisExportTileLayer plus a hover-identify hook.
-	//
-	// Hover behaviour: above CFG.QLD_CADASTRE_HOVER_MIN_ZOOM, mousemove
-	// triggers a debounced /identify call against layer 8 (Base Parcels Only)
-	// and shows a tooltip with Lot/Plan, tenure, area, locality. Stale
-	// responses are dropped via a generation counter.
 	// Filters out QLD's "Null" sentinel strings and genuinely empty values.
 	function _cadVal(v) {
 		if (v === null || v === undefined) return "";
@@ -4759,13 +4750,9 @@
 			this._app = app;
 			this._active = false;
 			this._loading = false;
-			this._cancelLoad = false;
 			this._mbMap = null;
 			this._mbContainer = null;
-			this._prevTileOpacity = null;
-			this._syncing = false;
 			this._handler3DMove = null;
-			this._handler2DMove = null;
 			this._baseTracker = null;
 		}
 
@@ -4939,19 +4926,6 @@
 			for (const key of Object.keys(map._panes || {})) {
 				if (key.startsWith("dw")) hide(key);
 			}
-		}
-
-		_hidePane(map, paneName, prevKey) {
-			const pane = map.getPane(paneName);
-			if (!pane) return;
-			this[prevKey] = pane.style.opacity;
-			pane.style.opacity = "0";
-		}
-
-		_restorePane(map, paneName, prevKey) {
-			const pane = map.getPane(paneName);
-			if (pane) pane.style.opacity = this[prevKey] || "";
-			this[prevKey] = null;
 		}
 
 		_unmount(map) {
@@ -6814,108 +6788,60 @@
 			// boot. Harmless in production.
 			try { pageWin._dwLayerCtrl = ctrl; } catch (_) {}
 
+			const addBase = (name, provider) => {
+				const lyr = this.layers[name] = provider.create();
+				ctrl.addBaseLayer(lyr, name);
+				return lyr;
+			};
+			const addOverlay = (name, provider) => {
+				const lyr = this.layers[name] = provider.create();
+				ctrl.addOverlay(lyr, name);
+				return lyr;
+			};
+
 			try {
-				this.layers[CFG.LAYER_GOOGLE] =
-					new GoogleHybridLayerProvider().create();
-				this.layers[CFG.LAYER_APPLE] = new AppleMapsLayerProvider(
-					this.appleToken,
-				).create();
-				this.layers[CFG.LAYER_STAMEN_TERRAIN] =
-					new StamenTerrainLayerProvider().create();
-				this.layers[CFG.LAYER_WAYBACK] = new WaybackLayerProvider().create();
-				const wayLyr = this.layers[CFG.LAYER_WAYBACK];
+				addBase(CFG.LAYER_GOOGLE, new GoogleHybridLayerProvider());
+				addBase(CFG.LAYER_APPLE, new AppleMapsLayerProvider(this.appleToken));
+				addBase(CFG.LAYER_STAMEN_TERRAIN, new StamenTerrainLayerProvider());
+
+				const wayLyr = addBase(CFG.LAYER_WAYBACK, new WaybackLayerProvider());
 				this.waybackHistControl = this._makeHistoryBar({
-					layer: wayLyr,
-					event: "histchange",
+					layer: wayLyr, event: "histchange",
 					getCount: () => wayLyr.getHistCount(),
-					getIdx: () => wayLyr.getHistIdx(),
-					setIdx: (i) => wayLyr.setHistIdx(i),
+					getIdx:   () => wayLyr.getHistIdx(),
+					setIdx:   (i) => wayLyr.setHistIdx(i),
 					getLabel: (i) => wayLyr.getHistLabel(i),
 				});
-				this.layers[CFG.LAYER_QLD] = new QldGlobeLayerProvider(
-					this.qldToken,
-				).create();
-				this.layers[CFG.LAYER_HIST] = new QldHistoricalLayerProvider(
-					this.qldPhotosToken,
-				).create();
-				const qldLyr = this.layers[CFG.LAYER_HIST];
+
+				addBase(CFG.LAYER_QLD, new QldGlobeLayerProvider(this.qldToken));
+				const qldLyr = addBase(CFG.LAYER_HIST,
+					new QldHistoricalLayerProvider(this.qldPhotosToken));
 				this.histCompass = this._makeHistoryBar({
-					layer: qldLyr,
-					event: "capturechange",
+					layer: qldLyr, event: "capturechange",
 					getCount: () => qldLyr.getCaptureCount(),
-					getIdx: () => qldLyr.getCaptureIdx(),
-					setIdx: (i) => qldLyr.setCapture(i),
+					getIdx:   () => qldLyr.getCaptureIdx(),
+					setIdx:   (i) => qldLyr.setCapture(i),
 					getLabel: (i) => qldLyr.getCaptureDate(i),
 				});
-
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_GOOGLE], CFG.LAYER_GOOGLE);
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_APPLE], CFG.LAYER_APPLE);
-				ctrl.addBaseLayer(
-					this.layers[CFG.LAYER_STAMEN_TERRAIN],
-					CFG.LAYER_STAMEN_TERRAIN,
-				);
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_WAYBACK], CFG.LAYER_WAYBACK);
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_QLD],  CFG.LAYER_QLD);
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_HIST], CFG.LAYER_HIST);
-				this.layers[CFG.LAYER_TOPO] = new QldTopoLayerProvider().create();
-				ctrl.addBaseLayer(this.layers[CFG.LAYER_TOPO], CFG.LAYER_TOPO);
+				addBase(CFG.LAYER_TOPO, new QldTopoLayerProvider());
 
 				this._injectGroupHeaders(ctrl);
 
-				this.layers[CFG.LAYER_STRAVA] =
-					new StravaHeatmapLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_STRAVA], CFG.LAYER_STRAVA);
-
-				this.layers[CFG.LAYER_GARMIN] =
-					new GarminHeatmapLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_GARMIN], CFG.LAYER_GARMIN);
-
-				this.layers[CFG.LAYER_WATER] = new WaterLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_WATER], CFG.LAYER_WATER);
-
-				this.layers[CFG.LAYER_FLIGHTS] = new FlightsLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_FLIGHTS], CFG.LAYER_FLIGHTS);
-
-				this.layers[CFG.LAYER_MARINE] =
-					new MarineTrafficLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_MARINE], CFG.LAYER_MARINE);
-
-				this.layers[CFG.LAYER_GEOCACHING] =
-					new GeocachingLayerProvider().create();
-				ctrl.addOverlay(
-					this.layers[CFG.LAYER_GEOCACHING], CFG.LAYER_GEOCACHING);
-
-				this.layers[CFG.LAYER_MOBILE] =
-					new MobileCoverageLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_MOBILE], CFG.LAYER_MOBILE);
-
-				this.layers[CFG.LAYER_SEAMARKS] =
-					new OpenSeaMapLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_SEAMARKS], CFG.LAYER_SEAMARKS);
-
-				this.layers[CFG.LAYER_INFRA] = new PowerInfraLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_INFRA], CFG.LAYER_INFRA);
-
-				this.layers[CFG.LAYER_TELECOM] = new TelecomsLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_TELECOM], CFG.LAYER_TELECOM);
-
-				this.layers[CFG.LAYER_LIGHTPOL] =
-					new LightPollutionLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_LIGHTPOL], CFG.LAYER_LIGHTPOL);
-
-				this.layers[CFG.LAYER_CADASTRE] =
-					new QldCadastreLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_CADASTRE], CFG.LAYER_CADASTRE);
-
-				this.layers[CFG.LAYER_QPWS] = new QpwsLayerProvider().create();
-				ctrl.addOverlay(this.layers[CFG.LAYER_QPWS], CFG.LAYER_QPWS);
-
-				this.layers[CFG.LAYER_INTVL_GLOBAL] =
-					new IntvlGlobalTilesLayerProvider().create();
-				ctrl.addOverlay(
-					this.layers[CFG.LAYER_INTVL_GLOBAL],
-					CFG.LAYER_INTVL_GLOBAL,
-				);
+				addOverlay(CFG.LAYER_STRAVA,     new StravaHeatmapLayerProvider());
+				addOverlay(CFG.LAYER_GARMIN,     new GarminHeatmapLayerProvider());
+				addOverlay(CFG.LAYER_WATER,      new WaterLayerProvider());
+				addOverlay(CFG.LAYER_FLIGHTS,    new FlightsLayerProvider());
+				addOverlay(CFG.LAYER_MARINE,     new MarineTrafficLayerProvider());
+				addOverlay(CFG.LAYER_GEOCACHING, new GeocachingLayerProvider());
+				addOverlay(CFG.LAYER_MOBILE,     new MobileCoverageLayerProvider());
+				addOverlay(CFG.LAYER_SEAMARKS,   new OpenSeaMapLayerProvider());
+				addOverlay(CFG.LAYER_INFRA,      new PowerInfraLayerProvider());
+				addOverlay(CFG.LAYER_TELECOM,    new TelecomsLayerProvider());
+				addOverlay(CFG.LAYER_LIGHTPOL,   new LightPollutionLayerProvider());
+				addOverlay(CFG.LAYER_CADASTRE,   new QldCadastreLayerProvider());
+				addOverlay(CFG.LAYER_QPWS,       new QpwsLayerProvider());
+				addOverlay(CFG.LAYER_INTVL_GLOBAL,
+					new IntvlGlobalTilesLayerProvider());
 
 				this._mode3DController = new Mode3DController(this);
 				Mode3DButton.attach(map, this._mode3DController);
