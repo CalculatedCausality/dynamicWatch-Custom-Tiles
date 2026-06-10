@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.96
+// @version      7.9.97
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -1722,10 +1722,11 @@
 							err.message,
 							tok ? "(token sent)" : "(no token)", body);
 						photosCaptures = [];
-					} else if (data.error) {
+					} else if (!data || data.error) {
+						const e = (data && data.error) || {};
 						console.warn(
 							"[CustomTiles] QLD Historical photos service error:",
-							data.error.code, data.error.message,
+							e.code, e.message || (data ? "" : "null response body"),
 							tok ? "(token sent — may be expired or wrong scope)"
 							    : "(no token)");
 						photosCaptures = [];
@@ -2064,6 +2065,11 @@
 
 			const layer = new GarminHeatGrid({
 				tileSize: 256,
+				// minZoom 4: this layer costs 5 HTTP requests per tile
+				// (one per activity feed), so a world view fans out 200+
+				// requests — many 404ing over open ocean — for a heatmap
+				// that's illegible below ~z4 anyway.
+				minZoom: 4,
 				maxNativeZoom: 17,
 				maxZoom: 25,
 				opacity: 0.8,
@@ -2209,7 +2215,10 @@
 
 			const FlightsLayer = pollingDataLayer({
 				pane: "dwFlightsPane", paneZIndex: 450,
-				minZoom: 1, pollMs: 10000,
+				// minZoom 6: at world view the bbox spans continents and
+				// OpenSky's anonymous API rejects it with HTTP 413; below
+				// ~z6 the per-plane icons are unreadable soup anyway.
+				minZoom: 6, pollMs: 10000,
 				attribution: 'Flights \u00a9 <a href="https://opensky-network.org" target="_blank" rel="noreferrer">OpenSky Network</a>',
 				fetch: (map, group) => {
 					const b = map.getBounds();
@@ -2219,7 +2228,7 @@
 						"&lamax=" + b.getNorth().toFixed(3) +
 						"&lomax=" + b.getEast().toFixed(3);
 					gmJsonGet(url, (err, data) => {
-						if (err || !group._map) return;
+						if (err || !data || !group._map) return;
 						renderStates(group, data.states || []);
 					});
 				},
@@ -2356,7 +2365,10 @@
 
 			const MTLayer = pollingDataLayer({
 				pane: "dwMarinePane", paneZIndex: 440,
-				minZoom: 1, pollMs: 20000,
+				// minZoom 6: a world-view fetch fans out the full
+				// MAX_TILES grid against Cloudflare-fronted MarineTraffic
+				// for vessels that are sub-pixel at that scale.
+				minZoom: 6, pollMs: 20000,
 				attribution: 'Vessels © <a href="https://www.marinetraffic.com" target="_blank" rel="noreferrer">MarineTraffic</a>',
 				fetch: (map, group) => {
 					const tileZ = Math.max(4, Math.min(map.getZoom(), 8));
@@ -2512,12 +2524,20 @@
 						((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * n,
 					);
 				};
-				const xMin = Math.max(0, lngToTx(b.getWest()));
-				const xMax = Math.min(n - 1, lngToTx(b.getEast()));
 				const yMin = Math.max(0, latToTy(b.getNorth()));
 				const yMax = Math.min(n - 1, latToTy(b.getSouth()));
+				// Longitude: a view crossing the antimeridian has west > east
+				// (e.g. Fiji: west=178, east=-178), which with a single
+				// clamped range produced xMin > xMax → an empty loop → zero
+				// caches with no hint. Normalise into wrapped column indices
+				// instead: iterate the x range modulo n.
+				const xStart = lngToTx(b.getWest());
+				let xCount = lngToTx(b.getEast()) - xStart + 1;
+				if (xCount <= 0) xCount += n;       // crossed the antimeridian
+				xCount = Math.min(xCount, n);
 				const tiles = [];
-				for (let x = xMin; x <= xMax; x++) {
+				for (let i = 0; i < xCount; i++) {
+					const x = ((xStart + i) % n + n) % n;
 					for (let y = yMin; y <= yMax; y++) {
 						tiles.push({ z, x, y });
 					}
@@ -3549,23 +3569,35 @@
 				cb({ ok: true, property, sourceUrl });
 			};
 
+			// Pass fetch errors THROUGH as errors (first arg) — wrapping
+			// them as `{error}` values made cachedFetch persist them, so a
+			// single transient timeout/429 served "Couldn't fetch" for the
+			// full 6-24 h TTL on that property (poisoned cache). With err
+			// set, nothing is stored: the user sees the error once and the
+			// next open refetches.
 			cachedFetch(
 				"oth_prop_" + pid,
 				_CACHE_TTL.OTH_PROPERTY,
 				(d) => gmJsonGet(
 					`${CFG.OTH_BASE}/odin/api/properties/${pid}`,
-					(err, data) => d(null, err ? { error: err.message } : { data }),
+					(err, data) => d(err, err ? undefined : { data }),
 				),
-				(_e, r) => { coreRes = r || { error: "cache miss" }; finish(); },
+				(e, r) => {
+					coreRes = r || { error: e ? e.message : "cache miss" };
+					finish();
+				},
 			);
 			cachedFetch(
 				"oth_evt_" + pid,
 				_CACHE_TTL.OTH_EVENTS,
 				(d) => gmJsonGet(
 					`${CFG.OTH_BASE}/odin/api/properties/${pid}/events`,
-					(err, data) => d(null, err ? { error: err.message } : { data }),
+					(err, data) => d(err, err ? undefined : { data }),
 				),
-				(_e, r) => { eventsRes = r || { error: "cache miss" }; finish(); },
+				(e, r) => {
+					eventsRes = r || { error: e ? e.message : "cache miss" };
+					finish();
+				},
 			);
 		});
 	}
