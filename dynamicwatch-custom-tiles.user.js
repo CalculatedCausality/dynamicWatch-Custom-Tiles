@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.94
+// @version      7.9.95
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -13,6 +13,8 @@
 // @connect      spatial-img.information.qld.gov.au
 // @connect      spatial-gis.information.qld.gov.au
 // @connect      connecttile.garmin.com
+// @connect      strava.com
+// @connect      content-a.strava.com
 // @connect      cdn.apple-mapkit.com
 // @connect      duckduckgo.com
 // @connect      tiles.stadiamaps.com
