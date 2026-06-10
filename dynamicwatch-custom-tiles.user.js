@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.92
+// @version      7.9.94
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -977,15 +977,31 @@
 	// cache-busting reload still hits the same entry).
 	const _dwTileBlobs    = new Map();   // cacheKey -> objectURL
 	const _dwTileInflight = new Set();   // cacheKey currently fetching
-	const _dwTileFailed   = new Set();   // cacheKey that errored (no retry → no loop)
+	// cacheKey -> failure timestamp. Failures are retried after a TTL —
+	// a Set here would make one transient timeout blank that tile for
+	// the rest of the session.
+	const _dwTileFailed   = new Map();
+	const DW_TILE_FAIL_RETRY_MS = 60 * 1000;
 	const DW_TILE_BLOB_MAX = 600;
+
+	function _dwTileFailedRecently(cacheKey) {
+		const at = _dwTileFailed.get(cacheKey);
+		return at != null && (Date.now() - at) < DW_TILE_FAIL_RETRY_MS;
+	}
 
 	function _dwTileEvict() {
 		while (_dwTileBlobs.size > DW_TILE_BLOB_MAX) {
 			const first = _dwTileBlobs.keys().next().value;
 			const url = _dwTileBlobs.get(first);
 			_dwTileBlobs.delete(first);
-			try { URL.revokeObjectURL(url); } catch (_) {}
+			// Defer the revoke: Mapbox may have JUST been handed this URL
+			// by transformRequest and not started the fetch yet. A
+			// re-request after eviction misses the cache and re-warms, so
+			// correctness doesn't depend on the URL staying alive — the
+			// delay only closes the evict-vs-inflight-fetch race.
+			setTimeout(() => {
+				try { URL.revokeObjectURL(url); } catch (_) {}
+			}, 30 * 1000);
 		}
 	}
 
@@ -5040,6 +5056,7 @@
 				return;
 			}
 			if (!this._active) return;
+			clearTimeout(this._dwReloadTimer);
 			this._unwireBasemapTracker(map);
 			this._unwireSync(map);
 			this._unwireMarkerObserver();
@@ -5965,7 +5982,7 @@
 			const cacheKey = `${key}/${z}/${x}/${y}`;
 			const blob = _dwTileBlobs.get(cacheKey);
 			if (blob) return { url: blob };
-			if (!_dwTileFailed.has(cacheKey)) this._dwWarmTile(key, z, x, y, cacheKey);
+			if (!_dwTileFailedRecently(cacheKey)) this._dwWarmTile(key, z, x, y, cacheKey);
 			return { url: DW_TRANSPARENT_PNG };
 		}
 
@@ -5976,35 +5993,52 @@
 		_dwWarmTile(key, z, x, y, cacheKey) {
 			if (_dwTileInflight.has(cacheKey) || _dwTileBlobs.has(cacheKey)) return;
 			const fetcher = _dwMbLayers.get(key);
-			if (!fetcher) { _dwTileFailed.add(cacheKey); return; }
+			if (!fetcher) { _dwTileFailed.set(cacheKey, Date.now()); return; }
 			_dwTileInflight.add(cacheKey);
 			Promise.resolve()
 				.then(() => fetcher(z, x, y))
 				.then((ab) => {
 					_dwTileInflight.delete(cacheKey);
-					if (!ab) { _dwTileFailed.add(cacheKey); return; }
+					if (!ab) { _dwTileFailed.set(cacheKey, Date.now()); return; }
+					_dwTileFailed.delete(cacheKey);
 					const blobUrl = URL.createObjectURL(
 						new Blob([ab], { type: "image/png" }));
 					_dwTileBlobs.set(cacheKey, blobUrl);
 					_dwTileEvict();
+					this._dwTilesDirty = true;
 					this._scheduleTileReload();
 				})
 				.catch(() => {
 					_dwTileInflight.delete(cacheKey);
-					_dwTileFailed.add(cacheKey);
+					_dwTileFailed.set(cacheKey, Date.now());
+					// A completed fetch (even a failure) may be the last one
+					// blocking a deferred reload — re-evaluate.
+					if (this._dwTilesDirty) this._scheduleTileReload();
 				});
 		}
 
-		// Debounced: re-request the tiles of every sentinel-backed raster
-		// source so newly-warmed blobs get drawn. A cache-busting `?r=N`
-		// forces Mapbox to treat the tiles as new (a same-array setTiles
-		// is a no-op). transformRequest strips the query when matching,
-		// so the blob cacheKey stays stable across reloads.
+		// Draw newly-warmed blobs by re-requesting each sentinel-backed
+		// raster source's tiles (a cache-busting `?r=N` forces Mapbox to
+		// treat them as new; transformRequest strips the query when
+		// matching, so the blob cacheKey is stable).
+		//
+		// CRITICAL: a `setTiles` puts the source back into "loading", which
+		// flips `isStyleLoaded()` false until the (fast, local) blobs load.
+		// Other 3D sync paths gate on isStyleLoaded, so reloading on every
+		// tile completion would keep the style perpetually unloaded during
+		// a warm storm. So we DEFER the reload until the warm storm drains
+		// (no fetches in flight), then reload once. New tiles requested
+		// after that (edge pans, the reload re-requesting) warm + schedule
+		// the next drain-reload, so it stays progressive across views while
+		// each individual view settles cleanly.
 		_scheduleTileReload() {
 			clearTimeout(this._dwReloadTimer);
 			this._dwReloadTimer = setTimeout(() => {
 				const mb = this._mbMap;
 				if (!this._active || !mb || !mb.getStyle?.()) return;
+				if (_dwTileInflight.size > 0) { this._scheduleTileReload(); return; }
+				if (!this._dwTilesDirty) return;
+				this._dwTilesDirty = false;
 				const sources = mb.getStyle().sources || {};
 				const r = (this._dwReloadCounter = (this._dwReloadCounter || 0) + 1);
 				for (const [id, src] of Object.entries(sources)) {
@@ -6017,7 +6051,7 @@
 						try { s.setTiles([`${base}?r=${r}`]); } catch (_) {}
 					}
 				}
-			}, 250);
+			}, 300);
 		}
 
 		// Find the active base layer (lowest-z TileLayer in default
@@ -6605,6 +6639,12 @@
 				if (!lyr) return false;
 				if (lyr instanceof L.TileLayer) return true;
 				if (lyr._dwMb3DStyle) return true;
+				// GM-bridge raster layers (Garmin is an L.GridLayer, not a
+				// TileLayer) mirror as raster overlays via `_syncOverlays`,
+				// which only the FULL resync runs. Without this they'd take
+				// the light (shapes-only) path when toggled on in 3D and
+				// silently never appear until a 3D off/on cycle.
+				if (lyr._dwMbKey) return true;
 				return false;
 			};
 			// `aliveCheck` runs inside every queued setTimeout so a
