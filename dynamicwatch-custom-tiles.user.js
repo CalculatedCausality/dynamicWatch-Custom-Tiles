@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.99
+// @version      7.9.100
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -2206,7 +2206,7 @@
 							interactive: true,
 						})
 							.bindTooltip(
-								`<b>${callsign}</b><br>Alt: ${altStr}&nbsp; Speed: ${spdStr}<br>${country}`,
+								esc`<b>${callsign}</b><br>Alt: ${altStr}&nbsp; Speed: ${spdStr}<br>${country}`,
 								{ className: "dw-flight-tip", sticky: true },
 							)
 							.addTo(group);
@@ -2286,7 +2286,7 @@
 					iconSize: [14, 20], iconAnchor: [7, 10] });
 				L.marker([v.lat, v.lon], { icon, pane: "dwMarinePane", interactive: true })
 					.bindTooltip(
-						`<b>${v.name}</b><br>MMSI: ${v.mmsi}<br>Speed: ${v.spdKts} kts Hdg: ${Math.round(v.hdg)}°`,
+						esc`<b>${v.name}</b><br>MMSI: ${v.mmsi}<br>Speed: ${v.spdKts} kts Hdg: ${Math.round(v.hdg)}°`,
 						{ className: "dw-marine-tip", sticky: true })
 					.addTo(group);
 			}
@@ -2301,7 +2301,7 @@
 					html: `<div style="background:${fill};color:#fff;width:${size}px;height:${size}px;border-radius:50%;display:flex;align-items:center;justify-content:center;font:bold ${fontPx}px/1 sans-serif;border:2px solid rgba(255,255,255,0.85);box-shadow:0 0 4px rgba(0,0,0,.5);">${count}</div>`,
 					iconSize: [size, size], iconAnchor: [size / 2, size / 2],
 				});
-				const sample = vessels.slice(0, 5).map((v) => v.name).join("<br>");
+				const sample = vessels.slice(0, 5).map((v) => _escHtml(v.name)).join("<br>");
 				const more = vessels.length > 5 ? `<br><i>+${vessels.length - 5} more</i>` : "";
 				L.marker([lat, lon], { icon, pane: "dwMarinePane", interactive: true })
 					.bindTooltip(
@@ -3169,16 +3169,19 @@
 				? attrs.Lot + attrs.Plan
 				: "");
 		const lines = [];
-		if (lotPlan) lines.push(`<b>${lotPlan}</b>`);
+		// attrs.* are ArcGIS DCDB attributes; addressInfo.* are ArcGIS
+		// query fields. All external → escape before they hit the
+		// tooltip/popup innerHTML.
+		if (lotPlan) lines.push(esc`<b>${lotPlan}</b>`);
 
 		const name  = _cadVal(attrs.Name);
 		const alias = _cadVal(attrs.Alias);
-		if (name)                  lines.push(name);
-		else if (alias)            lines.push(alias);
+		if (name)                  lines.push(_escHtml(name));
+		else if (alias)            lines.push(_escHtml(alias));
 
 		if (addressInfo && addressInfo.primary) {
-			let addrLine = addressInfo.primary;
-			if (addressInfo.extra) addrLine += ` <span class="dw-cad-sub">${addressInfo.extra}</span>`;
+			let addrLine = _escHtml(addressInfo.primary);
+			if (addressInfo.extra) addrLine += esc` <span class="dw-cad-sub">${addressInfo.extra}</span>`;
 			lines.push(addrLine);
 		}
 
@@ -3200,14 +3203,17 @@
 
 		const locality = _cadVal(attrs.Locality);
 		const lga      = _cadVal(attrs["Local authority"]);
-		if (locality) lines.push(locality);
-		if (lga)      lines.push(`<span class="dw-cad-sub">${lga}</span>`);
+		if (locality) lines.push(_escHtml(locality));
+		if (lga)      lines.push(esc`<span class="dw-cad-sub">${lga}</span>`);
 
 		const links = [];
 		const smis = _cadVal(attrs["SmartMap link"]);
-		if (smis && /^https?:\/\//i.test(smis)) {
+		// Validate scheme AND escape — a value like
+		// `https://x" onmouseover="alert(1)` passes the regex but would
+		// break out of the href attribute without quote-escaping.
+		if (smis && /^https?:\/\//i.test(smis) && !/["'<>]/.test(smis)) {
 			links.push(
-				`<a class="dw-cad-link" href="${smis}" target="_blank" rel="noreferrer">SmartMap ↗</a>`,
+				`<a class="dw-cad-link" href="${_escHtml(smis)}" target="_blank" rel="noreferrer">SmartMap ↗</a>`,
 			);
 		}
 		// Only offer the OTH sales lookup once we have a numbered street
@@ -3247,6 +3253,38 @@
 		return String(s == null ? "" : s)
 			.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 			.replace(/"/g, "&quot;");
+	}
+
+	// Tagged template that HTML-escapes EVERY interpolation while leaving
+	// the literal markup untouched: esc`<b>${name}</b>` is safe even when
+	// `name` is attacker-controlled. Use for any tooltip/popup HTML built
+	// from external strings — upstream-API fields (OpenSky callsigns,
+	// MarineTraffic ship names), OSM tags (OpenInfraMap), ArcGIS attributes
+	// (Cadastre/QPWS), etc. Leaflet sets tooltip/popup content via
+	// innerHTML, so an unescaped `<img onerror>` in any of those would run
+	// in the dynamic.watch origin.
+	function esc(strings, ...values) {
+		let out = strings[0];
+		for (let i = 0; i < values.length; i++) {
+			out += _escHtml(values[i]) + strings[i + 1];
+		}
+		return out;
+	}
+
+	// Return `c` only if it's a syntactically safe CSS colour (#hex,
+	// rgb/rgba/hsl, or a CSS named colour) — else a fallback. External
+	// colour strings (INTVL territory `colour`) get interpolated into
+	// `style="background:${c}"`; `_escHtml` doesn't help in an unquoted
+	// style context (a value like `red;x:expression(...)` or one closing
+	// the attribute needs structural validation, not entity-escaping).
+	function _safeColor(c, fallback) {
+		fallback = fallback || "#888";
+		if (typeof c !== "string") return fallback;
+		const s = c.trim();
+		return /^#[0-9a-f]{3,8}$/i.test(s) ||
+			/^(?:rgb|rgba|hsl|hsla)\([0-9.,%\s/]+\)$/i.test(s) ||
+			/^[a-z]{3,20}$/i.test(s)
+			? s : fallback;
 	}
 
 	function _fmtPrice(n) {
@@ -3755,8 +3793,8 @@
 			const name = a.NAME || a.name || a.PARK_NAME || a.park_name || "";
 			const type = a.FEAT_TYPE || a.feat_type || a.MANAGE_TYPE || a.manage_type || "";
 			const lines = [];
-			if (name) lines.push(`<b>${name}</b>`);
-			if (type) lines.push(type);
+			if (name) lines.push(esc`<b>${name}</b>`);
+			if (type) lines.push(_escHtml(type));
 			return lines.join("<br>") || "Protected area";
 		},
 	});
@@ -3935,10 +3973,10 @@
 							const weight  = lineWeight(power, tags.voltage);
 							const vLabel  = fmtVoltage(tags.voltage);
 							const tip =
-								`<b>${vLabel || (power === "cable" ? "Underground cable" : "Power line")}</b>` +
-								(tags.name     ? `<br>${tags.name}` : "") +
-								(tags.operator ? `<br>${tags.operator}` : "") +
-								(tags.ref      ? `<br>Ref: ${tags.ref}` : "");
+								esc`<b>${vLabel || (power === "cable" ? "Underground cable" : "Power line")}</b>` +
+								(tags.name     ? esc`<br>${tags.name}` : "") +
+								(tags.operator ? esc`<br>${tags.operator}` : "") +
+								(tags.ref      ? esc`<br>Ref: ${tags.ref}` : "");
 							// Dark casing first (non-interactive) for visibility on any basemap
 							L.polyline(latlngs, {
 								pane: "dwInfraPane", color: "#222",
@@ -3961,11 +3999,11 @@
 							const fill    = isPlant ? "#9B59B6" : "#F0A500";
 							const vLabel  = fmtVoltage(tags.voltage);
 							const tip =
-								`<b>${tags.name || (isPlant ? "Power plant" : "Substation")}</b>` +
-								(vLabel                           ? `<br>${vLabel}` : "") +
-								(tags.operator                    ? `<br>${tags.operator}` : "") +
-								(tags["plant:source"]             ? `<br>Source: ${tags["plant:source"]}` : "") +
-								(tags["plant:output:electricity"] ? `<br>Output: ${tags["plant:output:electricity"]}` : "");
+								esc`<b>${tags.name || (isPlant ? "Power plant" : "Substation")}</b>` +
+								(vLabel                           ? esc`<br>${vLabel}` : "") +
+								(tags.operator                    ? esc`<br>${tags.operator}` : "") +
+								(tags["plant:source"]             ? esc`<br>Source: ${tags["plant:source"]}` : "") +
+								(tags["plant:output:electricity"] ? esc`<br>Output: ${tags["plant:output:electricity"]}` : "");
 							L.polygon(latlngs, {
 								pane: "dwInfraPane", color: fill, weight: 1.5,
 								opacity: 0.9, fillColor: fill, fillOpacity: 0.2,
@@ -3979,9 +4017,9 @@
 							power === "generator" && tags["generator:source"] === "solar") {
 							const latlngs = geom.map(g => [g.lat, g.lon]);
 							const tip =
-								`<b>${tags.name || "Solar farm"}</b>` +
-								(tags["generator:output:electricity"] ? `<br>Output: ${tags["generator:output:electricity"]}` : "") +
-								(tags.operator                        ? `<br>${tags.operator}` : "");
+								esc`<b>${tags.name || "Solar farm"}</b>` +
+								(tags["generator:output:electricity"] ? esc`<br>Output: ${tags["generator:output:electricity"]}` : "") +
+								(tags.operator                        ? esc`<br>${tags.operator}` : "");
 							L.polygon(latlngs, {
 								pane: "dwInfraPane", color: "#F6C90E", weight: 1.5,
 								opacity: 0.9, fillColor: "#F6C90E", fillOpacity: 0.25,
@@ -4012,11 +4050,11 @@
 
 						const sz  = power === "transformer" ? 12 : 16;
 						const vLabel = fmtVoltage(tags.voltage);
-						let tip = `<b>${label}</b>`;
-						if (vLabel)                                   tip += `<br>${vLabel}`;
-						if (tags.operator)                            tip += `<br>${tags.operator}`;
-						if (tags["generator:output:electricity"])     tip += `<br>Output: ${tags["generator:output:electricity"]}`;
-						if (tags["plant:source"])                     tip += `<br>Source: ${tags["plant:source"]}`;
+						let tip = esc`<b>${label}</b>`;
+						if (vLabel)                                   tip += esc`<br>${vLabel}`;
+						if (tags.operator)                            tip += esc`<br>${tags.operator}`;
+						if (tags["generator:output:electricity"])     tip += esc`<br>Output: ${tags["generator:output:electricity"]}`;
+						if (tags["plant:source"])                     tip += esc`<br>Source: ${tags["plant:source"]}`;
 
 						L.marker([lat, lon], { icon: pointIcon(glyph, fill, sz), pane: "dwInfraPane", interactive: true })
 							.bindTooltip(tip, { className: "dw-infra-tip", sticky: true })
@@ -4079,9 +4117,9 @@
 						if (el.type === "way" && el.geometry && el.geometry.length) {
 							const latlngs = el.geometry.map((g) => [g.lat, g.lon]);
 							const tip =
-								`<b>${t.name || "Telephone exchange / data centre"}</b>` +
-								(t.dtype    ? `<br>${t.dtype}` : "") +
-								(t.operator ? `<br>${t.operator}` : "");
+								esc`<b>${t.name || "Telephone exchange / data centre"}</b>` +
+								(t.dtype    ? esc`<br>${t.dtype}` : "") +
+								(t.operator ? esc`<br>${t.operator}` : "");
 							L.polygon(latlngs, {
 								pane: "dwTelecomPane", color: DC_FILL, weight: 1.5,
 								opacity: 0.9, fillColor: DC_FILL, fillOpacity: 0.2,
@@ -4100,9 +4138,9 @@
 						} else {
 							glyph = "Y"; fill = MAST_FILL; label = t.name || "Antenna";
 						}
-						let tip = `<b>${label}</b>`;
-						if (t.dtype)    tip += `<br>${t.dtype}`;
-						if (t.operator) tip += `<br>${t.operator}`;
+						let tip = esc`<b>${label}</b>`;
+						if (t.dtype)    tip += esc`<br>${t.dtype}`;
+						if (t.operator) tip += esc`<br>${t.operator}`;
 						L.marker([el.lat, el.lon], {
 							icon: dotIcon(glyph, fill, t.kind === "datacenter" ? 16 : 13),
 							pane: "dwTelecomPane", interactive: true,
@@ -4182,8 +4220,8 @@
 				render: (group, elements) => {
 					for (const el of elements) {
 						const t = el.tags || {};
-						const extra = (t.operator ? `<br>${t.operator}` : "") +
-							(t.substance ? `<br>${t.substance}` : "");
+						const extra = (t.operator ? esc`<br>${t.operator}` : "") +
+							(t.substance ? esc`<br>${t.substance}` : "");
 						if (el.type === "way" && el.geometry && el.geometry.length) {
 							const latlngs = el.geometry.map((g) => [g.lat, g.lon]);
 							if (t.wk === "pipe_water" || t.wk === "pipe_waste") {
@@ -4193,7 +4231,7 @@
 									color: waste ? "#8D6E63" : "#039BE5",
 									weight: 2, opacity: 0.9,
 									dashArray: waste ? "5 4" : null,
-								}).bindTooltip(`<b>${t.name ||
+								}).bindTooltip(esc`<b>${t.name ||
 									(waste ? "Wastewater pipeline" : "Water pipeline")}</b>` + extra,
 									{ className: "dw-infra-tip", sticky: true }).addTo(group);
 								continue;
@@ -4202,7 +4240,7 @@
 							L.polygon(latlngs, {
 								pane: "dwWaterPane", color: st.fill, weight: 1.5,
 								opacity: 0.9, fillColor: st.fill, fillOpacity: 0.2,
-							}).bindTooltip(`<b>${t.name || st.label}</b>` + extra,
+							}).bindTooltip(esc`<b>${t.name || st.label}</b>` + extra,
 								{ className: "dw-infra-tip", sticky: true }).addTo(group);
 							continue;
 						}
@@ -4212,7 +4250,7 @@
 						L.marker([el.lat, el.lon], {
 							icon: dotIcon(st.glyph, st.fill, t.wk === "well" ? 12 : 14),
 							pane: "dwWaterPane", interactive: true,
-						}).bindTooltip(`<b>${t.name || st.label}</b>` + extra,
+						}).bindTooltip(esc`<b>${t.name || st.label}</b>` + extra,
 							{ className: "dw-infra-tip", sticky: true }).addTo(group);
 					}
 				},
@@ -4913,7 +4951,7 @@
 
 							const swatch =
 								`<span style="display:inline-block;width:10px;` +
-								`height:10px;background:${f.colour};` +
+								`height:10px;background:${_safeColor(f.colour, "#3b82f6")};` +
 								`border:1px solid #444;vertical-align:middle"></span>`;
 							// The public tiles carry no username/userId and there's
 							// no public way to resolve one (see intvlActivityTime
@@ -5952,7 +5990,7 @@
 			bind("dw-cust-0-fill", (f) => {
 				const p = f.properties || {};
 				const swatch = p.colour
-					? `<span style="display:inline-block;width:12px;height:12px;background:${p.colour};border:1px solid #888;vertical-align:middle;margin-right:6px;"></span>`
+					? `<span style="display:inline-block;width:12px;height:12px;background:${_safeColor(p.colour, "#3b82f6")};border:1px solid #888;vertical-align:middle;margin-right:6px;"></span>`
 					: "";
 				const area = p.currentArea != null ? intvlArea(p.currentArea) : "?";
 				const dt   = p.activityId ? intvlActivityTime(p.activityId) : null;
@@ -5969,7 +6007,7 @@
 					(p.found ? " ✓" : p.dnf ? " ✗" : "")];
 				const meta = [];
 				if (p.code) meta.push(_escHtml(p.code));
-				if (p.diff != null && p.terr != null) meta.push(`D ${p.diff} / T ${p.terr}`);
+				if (p.diff != null && p.terr != null) meta.push(esc`D ${p.diff} / T ${p.terr}`);
 				if (p.size) meta.push(_escHtml(String(p.size)));
 				if (p.favs) meta.push(`♥ ${p.favs}`);
 				if (meta.length) lines.push(
@@ -5983,13 +6021,13 @@
 			// would come from the layer provider attaching _dwData.
 			bind("dw-shapes-point-dwFlightsPane", (f) => {
 				const p = f.properties || {};
-				return p.label || p.name || "Aircraft";
+				return _escHtml(p.label || p.name || "Aircraft");
 			});
 
 			// Marine vessels — same placeholder.
 			bind("dw-shapes-point-dwMarinePane", (f) => {
 				const p = f.properties || {};
-				return p.label || p.name || "Vessel";
+				return _escHtml(p.label || p.name || "Vessel");
 			});
 		}
 
@@ -7776,8 +7814,15 @@
 		}
 
 		_injectGroupHeaders(ctrl) {
+			// Guard the parse: a corrupt dw_collapsed_groups value would
+			// otherwise throw here and abort the whole layer-panel
+			// injection (custom groups + archive UI), leaving the user
+			// with the bare Leaflet control.
+			let savedGroups = [];
+			try { savedGroups = JSON.parse(GM_getValue("dw_collapsed_groups", "[]")) || []; }
+			catch (_) { savedGroups = []; }
 			const collapsedGroups = new Set(
-				JSON.parse(GM_getValue("dw_collapsed_groups", "[]")),
+				Array.isArray(savedGroups) ? savedGroups : [],
 			);
 
 			// Render one set of groups (base or overlay) into its section.
