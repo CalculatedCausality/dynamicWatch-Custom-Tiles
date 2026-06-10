@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.79
+// @version      7.9.86
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -27,6 +27,10 @@
 // @connect      www.onthehouse.com.au
 // @connect      d1yalngj9nsyl4.cloudfront.net
 // @connect      www.geocaching.com
+// @connect      tiles01.geocaching.com
+// @connect      tiles02.geocaching.com
+// @connect      tiles03.geocaching.com
+// @connect      tiles04.geocaching.com
 // @connect      api.mapbox.com
 // @connect      s3.amazonaws.com
 // @connect      elevation-tiles-prod.s3.amazonaws.com
@@ -37,6 +41,15 @@
 	"use strict";
 
 	const pageWin = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+
+	// Visible version banner — answers "did Tampermonkey actually update?"
+	// on every page load without grepping for symptoms.
+	const SCRIPT_VERSION =
+		(typeof GM_info !== "undefined" && GM_info.script?.version) || "?";
+	console.info(
+		`%c[CustomTiles] v${SCRIPT_VERSION} loaded`,
+		"color:#fff;background:#0277bd;padding:2px 6px;border-radius:3px;",
+	);
 
 	/* -- Configuration ----------------------------------------------------- */
 
@@ -133,16 +146,20 @@
 		MAPBOX_GL_VERSION: "3.7.0",
 		// No embedded Mapbox token — dynamic.watch already serves its own
 		// public pk.eyJ... in the page payload (mapOptions.k[0] for /me,
-		// route-thumbnail URLs everywhere); pickMapboxToken() scrapes it
-		// Geocaching.com's web map endpoint. POSTed with a JSON body
-		// containing a bbox; reuses the user's existing session cookie via
-		// GM_xmlhttpRequest's privileged cross-origin send. Not a public
-		// API — Groundspeak may change the shape at any time. Requires the
-		// user to be logged in to geocaching.com in the same browser; if
-		// they're not, the endpoint 302s to a login page and we render
-		// nothing with a one-time console hint.
-		GEOCACHING_MAP_ENDPOINT:
-			"https://www.geocaching.com/api/proxy/web/search/v2",
+		// route-thumbnail URLs everywhere); pickMapboxToken() scrapes it.
+
+		// Geocaching.com's PUBLIC tile-based map API — same endpoints the
+		// pre-2018 geocaching.com world map browsed with. No login, no
+		// session cookie, no API key. `map.info` returns a UTFGrid where
+		// each non-empty cell encodes a cache's code + name; `map.details
+		// ?i=GC<code>` returns difficulty/terrain/container/type/owner.
+		// Server filters to active + available caches only. Subdomain
+		// rotation across tiles01..tiles04 distributes load across edges.
+		GEOCACHING_PUBLIC_INFO:
+			"https://tiles{s}.geocaching.com/map.info?x={x}&y={y}&z={z}",
+		GEOCACHING_PUBLIC_DETAILS:
+			"https://tiles01.geocaching.com/map.details?i=",
+		GEOCACHING_TILE_SUBDOMAINS: ["01", "02", "03", "04"],
 
 		// INTVL global Mapbox Vector Tile (MVT) CDN. Each tile is a PBF
 		// containing a 'territories' layer of POLYGON features with
@@ -227,6 +244,17 @@
 		OIM_POWER_TILES: "https://openinframap.org/map/power",
 		OIM_TELECOM_TILES: "https://openinframap.org/map/telecoms",
 		OIM_MAX_NATIVE_Z: 16,
+
+		// External basemap / overlay tile URLs centralised so endpoint
+		// changes happen in one place.
+		GOOGLE_HYBRID_TILE:
+			"https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+		STRAVA_HEATMAP_TILE:
+			"https://content-a.strava.com/anon/globalheat/all/blue/{z}/{x}/{y}@2x.png?v=19",
+		OPENSEAMAP_TILE:
+			"https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
+		ACCC_MOBILE_COVERAGE_SERVICE:
+			"https://spatial.infrastructure.gov.au/server/rest/services/ACCC_Mobile_Sites_and_Coverages/MapServer",
 
 		// lightpollutionmap.info GeoServer (WMS via GWC tile cache).
 		// LAYERS=PostGIS:SB_2025 = sky brightness, latest published edition.
@@ -657,13 +685,12 @@
 			responseType: opts.responseType,
 			timeout: opts.timeout || 25000,
 			// Explicitly opt INTO same-domain cookies. Desktop
-			// Tampermonkey defaults to `anonymous: false` (cookies
-			// included) but several mobile userscript managers —
-			// notably "Userscripts" on iOS Safari — default to
-			// `true` (cookies stripped). That's the silent reason
-			// geocaching.com fetches return 401 only on mobile:
-			// the session cookie never gets sent. Setting the flag
-			// explicitly normalises behaviour across managers.
+			// Tampermonkey defaults to anonymous=false but several
+			// mobile managers (notably "Userscripts" on iOS Safari)
+			// default to true, which silently strips third-party
+			// session cookies. Set explicitly for cross-manager
+			// parity even though no current layer depends on it
+			// (Geocaching moved to the public tile API in v7.9.85).
 			anonymous: opts.anonymous === true ? true : false,
 			onload: (r) => {
 				if (handle.aborted) return;
@@ -796,6 +823,25 @@
 		const lat2 =
 			(Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 1)) / n))) * 180) / Math.PI;
 		return { minLon: lon1, minLat: lat2, maxLon: lon2, maxLat: lat1 };
+	}
+
+	// Convert a UTFGrid cell (cx, cy) within tile (z, tx, ty) to lat/lng.
+	// UTFGrid tiles are 64x64 cells over a 256-pixel tile, so each cell is
+	// 4 px wide and 4 px tall. We address the centre of the cell (offset
+	// +0.5) and convert the resulting tile-pixel coordinate through the
+	// standard slippy-tile Mercator inverse. Precision = tile_size/64:
+	//   z=10 -> ~600 m   z=12 -> ~150 m   z=14 -> ~38 m   z=16 -> ~9.6 m
+	// Used by the Geocaching public-tile layer to place markers from the
+	// UTFGrid response (no per-cache lat/lng in the data; only cell idx).
+	function utfGridCellToLatLng(z, tx, ty, cx, cy) {
+		const px = (cx + 0.5) / 64;
+		const py = (cy + 0.5) / 64;
+		const n = Math.pow(2, z);
+		const lon = ((tx + px) / n) * 360 - 180;
+		const lat =
+			(Math.atan(Math.sinh(Math.PI * (1 - (2 * (ty + py)) / n))) * 180) /
+			Math.PI;
+		return [lat, lon];
 	}
 
 	// Same idea, but in EPSG:3857 Web Mercator metres — for WMS endpoints
@@ -1189,51 +1235,23 @@
 	// -- Google Hybrid --------------------------------------------------------
 
 	const GoogleHybridLayerProvider = tileProvider(
-		"https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+		CFG.GOOGLE_HYBRID_TILE,
 		{ subdomains: ["0","1","2","3"], maxNativeZoom: 21,
 		  attribution: "&copy; Google" },
 	);
 
 	// -- Apple Maps ----------------------------------------------------------
 
-	class AppleMapsLayerProvider extends LayerProvider {
-		constructor(appleToken) {
-			super();
-			this._token = appleToken;
-		}
-
-		static tileUrl(accessKey, version) {
-			return (
-				CFG.APPLE_TILE_BASE +
-				"&v=" +
-				encodeURIComponent(version || CFG.APPLE_DEFAULT_V) +
-				(accessKey ? "&accessKey=" + encodeURIComponent(accessKey) : "")
-			);
-		}
-
-		create() {
-			const url = this._token.isValid()
-				? AppleMapsLayerProvider.tileUrl(
-						this._token.accessKey,
-						this._token.version,
-					)
-				: BLANK_TILE;
-			const layer = L.tileLayer(url, {
-				maxNativeZoom: 19,
-				maxZoom: 22,
-				tileSize: 256,
-				crossOrigin: true,
-				attribution: "&copy; Apple",
-			});
-			if (!this._token.isValid()) {
-				this._token.get((err, accessKey, version) => {
-					if (!err)
-						layer.setUrl(AppleMapsLayerProvider.tileUrl(accessKey, version));
-				});
-			}
-			return layer;
-		}
+	function buildAppleTileUrl(accessKey, version) {
+		return CFG.APPLE_TILE_BASE +
+			"&v=" + encodeURIComponent(version || CFG.APPLE_DEFAULT_V) +
+			(accessKey ? "&accessKey=" + encodeURIComponent(accessKey) : "");
 	}
+
+	const AppleMapsLayerProvider = tokenTileProvider(
+		(tok) => buildAppleTileUrl(tok.accessKey, tok.version),
+		{ maxNativeZoom: 19, maxZoom: 22, attribution: "&copy; Apple" },
+	);
 
 	// -- Stamen Toner (via Stadia Maps, localhost-spoofed) -------------------
 
@@ -1877,7 +1895,7 @@
 	// -- Strava Heatmap (anonymous tiles only) ----------------------------
 
 	const StravaHeatmapLayerProvider = tileProvider(
-		"https://content-a.strava.com/anon/globalheat/all/blue/{z}/{x}/{y}@2x.png?v=19",
+		CFG.STRAVA_HEATMAP_TILE,
 		{ maxNativeZoom: 10, maxZoom: 25, opacity: 0.8,
 		  attribution: "© Strava" },
 	);
@@ -2304,57 +2322,138 @@
 		}
 	}
 
-	/* -- Geocaching.com -----------------------------------------------------
+	/* -- Geocaching.com (public tile API) -----------------------------------
 	 *
-	 * Queries the public web map endpoint with the user's existing
-	 * geocaching.com session cookie via GM_xmlhttpRequest. No public API —
-	 * Groundspeak treats the proxy endpoints as private, so the shape can
-	 * change without notice and we keep the fetch behind a generation
-	 * counter + debounce so a fast pan doesn't flood the host.
+	 * Renders caches from Groundspeak's PUBLIC tile-based map endpoints.
+	 * No login, no session cookie, no API key. Two endpoints in play:
 	 *
-	 * Login required: if the user isn't authenticated, the endpoint 302s to
-	 * a login page. We surface a single console hint on the first such
-	 * response and render nothing — toggling the layer off and on after
-	 * logging in retries cleanly.
+	 *   1. `tiles{s}.geocaching.com/map.info?x&y&z` — UTFGrid (Mapbox
+	 *      spec): a 64x64 char grid + a keys[] + data{} where each
+	 *      non-empty cell encodes a single cache as `{i: GC<code>,
+	 *      n: <name>}`. The KEY STRING is itself the cell's grid
+	 *      coordinates as `(cx, cy)` — verified by reverse-decoding
+	 *      multiple tiles, holds 1966/1966 across the Brisbane z=12
+	 *      sample — so we extract position directly from the key
+	 *      without scanning the grid string.
 	 *
-	 * Hard-zoomed in: at world view geocaching.com itself clusters; we
-	 * gate the fetch at minZoom=10 so we don't pull the entire country.
+	 *   2. `tiles01.geocaching.com/map.details?i=GC<code>` — per-cache
+	 *      detail JSON: difficulty, terrain, container, type id, owner,
+	 *      favourite points, archived/available flags. Fetched lazily
+	 *      on marker click (avoids one extra HTTP per visible cache on
+	 *      load).
+	 *
+	 * Lat/lng comes from `utfGridCellToLatLng(z, tx, ty, cx, cy)`. Cell
+	 * precision = tile/64: z=10 ~600 m, z=12 ~150 m, z=14 ~38 m, z=16
+	 * ~10 m. We gate the layer at minZoom=10 (12 visible tiles in a
+	 * desktop viewport, ~one round-trip per pan via subdomain rotation)
+	 * to keep the request cost predictable.
+	 *
+	 * Cross-tile deduplication: a cache that straddles two tiles will
+	 * appear in both UTFGrids; we key markers by GC code so the second
+	 * sighting is a no-op.
 	 */
 	class GeocachingLayerProvider extends LayerProvider {
 		create() {
-			const MIN_ZOOM     = 10;
-			const TAKE         = 500;     // server-side cap, ~enough for any city block
-			const DEBOUNCE_MS  = 500;
+			const MIN_ZOOM    = 10;
+			// Groundspeak's UTFGrid is served at z=10..13 reliably. z=14
+			// works only for the densest urban tiles; z=15+ returns 204
+			// (the original client over-zoomed z=13 cells on the client
+			// side). At zooms above FETCH_MAX_Z we drop to z=13 parent
+			// tiles so markers keep rendering as the user zooms in.
+			const FETCH_MAX_Z = 13;
+			const DEBOUNCE_MS = 500;
+			const MAX_TILES   = 16;        // hard cap; pan past this clears
 
-			// Single-letter type codes used by geocaching.com — kept short
-			// so the marker label fits inside a 20px divIcon.
+			// Type id → single-letter marker glyph + colour. The IDs are
+			// Groundspeak's; the labels are picked to fit inside a 20px
+			// divIcon. Default falls through to "G" / Traditional green.
 			const TYPE_LABELS = {
-				2:  "T",   // Traditional
-				3:  "M",   // Multi
-				8:  "?",   // Mystery / Unknown
-				5:  "L",   // Letterbox Hybrid
-				6:  "E",   // Event
-				11: "C",   // Webcam
-				137:"E",   // Earthcache
-				1858:"W",  // Wherigo
-				4:  "V",   // Virtual
-				13: "C",   // Cache In Trash Out Event
+				2:"T", 3:"M", 8:"?", 5:"L", 6:"E", 11:"C",
+				137:"E", 1858:"W", 4:"V", 13:"C",
 			};
 			const TYPE_COLOR = {
-				2: "#1f8e3e", 3: "#fcb900", 8: "#1e3fae",
-				5: "#5b2a86", 6: "#d33a3a", 11:"#444",
+				2:"#1f8e3e", 3:"#fcb900", 8:"#1e3fae",
+				5:"#5b2a86", 6:"#d33a3a", 11:"#444",
 				137:"#7d5a2a", 1858:"#2aa198",
-				4: "#888",   13:"#d33a3a",
+				4:"#888",    13:"#d33a3a",
 			};
 
-			let warnedAuth = false;
+			// Cached per-cache details (from map.details) so the second
+			// marker click on a cache doesn't re-fetch. Persists across
+			// pans because the cache GC codes don't change.
+			const detailsCache = new Map();
+			// Cached per-tile UTFGrid responses so pan-back doesn't re-
+			// fetch. Keyed by "z/x/y" with a soft cap (LRU-ish: oldest
+			// drops on overflow).
+			const tileCache = new Map();
+			const TILE_CACHE_MAX = 64;
+			let subdomainIdx = 0;
+
+			function nextSubdomain() {
+				const list = CFG.GEOCACHING_TILE_SUBDOMAINS;
+				const s = list[subdomainIdx % list.length];
+				subdomainIdx++;
+				return s;
+			}
+
+			function visibleTiles(map) {
+				const z = Math.min(Math.floor(map.getZoom()), FETCH_MAX_Z);
+				const b = map.getBounds();
+				const n = Math.pow(2, z);
+				const lngToTx = (lng) =>
+					Math.floor(((lng + 180) / 360) * n);
+				const latToTy = (lat) => {
+					const r = (lat * Math.PI) / 180;
+					return Math.floor(
+						((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * n,
+					);
+				};
+				const xMin = Math.max(0, lngToTx(b.getWest()));
+				const xMax = Math.min(n - 1, lngToTx(b.getEast()));
+				const yMin = Math.max(0, latToTy(b.getNorth()));
+				const yMax = Math.min(n - 1, latToTy(b.getSouth()));
+				const tiles = [];
+				for (let x = xMin; x <= xMax; x++) {
+					for (let y = yMin; y <= yMax; y++) {
+						tiles.push({ z, x, y });
+					}
+				}
+				return tiles;
+			}
+
+			function buildIcon(typeId, fill, opacity, favs) {
+				const label = TYPE_LABELS[typeId] || "G";
+				const favBadge = favs > 0
+					? `<div style="position:absolute;top:-6px;right:-8px;` +
+					  `background:#d33;color:#fff;font:bold 9px/1 sans-serif;` +
+					  `padding:2px 4px;border-radius:8px;border:1px solid #fff;` +
+					  `white-space:nowrap;box-shadow:0 0 2px rgba(0,0,0,.45);` +
+					  `pointer-events:none;">♥${favs > 99 ? "99+" : favs}</div>`
+					: "";
+				const html =
+					`<div style="position:relative;width:20px;height:20px;` +
+					`overflow:visible;"><div class="dw-geo-pin" style="` +
+					`background:${fill};color:#fff;opacity:${opacity};` +
+					`width:20px;height:20px;border-radius:50%;` +
+					`display:flex;align-items:center;justify-content:center;` +
+					`font:bold 11px/1 sans-serif;border:1px solid #222;` +
+					`box-shadow:0 0 1px rgba(0,0,0,.6);">${label}</div>` +
+					favBadge + `</div>`;
+				return L.divIcon({
+					className: "dw-geo-icon",
+					html,
+					iconSize:   [20, 20],
+					iconAnchor: [10, 10],
+				});
+			}
 
 			const GeoLayer = L.Layer.extend({
 				initialize() {
-					this._group     = null;
-					this._debounce  = null;
-					this._gen       = 0;
-					this._inflight  = null;
+					this._group    = null;
+					this._debounce = null;
+					this._gen      = 0;
+					this._inflight = new Set();
+					this._byCode   = new Map();
 				},
 
 				onAdd(map) {
@@ -2371,21 +2470,21 @@
 					clearTimeout(this._debounce);
 					this._debounce = null;
 					map.off("moveend zoomend", this._onViewChange, this);
-					if (this._inflight) {
-						gmCancel(this._inflight);
-						this._inflight = null;
-					}
+					for (const h of this._inflight) gmCancel(h);
+					this._inflight.clear();
 					if (this._group) {
 						this._group.remove();
 						this._group = null;
 					}
+					this._byCode.clear();
 				},
 
 				_onViewChange() { this._fetchSoon(); },
 
 				_fetchSoon() {
 					clearTimeout(this._debounce);
-					this._debounce = setTimeout(() => this._fetch(), DEBOUNCE_MS);
+					this._debounce =
+						setTimeout(() => this._fetch(), DEBOUNCE_MS);
 				},
 
 				_fetch() {
@@ -2393,209 +2492,194 @@
 					if (!map || !this._group) return;
 					if (map.getZoom() < MIN_ZOOM) {
 						this._group.clearLayers();
+						this._byCode.clear();
 						return;
 					}
 
 					const myGen = ++this._gen;
-					if (this._inflight) gmCancel(this._inflight);
+					for (const h of this._inflight) gmCancel(h);
+					this._inflight.clear();
 
-					const b = map.getBounds();
-					// search/v2 takes box=NW_lat,NW_lng,SE_lat,SE_lng plus a
-					// few sort/paging params. Origin is the map centre — used
-					// server-side to populate distance fields we ignore.
-					const c = map.getCenter();
-					// Parameter shape is taken from cgeo (the open-source
-					// reverse-engineered geocaching.com client) — same path,
-					// same box format (N,W,S,E), same origin/rad pair.
-					// Do NOT pass `app=` — the proxy 401s certain whitelisted
-					// values (notably `app=cgeo`).
-					const origin =
-						`${c.lat.toFixed(6)},${c.lng.toFixed(6)}`;
-					const params = new URLSearchParams({
-						box: [
-							b.getNorth().toFixed(6),
-							b.getWest().toFixed(6),
-							b.getSouth().toFixed(6),
-							b.getEast().toFixed(6),
-						].join(","),
-						take:    String(TAKE),
-						skip:    "0",
-						asc:     "true",
-						sort:    "distance",
-						origin,
-						dorigin: origin,
-						rad:     "16000",
-					});
-					const url = `${CFG.GEOCACHING_MAP_ENDPOINT}?${params}`;
+					const tiles = visibleTiles(map);
+					if (tiles.length > MAX_TILES) {
+						// Zoomed-out edge case (shouldn't happen with
+						// MIN_ZOOM=10 in normal viewports) — bail rather
+						// than fan out an unreasonable number of requests.
+						return;
+					}
 
-					this._inflight = gmJsonGet(url, {
+					// We rebuild from scratch each pan; cross-tile dedup
+					// happens via _byCode which we reset here.
+					this._group.clearLayers();
+					this._byCode.clear();
+
+					for (const t of tiles) {
+						const key = `${t.z}/${t.x}/${t.y}`;
+						const cached = tileCache.get(key);
+						if (cached) {
+							this._renderTile(t, cached);
+							continue;
+						}
+						this._fetchTile(t, myGen, key);
+					}
+				},
+
+				_fetchTile(t, myGen, key) {
+					const url = CFG.GEOCACHING_PUBLIC_INFO
+						.replace("{s}", nextSubdomain())
+						.replace("{x}", String(t.x))
+						.replace("{y}", String(t.y))
+						.replace("{z}", String(t.z));
+					const handle = gmJsonGet(url, {
 						headers: {
-							"Accept":           "application/json",
-							"X-Requested-With": "XMLHttpRequest",
-							"Referer":          "https://www.geocaching.com/play/map",
+							"Accept":  "application/json",
+							"Referer": "https://www.geocaching.com/play/map",
 						},
-						timeout: 20000,
-					}, (err, data, raw) => {
-						this._inflight = null;
+						timeout: 15000,
+					}, (err, data) => {
+						this._inflight.delete(handle);
 						if (myGen !== this._gen || !this._group) return;
+						if (err || !data) return;
 
-						if (err) {
-							const status = raw && raw.status;
-							// 401/403 = no session cookie. On desktop
-							// this usually means "not logged in". On
-							// mobile it can ALSO mean "userscript
-							// manager stripped the cookie" — log the
-							// distinction so the user can debug.
-							if ((status === 401 || status === 403) && !warnedAuth) {
-								warnedAuth = true;
-								const isMobile = /Mobi|Android|iPhone|iPad/i.test(
-									navigator.userAgent);
-								console.warn(
-									"[CustomTiles] Geocaches: HTTP " + status +
-									" from geocaching.com — " +
-									(isMobile
-										? "either you're not logged in to geocaching.com in this browser, OR the mobile userscript manager isn't forwarding cookies (try toggling \"Allow cross-origin cookies\" in the manager's settings). Confirm by visiting geocaching.com/play/map directly in this browser — if it loads caches there, the userscript manager is the issue."
-										: "log in to geocaching.com in this browser to load caches."));
-							} else if (status !== 401 && status !== 403) {
-								console.warn("[CustomTiles] Geocaches fetch:",
-									err.message, "status=" + (status || "?"),
-									(raw?.responseText || "").slice(0, 200));
-							}
-							this._group.clearLayers();
+						tileCache.set(key, data);
+						if (tileCache.size > TILE_CACHE_MAX) {
+							const first = tileCache.keys().next().value;
+							tileCache.delete(first);
+						}
+						this._renderTile(t, data);
+					});
+					this._inflight.add(handle);
+				},
+
+				_renderTile(t, grid) {
+					if (!this._group) return;
+					if (!grid || !Array.isArray(grid.keys)) return;
+					const data = grid.data || {};
+					for (const k of grid.keys) {
+						if (!k) continue;
+						const m = /^\((\d+),\s*(\d+)\)$/.exec(k);
+						if (!m) continue;
+						const cx = +m[1], cy = +m[2];
+						// data[k] is an ARRAY — Groundspeak stacks
+						// multiple caches in the same grid cell. Iterate
+						// every entry so multi-cache cells all render.
+						// Accept the bare-object shape defensively in
+						// case the schema flips back.
+						const raw = data[k];
+						const entries = Array.isArray(raw)
+							? raw
+							: raw && raw.i ? [raw] : [];
+						for (const entry of entries) {
+							if (!entry || !entry.i) continue;
+							const code = entry.i;
+							if (this._byCode.has(code)) continue;
+
+							const [lat, lon] =
+								utfGridCellToLatLng(t.z, t.x, t.y, cx, cy);
+							const name = entry.n || code;
+							const icon = buildIcon(2, TYPE_COLOR[2], 1, 0);
+							const marker = L.marker([lat, lon], {
+								icon,
+								pane:        "dwGeocachingPane",
+								interactive: true,
+							}).bindTooltip(
+								`<b>${_escHtml(name)}</b>` +
+								`<br><span class="dw-cad-sub">${_escHtml(code)}` +
+								` · <i>click for details</i></span>`,
+								{ className: "dw-flight-tip", sticky: true },
+							);
+
+							// 3D mirror metadata used by Mode3DController
+							// to project a colour-coded clickable dot.
+							// Fields populated on first details fetch.
+							marker._dwData = {
+								kind:  "geocache",
+								code,
+								name,
+								color: TYPE_COLOR[2],
+								url:   `https://www.geocaching.com/geocache/${code}`,
+							};
+
+							marker.on("click", () => this._onClick(marker, code));
+							marker.addTo(this._group);
+							this._byCode.set(code, marker);
+						}
+					}
+				},
+
+				_onClick(marker, code) {
+					const cached = detailsCache.get(code);
+					if (cached) {
+						this._applyDetails(marker, code, cached);
+						return;
+					}
+					const url = CFG.GEOCACHING_PUBLIC_DETAILS + code;
+					gmJsonGet(url, {
+						headers: {
+							"Accept":  "application/json",
+							"Referer": "https://www.geocaching.com/play/map",
+						},
+						timeout: 10000,
+					}, (err, data) => {
+						if (err || !data || data.status !== "success") {
+							// Fall through to opening the cache page in
+							// the browser — Groundspeak handles archived
+							// / private caches with its own UI.
+							window.open(
+								`https://www.geocaching.com/geocache/${code}`,
+								"_blank", "noopener");
 							return;
 						}
-						// search/v2 returns a top-level array; older Map/Filter
-						// builds wrapped it in {results}/{data}. Accept any.
-						const list = Array.isArray(data)
-							? data
-							: (data && (data.results || data.data)) || [];
-						this._render(list);
+						const row = (data.data && data.data[0]) || null;
+						if (!row) return;
+						detailsCache.set(code, row);
+						this._applyDetails(marker, code, row);
 					});
 				},
 
-				_render(rows) {
-					if (!this._group) return;
-					this._group.clearLayers();
-					for (const c of rows) {
-						// Owner-corrected coords win over the listing's posted
-						// coords (mystery caches in particular relocate to
-						// their solved location once you've logged a find).
-						const pc = c.userCorrectedCoordinates ||
-							c.postedCoordinates || c.coordinates;
-						if (!pc) continue;
-						const lat = pc.latitude, lon = pc.longitude;
-						if (lat == null || lon == null) continue;
+				_applyDetails(marker, code, row) {
+					const typeId = (row.type && row.type.value) || 2;
+					const color = TYPE_COLOR[typeId] || "#1f8e3e";
+					const disabled = !row.available;
+					const fill = disabled ? "#888" : color;
+					const opacity = disabled ? 0.5 : 1;
+					const favs = parseInt(row.fp, 10) || 0;
+					const newIcon = buildIcon(typeId, fill, opacity, favs);
+					if (marker.setIcon) marker.setIcon(newIcon);
 
-						// cacheStatus: 0 = active, others = disabled/archived.
-						// Hide archived; render disabled with reduced opacity.
-						if (c.cacheStatus != null && c.cacheStatus > 1) continue;
-						const disabled = c.cacheStatus === 1;
+					const name  = row.name || code;
+					const diff  = (row.difficulty && row.difficulty.value)
+						|| (row.difficulty && row.difficulty.text) || "?";
+					const terr  = (row.terrain && row.terrain.value)
+						|| (row.terrain && row.terrain.text) || "?";
+					const size  = (row.container && row.container.text) || "";
+					const owner = (row.owner && row.owner.text) || "";
+					const typeText = (row.type && row.type.text) || "";
 
-						const typeId = c.geocacheType || c.type || 2;
-						const label  = TYPE_LABELS[typeId] || "G";
-						const color  = TYPE_COLOR[typeId]  || "#1f8e3e";
-						const found  = !!c.userFound;
-						const dnf    = !!c.userDidNotFind;
-						const fill   = found ? "#888" : dnf ? "#aa3333" : color;
-						const opacity = disabled ? 0.5 : 1;
-						const favs  = c.favoritePoints || 0;
+					marker._dwData = Object.assign(marker._dwData || {}, {
+						color: fill, disabled, label: TYPE_LABELS[typeId] || "G",
+						diff, terr, size, owner, favs,
+						typeText,
+					});
 
-						// Favourite-points badge sits above the pin's top-right
-						// corner. `pointer-events:none` so clicks pass through
-						// to the pin underneath (which opens the cache page).
-						// Clamp display to "99+" so popular caches don't blow
-						// out the icon's footprint and overlap neighbours.
-						const favBadge = favs > 0
-							? `<div style="position:absolute;top:-6px;right:-8px;` +
-							  `background:#d33;color:#fff;` +
-							  `font:bold 9px/1 sans-serif;` +
-							  `padding:2px 4px;border-radius:8px;` +
-							  `border:1px solid #fff;white-space:nowrap;` +
-							  `box-shadow:0 0 2px rgba(0,0,0,.45);` +
-							  `pointer-events:none;">` +
-							  `♥${favs > 99 ? "99+" : favs}</div>`
-							: "";
-
-						const html =
-							`<div style="position:relative;width:20px;height:20px;` +
-							`overflow:visible;">` +
-							`<div class="dw-geo-pin" style="` +
-							`background:${fill};color:#fff;opacity:${opacity};` +
-							`width:20px;height:20px;border-radius:50%;` +
-							`display:flex;align-items:center;justify-content:center;` +
-							`font:bold 11px/1 sans-serif;` +
-							`border:1px solid #222;` +
-							`box-shadow:0 0 1px rgba(0,0,0,.6);` +
-							`">${label}</div>` +
-							favBadge +
-							`</div>`;
-
-						const icon = L.divIcon({
-							className: "dw-geo-icon",
-							html,
-							iconSize:   [20, 20],
-							iconAnchor: [10, 10],
-						});
-
-						const code  = c.code || c.referenceCode || "";
-						const name  = c.name || code;
-						const diff  = c.difficulty != null ? c.difficulty : "?";
-						const terr  = c.terrain    != null ? c.terrain    : "?";
-						const size  = c.containerType || c.size || "";
-						const owner = c.owner && c.owner.username || "";
-						const tipHtml =
+					if (marker.setTooltipContent) {
+						marker.setTooltipContent(
 							`<b>${_escHtml(name)}</b>` +
-							(found ? " ✓" : dnf ? " ✗" : "") +
 							(disabled ? " <i>(disabled)</i>" : "") +
 							`<br><span class="dw-cad-sub">` +
 							`${_escHtml(code)} · D ${diff} / T ${terr}` +
 							(size ? " · " + _escHtml(String(size)) : "") +
 							(favs ? ` · ♥ ${favs}` : "") +
+							(typeText ? " · " + _escHtml(typeText) : "") +
 							(owner ? "<br>by " + _escHtml(owner) : "") +
-							`</span>`;
-
-						const marker = L.marker([lat, lon], {
-							icon,
-							pane:        "dwGeocachingPane",
-							interactive: true,
-						}).bindTooltip(tipHtml, {
-							className: "dw-flight-tip",
-							sticky:    true,
-						});
-
-						// 3D mirror metadata: lets the Mode3DController
-						// extract the cache code + status into the Mapbox
-						// GeoJSON properties so the 3D dot is colour-coded
-						// and clickable, and the hover popup can show full
-						// detail.
-						marker._dwData = {
-							kind:     "geocache",
-							code,
-							name:     c.name || code,
-							color:    fill,
-							disabled,
-							label:    label,
-							diff:     diff,
-							terr:     terr,
-							size:     size,
-							owner:    owner,
-							favs:     favs,
-							found:    found,
-							dnf:      dnf,
-							url:      code
-								? `https://www.geocaching.com/geocache/${code}`
-								: null,
-						};
-
-						if (code) {
-							marker.on("click", () => {
-								window.open(
-									`https://www.geocaching.com/geocache/${code}`,
-									"_blank", "noopener");
-							});
-						}
-						marker.addTo(this._group);
+							`</span>`);
 					}
+
+					// Always open the cache page on click — detail-fetch
+					// path is purely for the enriched tooltip / icon.
+					window.open(
+						`https://www.geocaching.com/geocache/${code}`,
+						"_blank", "noopener");
 				},
 
 				getAttribution() {
@@ -2614,7 +2698,7 @@
 	// maxNativeZoom 18: ACCC's grid is ~100 m cells, finer queries return
 	// the same blocky pixels — let Leaflet stretch z=18 instead.
 	const MobileCoverageLayerProvider = arcgisExportProvider({
-		baseUrl: "https://spatial.infrastructure.gov.au/server/rest/services/ACCC_Mobile_Sites_and_Coverages/MapServer",
+		baseUrl: CFG.ACCC_MOBILE_COVERAGE_SERVICE,
 		showLayers: "2", pane: "dwMobilePane", paneZIndex: 380,
 		opacity: 0.5, minZoom: 5, maxNativeZoom: 18, maxZoom: 25,
 		attribution: 'Mobile coverage © <a href="https://data.gov.au" target="_blank" rel="noreferrer">ACCC / Dept. of Infrastructure</a>',
@@ -3359,7 +3443,7 @@
 	// Public transparent overlay tiles — nautical seamarks (buoys, lights,
 	// lanes, harbour features). No key required, polite to cache.
 	const OpenSeaMapLayerProvider = tileProvider(
-		"https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
+		CFG.OPENSEAMAP_TILE,
 		{ maxNativeZoom: 18, maxZoom: 25,
 		  attribution: '&copy; <a href="https://www.openseamap.org/" target="_blank" rel="noreferrer">OpenSeaMap</a> contributors' },
 	);
@@ -6433,9 +6517,28 @@
 			};
 			if (tryMount()) return;
 			const obs = new MutationObserver(() => {
-				if (tryMount()) obs.disconnect();
+				if (tryMount()) {
+					obs.disconnect();
+					clearTimeout(timeoutId);
+				}
 			});
 			obs.observe(document.body, { childList: true, subtree: true });
+			// If after 15s we still haven't found `.leaflet-planner-controls`,
+			// dynamic.watch most likely renamed or restructured the DOM. Log a
+			// clear, actionable warning so the user knows it's not their setup.
+			const timeoutId = setTimeout(() => {
+				if (document.querySelector(".dw-3d-btn")) return;
+				obs.disconnect();
+				console.warn(
+					"[CustomTiles] 3D button not injected after 15s — couldn't find" +
+					" `.leaflet-planner-controls` in dynamic.watch's DOM. The site" +
+					" likely renamed or restructured its planner toolbar. Please file" +
+					" an issue at" +
+					" https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles/issues" +
+					" with a screenshot + browser version. The userscript will" +
+					" continue running, only the 3D toggle is affected.",
+				);
+			}, 15_000);
 		}
 	}
 
@@ -6445,11 +6548,6 @@
 		constructor(ctrl) {
 			this._ctrl = ctrl;
 		}
-
-		// Delegates to the top-level _escHtml helper — kept as a static so
-		// existing `LayerManagerUI.escHtml(...)` call sites in this class
-		// don't need to change.
-		static escHtml(s) { return _escHtml(s); }
 
 		// -- Archive persistence ------------------------------------------
 
@@ -6565,13 +6663,13 @@
 				const chkId = "dw-chk-" + item.name.replace(/[^a-z0-9]/gi, "_");
 				return (
 					`<label class="dw-manager-row${isActive ? " dw-manager-row--active" : ""}">` +
-					`<input type="checkbox" id="${LayerManagerUI.escHtml(chkId)}"` +
-					` data-name="${LayerManagerUI.escHtml(item.name)}"` +
+					`<input type="checkbox" id="${_escHtml(chkId)}"` +
+					` data-name="${_escHtml(item.name)}"` +
 					(checked ? " checked" : "") +
 					(isActive
 						? ' disabled title="Switch to another layer before archiving this one"'
 						: "") +
-					`><span class="dw-manager-name">${LayerManagerUI.escHtml(displayName || item.name)}</span>` +
+					`><span class="dw-manager-name">${_escHtml(displayName || item.name)}</span>` +
 					(isActive ? '<span class="dw-badge">active</span>' : "") +
 					"</label>"
 				);
@@ -6581,7 +6679,7 @@
 			for (const group of DW_LAYER_GROUPS) {
 				const groupItems = items.filter((it) => group.names.includes(it.name));
 				if (!groupItems.length) continue;
-				rows += `<div class="dw-manager-group-hd">${LayerManagerUI.escHtml(group.header)}</div>`;
+				rows += `<div class="dw-manager-group-hd">${_escHtml(group.header)}</div>`;
 				rows += `<div class="dw-manager-group">`;
 				for (const item of groupItems) {
 					usedNames.add(item.name);
@@ -6675,8 +6773,7 @@
 			};
 			this.appleToken.onRefresh = (accessKey, version) => {
 				const apple = this.layers[CFG.LAYER_APPLE];
-				if (apple)
-					apple.setUrl(AppleMapsLayerProvider.tileUrl(accessKey, version));
+				if (apple) apple.setUrl(buildAppleTileUrl(accessKey, version));
 			};
 		}
 
