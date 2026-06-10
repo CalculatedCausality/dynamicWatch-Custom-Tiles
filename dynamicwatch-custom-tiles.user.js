@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.89
+// @version      7.9.90
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -5326,6 +5326,30 @@
 			};
 		}
 
+		// Run `fn` as soon as the Mapbox style is ready, guarded so a
+		// callback scheduled while 3D was active never fires after
+		// disable(). Mapbox flips `isStyleLoaded()` to false transiently
+		// whenever a source/layer is added (base swap, overlay mirror),
+		// and several of our sync entry points run right after such a
+		// mutation. The OLD code guarded those entry points with an
+		// early `return` on `!isStyleLoaded` — which silently DROPPED the
+		// work with no retry. That was the root cause of both:
+		//   • shape overlays enabled before 3D never mirroring, and
+		//   • base-layer switches not updating the 3D imagery when made
+		//     before the previous layer finished rendering.
+		// Deferring to the next `idle` (with a timeout fallback in case
+		// idle never fires) makes the work happen instead of vanish.
+		_runWhenStyleReady(mb, fn) {
+			const go = () => {
+				if (this._active && this._mbMap === mb && mb.getStyle?.()) fn();
+			};
+			if (mb.isStyleLoaded && mb.isStyleLoaded()) { go(); return; }
+			let fired = false;
+			const once = () => { if (fired) return; fired = true; go(); };
+			try { mb.once("idle", once); } catch (_) {}
+			setTimeout(once, 1200);
+		}
+
 		// Walk every L.Path / L.Marker on the map, group by pane, and
 		// render each group as one or more Mapbox GeoJSON layers. This
 		// is how Geocaches, Live Flights, Marine Vessels, National
@@ -5336,23 +5360,16 @@
 		// picks it up within 40 ms.
 		_renderLeafletShapes(map, mbMap) {
 			if (!mbMap.isStyleLoaded || !mbMap.isStyleLoaded()) {
-				// Style isn't ready yet. This happens at 3D init: the
-				// `_syncOverlays` call right before us adds raster sources,
-				// which flips `isStyleLoaded()` to false until they settle.
-				// For overlays that were ALREADY active when 3D toggled on
-				// (e.g. Geocaches enabled in 2D first), there's no later
-				// layeradd to retrigger this sync — so without a retry they
-				// never mirror into 3D. Schedule one when the style idles.
+				// Style isn't ready (e.g. _syncOverlays just added raster
+				// sources at 3D init). Defer instead of dropping, so
+				// overlays already active when 3D toggled on still mirror.
+				// Dedup so rapid re-entry registers only one deferral.
 				if (!this._shapesRetryPending) {
 					this._shapesRetryPending = true;
-					const retry = () => {
+					this._runWhenStyleReady(mbMap, () => {
 						this._shapesRetryPending = false;
-						if (this._active && this._mbMap === mbMap) {
-							this._renderLeafletShapes(map, mbMap);
-						}
-					};
-					try { mbMap.once("idle", retry); }
-					catch (_) { setTimeout(retry, 200); }
+						this._renderLeafletShapes(map, mbMap);
+					});
 				}
 				return;
 			}
@@ -6451,7 +6468,7 @@
 				this._active && this._mbMap === mb && mb.getStyle?.();
 			this._baseTracker = (e) => {
 				const mb = this._mbMap;
-				if (!mb || !mb.isStyleLoaded || !mb.isStyleLoaded()) return;
+				if (!mb) return;
 				// Synchronously hide any newly-created pane BEFORE
 				// the 80ms debounce fires. Cadastre / QPWS / Mobile
 				// Coverage etc. create their custom pane in onAdd;
@@ -6459,21 +6476,30 @@
 				// the Leaflet tile cache paints into it as a flat
 				// overlay — visible to the user as the layer "showing
 				// in 2D" until the next sync finally hides the pane.
+				// (DOM-only; safe even before the Mapbox style is ready.)
 				this._hideHiddenable(map);
 				const isBase = e?.type === "baselayerchange";
 				const wantsFull = isBase || needsFullResync(e?.layer);
+				// NB: do NOT gate the whole handler on isStyleLoaded() —
+				// removing the previous base flips it false transiently,
+				// so a switch made before the prior layer finished
+				// rendering would be dropped (the "changing layers
+				// doesn't update the imagery" bug). Debounce, then run
+				// once the style is ready via `_runWhenStyleReady`.
 				if (wantsFull) {
 					clearTimeout(heavyDebounce);
 					heavyDebounce = setTimeout(() => {
 						if (!aliveCheck(mb)) return;
-						this._fullResync(map, mb);
+						this._runWhenStyleReady(mb, () => this._fullResync(map, mb));
 					}, 80);
 				} else {
 					clearTimeout(lightDebounce);
 					lightDebounce = setTimeout(() => {
 						if (!aliveCheck(mb)) return;
-						this._renderLeafletShapes(map, mb);
-						this._renderRoute(map, mb);
+						this._runWhenStyleReady(mb, () => {
+							this._renderLeafletShapes(map, mb);
+							this._renderRoute(map, mb);
+						});
 					}, 80);
 				}
 			};
