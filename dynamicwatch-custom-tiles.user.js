@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.90
+// @version      7.9.91
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -888,13 +888,12 @@
 	 */
 	const _dwMbLayers = new Map();
 	let   _dwMbNextId = 1;
-	// Set true the first time `mapboxgl.addProtocol` works. Builds of
-	// Mapbox GL JS 3.x ship without it (dynamic.watch's page-loaded
-	// bundle is one such — version 3.7.0 yet no addProtocol export).
-	// When false, layers with only a `_dwMbKey` (Stamen, QLD Historical,
-	// Garmin) get silently skipped in the mirror — otherwise Mapbox
-	// pumps `dw://…` URLs into native fetch and spams the console with
-	// "CORS request not http" errors.
+	// Set true the first time `mapboxgl.addProtocol` works. Mapbox GL JS
+	// v3 dropped addProtocol entirely (it's a MapLibre API; the official
+	// v3.x CDN build has no such export), so on dynamic.watch this stays
+	// false and `_dwMbKey` layers (Stamen, QLD Historical, Garmin) are
+	// served through the transformRequest blob bridge instead (see the
+	// DW_TILE_PREFIX block below).
 	let   _dwMbHasProtocol = false;
 
 	function dwRegisterMbLayer(lyr, fetchTile) {
@@ -938,6 +937,56 @@
 				resolve(r.response);
 			});
 		});
+	}
+
+	/* -- transformRequest bridge (addProtocol replacement) ----------------
+	 *
+	 * Mapbox GL JS v3 has NO `addProtocol` (it's a MapLibre API — the
+	 * official Mapbox v3.x CDN build genuinely doesn't export it), so the
+	 * `dw://` scheme above can never fire on dynamic.watch. But the layers
+	 * that needed it (Stamen — Origin spoof; QLD Historical — async
+	 * catalog; Garmin Heatmap — multi-feed canvas composite) still can't
+	 * be expressed as a plain Mapbox tile URL.
+	 *
+	 * The workaround: give those raster sources a sentinel URL template
+	 * (`https://dwtile.local/<key>/{z}/{x}/{y}.png`) and intercept it in
+	 * the map's `transformRequest`. For each tile:
+	 *   • a cached blob → serve it,
+	 *   • otherwise → fire the registered GM fetcher, hand Mapbox a
+	 *     transparent 1×1 placeholder for now, and once the fetch lands,
+	 *     cache the blob and debounce a source reload so Mapbox
+	 *     re-requests the tile and gets the real image.
+	 * `transformRequest` can't set the Origin header itself (browsers
+	 * forbid it), which is exactly why the fetch must go through
+	 * GM_xmlhttpRequest — so this bridge is the only way to render these
+	 * layers in 3D on a v3 Mapbox.
+	 */
+	const DW_TILE_PREFIX = "https://dwtile.local/";
+	// 1×1 transparent PNG — handed back for not-yet-warmed tiles so
+	// Mapbox shows nothing (rather than an error placeholder) until the
+	// reload swaps in the real blob.
+	const DW_TRANSPARENT_PNG =
+		"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+	function dwTileSentinel(key) {
+		return `${DW_TILE_PREFIX}${key}/{z}/{x}/{y}.png`;
+	}
+
+	// Session-wide blob cache shared across 3D enable/disable cycles
+	// (keyed by `<layerKey>/<z>/<x>/<y>`, query string stripped so a
+	// cache-busting reload still hits the same entry).
+	const _dwTileBlobs    = new Map();   // cacheKey -> objectURL
+	const _dwTileInflight = new Set();   // cacheKey currently fetching
+	const _dwTileFailed   = new Set();   // cacheKey that errored (no retry → no loop)
+	const DW_TILE_BLOB_MAX = 600;
+
+	function _dwTileEvict() {
+		while (_dwTileBlobs.size > DW_TILE_BLOB_MAX) {
+			const first = _dwTileBlobs.keys().next().value;
+			const url = _dwTileBlobs.get(first);
+			_dwTileBlobs.delete(first);
+			try { URL.revokeObjectURL(url); } catch (_) {}
+		}
 	}
 
 	/* -- Layer Providers --------------------------------------------------- */
@@ -4891,8 +4940,9 @@
 							} else {
 								console.info(
 									"[CustomTiles] mapboxgl.addProtocol unavailable in this build " +
-									"(v" + (win.mapboxgl.version || "?") + "); Stamen / QLD Historical / " +
-									"Garmin Heatmap will not render in 3D.");
+									"(v" + (win.mapboxgl.version || "?") + " — Mapbox v3 dropped it); " +
+									"Stamen / QLD Historical / Garmin Heatmap render in 3D via the " +
+									"transformRequest blob bridge instead.");
 							}
 						} catch (e) {
 							console.warn("[CustomTiles] addProtocol failed:", e.message);
@@ -5206,6 +5256,12 @@
 				interactive: true,
 				dragRotate: true,
 				touchPitch: true,
+				// Bridge for GM-fetcher-backed raster sources (Stamen,
+				// QLD Historical, Garmin) — intercepts our sentinel tile
+				// URLs and serves blobs fetched via GM_xmlhttpRequest.
+				// Replaces the dead dw:// addProtocol path on Mapbox v3.
+				transformRequest: (url, resourceType) =>
+					this._dwTransformRequest(url, resourceType),
 			});
 			mbMap.on("style.load", () => {
 				mbMap.setTerrain({ source: "mapbox-dem", exaggeration: 1.5 });
@@ -5849,12 +5905,16 @@
 			if (lyr._dwMb3DUrl) {
 				return { ...base, url: lyr._dwMb3DUrl };
 			}
-			// dw:// — only usable when Mapbox's addProtocol is alive.
-			// Skip entirely when it isn't: Mapbox would otherwise pass
-			// the dw:// URL straight to native fetch, which throws a
-			// CORS error per tile.
-			if (lyr._dwMbKey && _dwMbHasProtocol) {
-				return { ...base, url: `dw://${lyr._dwMbKey}/{z}/{x}/{y}.png` };
+			// GM-fetcher-backed layers (Stamen Origin-spoof, QLD
+			// Historical async catalog, Garmin canvas composite). On a
+			// Mapbox build with addProtocol we'd use dw://; since v3 has
+			// none, emit the sentinel template that the map's
+			// transformRequest bridge serves from GM-fetched blobs.
+			if (lyr._dwMbKey) {
+				const url = _dwMbHasProtocol
+					? `dw://${lyr._dwMbKey}/{z}/{x}/{y}.png`
+					: dwTileSentinel(lyr._dwMbKey);
+				return { ...base, url };
 			}
 			// Plain L.TileLayer with a `{z}/{x}/{y}` URL template.
 			if (!(lyr instanceof L.TileLayer)) return null;
@@ -5868,6 +5928,78 @@
 			let cleaned = url.replace(/\{s\}/g, sub).replace(/\{r\}/g, "@2x");
 			if (/\{[^}]+\}/.test(cleaned.replace(/\{[xyz]\}/g, ""))) return null;
 			return { ...base, url: cleaned };
+		}
+
+		// --- transformRequest bridge (see DW_TILE_PREFIX block) ----------
+		// Called by Mapbox for every resource request. Non-sentinel URLs
+		// pass through untouched; sentinel tile URLs are served from the
+		// GM-fetched blob cache (or a transparent placeholder while the
+		// fetch is in flight).
+		_dwTransformRequest(url, resourceType) {
+			if (!url || url.lastIndexOf(DW_TILE_PREFIX, 0) !== 0) {
+				return { url };
+			}
+			// https://dwtile.local/<key>/<z>/<x>/<y>.png[?r=N]
+			const path = url.slice(DW_TILE_PREFIX.length).split("?")[0];
+			const m = path.match(/^([^/]+)\/(\d+)\/(\d+)\/(\d+)/);
+			if (!m) return { url: DW_TRANSPARENT_PNG };
+			const key = m[1], z = +m[2], x = +m[3], y = +m[4];
+			const cacheKey = `${key}/${z}/${x}/${y}`;
+			const blob = _dwTileBlobs.get(cacheKey);
+			if (blob) return { url: blob };
+			if (!_dwTileFailed.has(cacheKey)) this._dwWarmTile(key, z, x, y, cacheKey);
+			return { url: DW_TRANSPARENT_PNG };
+		}
+
+		// Fire the registered GM fetcher for a sentinel tile, cache the
+		// resulting blob, and debounce a source reload so Mapbox
+		// re-requests it (now served from cache). Failures are remembered
+		// so a permanently-404 tile doesn't loop.
+		_dwWarmTile(key, z, x, y, cacheKey) {
+			if (_dwTileInflight.has(cacheKey) || _dwTileBlobs.has(cacheKey)) return;
+			const fetcher = _dwMbLayers.get(key);
+			if (!fetcher) { _dwTileFailed.add(cacheKey); return; }
+			_dwTileInflight.add(cacheKey);
+			Promise.resolve()
+				.then(() => fetcher(z, x, y))
+				.then((ab) => {
+					_dwTileInflight.delete(cacheKey);
+					if (!ab) { _dwTileFailed.add(cacheKey); return; }
+					const blobUrl = URL.createObjectURL(
+						new Blob([ab], { type: "image/png" }));
+					_dwTileBlobs.set(cacheKey, blobUrl);
+					_dwTileEvict();
+					this._scheduleTileReload();
+				})
+				.catch(() => {
+					_dwTileInflight.delete(cacheKey);
+					_dwTileFailed.add(cacheKey);
+				});
+		}
+
+		// Debounced: re-request the tiles of every sentinel-backed raster
+		// source so newly-warmed blobs get drawn. A cache-busting `?r=N`
+		// forces Mapbox to treat the tiles as new (a same-array setTiles
+		// is a no-op). transformRequest strips the query when matching,
+		// so the blob cacheKey stays stable across reloads.
+		_scheduleTileReload() {
+			clearTimeout(this._dwReloadTimer);
+			this._dwReloadTimer = setTimeout(() => {
+				const mb = this._mbMap;
+				if (!this._active || !mb || !mb.getStyle?.()) return;
+				const sources = mb.getStyle().sources || {};
+				const r = (this._dwReloadCounter = (this._dwReloadCounter || 0) + 1);
+				for (const [id, src] of Object.entries(sources)) {
+					const t = src && src.tiles && src.tiles[0];
+					if (src.type !== "raster" || !t ||
+						t.lastIndexOf(DW_TILE_PREFIX, 0) !== 0) continue;
+					const base = t.split("?")[0];
+					const s = mb.getSource(id);
+					if (s && s.setTiles) {
+						try { s.setTiles([`${base}?r=${r}`]); } catch (_) {}
+					}
+				}
+			}, 250);
 		}
 
 		// Find the active base layer (lowest-z TileLayer in default
