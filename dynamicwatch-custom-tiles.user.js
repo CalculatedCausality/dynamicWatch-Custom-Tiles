@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.91
+// @version      7.9.92
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -1954,11 +1954,29 @@
 
 	// -- Strava Heatmap (anonymous tiles only) ----------------------------
 
-	const StravaHeatmapLayerProvider = tileProvider(
-		CFG.STRAVA_HEATMAP_TILE,
-		{ maxNativeZoom: 10, maxZoom: 25, opacity: 0.8,
-		  attribution: "© Strava" },
-	);
+	// Strava's heatmap CDN sends `Vary: Origin` but withholds
+	// `Access-Control-Allow-Origin` for non-allowlisted origins (it stopped
+	// CORS-allowing arbitrary sites). Consequences + handling:
+	//   • 2D: a CORS-enabled <img> (crossOrigin:true) fails its CORS check
+	//     even though the tile returns 200 — so we DON'T set crossOrigin.
+	//     We never read its pixels in 2D, so a plain (CORS-free) <img>
+	//     displays the heatmap fine.
+	//   • 3D: Mapbox needs CORS-clean tiles for WebGL textures, which this
+	//     endpoint won't provide — so we route Strava through the GM blob
+	//     bridge (GM_xmlhttpRequest is exempt from CORS), same as Garmin.
+	class StravaHeatmapLayerProvider extends LayerProvider {
+		create() {
+			const layer = L.tileLayer(CFG.STRAVA_HEATMAP_TILE, {
+				tileSize: 256, maxNativeZoom: 10, maxZoom: 25,
+				opacity: 0.8, crossOrigin: false,
+				attribution: "© Strava",
+			});
+			dwRegisterMbLayer(layer, (z, x, y) => dwMbGmFetchAB(
+				CFG.STRAVA_HEATMAP_TILE
+					.replace("{z}", z).replace("{x}", x).replace("{y}", y)));
+			return layer;
+		}
+	}
 
 	// -- Garmin Heatmap ---------------------------------------------------
 
