@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.86
+// @version      7.9.87
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -157,6 +157,17 @@
 		// rotation across tiles01..tiles04 distributes load across edges.
 		GEOCACHING_PUBLIC_INFO:
 			"https://tiles{s}.geocaching.com/map.info?x={x}&y={y}&z={z}",
+		// The PNG tile is the legacy map's VISUAL render. We don't draw it
+		// (custom markers instead), but requesting it triggers the server
+		// to generate the tile, which is what populates the map.info
+		// UTFGrid. Cold tiles (never recently rendered) return HTTP 204 on
+		// map.info until a map.png request warms them. The warming is
+		// shared across the tiles01..04 edges and persists server-side, so
+		// we only pay it once per tile per cache-eviction cycle. Verified
+		// empirically: map.png works with any Referer; map.info needs the
+		// geocaching.com Referer; HEAD does NOT warm (must be a full GET).
+		GEOCACHING_PUBLIC_PNG:
+			"https://tiles{s}.geocaching.com/map.png?x={x}&y={y}&z={z}",
 		GEOCACHING_PUBLIC_DETAILS:
 			"https://tiles01.geocaching.com/map.details?i=",
 		GEOCACHING_TILE_SUBDOMAINS: ["01", "02", "03", "04"],
@@ -2362,7 +2373,15 @@
 			// tiles so markers keep rendering as the user zooms in.
 			const FETCH_MAX_Z = 13;
 			const DEBOUNCE_MS = 500;
-			const MAX_TILES   = 16;        // hard cap; pan past this clears
+			// Visible-tile count is ~viewport_px/256 REGARDLESS of zoom, so
+			// a desktop viewport (1600x1000) needs up to ~40 tiles to cover
+			// it and even a 1366x768 laptop needs ~28. The cap is purely a
+			// runaway-guard for pathological cases (huge external monitor,
+			// or fetch-zoom logic regressing); set well above any real
+			// viewport. Per-tile UTFGrid cache + 4-way subdomain rotation
+			// keep the per-pan request burst reasonable. (Was 16 — far too
+			// low; silently rendered nothing at the layer's own MIN_ZOOM.)
+			const MAX_TILES   = 64;
 
 			// Type id → single-letter marker glyph + colour. The IDs are
 			// Groundspeak's; the labels are picked to fit inside a 20px
@@ -2525,30 +2544,68 @@
 				},
 
 				_fetchTile(t, myGen, key) {
-					const url = CFG.GEOCACHING_PUBLIC_INFO
+					// allowWarm=true on the first attempt: if the tile is
+					// cold (HTTP 204), warm it via a map.png GET and retry
+					// map.info ONCE. Warm tiles cost a single request.
+					this._getInfo(t, myGen, key, true);
+				},
+
+				_tileUrl(template, t) {
+					return template
 						.replace("{s}", nextSubdomain())
 						.replace("{x}", String(t.x))
 						.replace("{y}", String(t.y))
 						.replace("{z}", String(t.z));
+				},
+
+				_getInfo(t, myGen, key, allowWarm) {
+					const url = this._tileUrl(CFG.GEOCACHING_PUBLIC_INFO, t);
 					const handle = gmJsonGet(url, {
 						headers: {
 							"Accept":  "application/json",
 							"Referer": "https://www.geocaching.com/play/map",
 						},
 						timeout: 15000,
-					}, (err, data) => {
+					}, (err, data, raw) => {
 						this._inflight.delete(handle);
 						if (myGen !== this._gen || !this._group) return;
-						if (err || !data) return;
 
-						tileCache.set(key, data);
-						if (tileCache.size > TILE_CACHE_MAX) {
-							const first = tileCache.keys().next().value;
-							tileCache.delete(first);
+						if (!err && data) {
+							tileCache.set(key, data);
+							if (tileCache.size > TILE_CACHE_MAX) {
+								const first = tileCache.keys().next().value;
+								tileCache.delete(first);
+							}
+							this._renderTile(t, data);
+							return;
 						}
-						this._renderTile(t, data);
+						// HTTP 204 (empty body, gmJsonGet surfaces it as an
+						// "http 204" error) means the tile is cold. Warm it
+						// once, then retry. Any other error: give up quietly.
+						const status = raw && raw.status;
+						if (status === 204 && allowWarm) {
+							this._warmThenRetry(t, myGen, key);
+						}
 					});
 					this._inflight.add(handle);
+				},
+
+				_warmThenRetry(t, myGen, key) {
+					// A plain GET of the PNG triggers server-side tile
+					// generation (HEAD does not). We discard the image —
+					// only the side effect of warming the UTFGrid matters.
+					const url = this._tileUrl(CFG.GEOCACHING_PUBLIC_PNG, t);
+					const warm = gmGet(url, {
+						headers: { "Referer": "https://www.geocaching.com/play/map" },
+						timeout: 15000,
+					}, () => {
+						this._inflight.delete(warm);
+						if (myGen !== this._gen || !this._group) return;
+						// Retry info regardless of the PNG's HTTP result;
+						// allowWarm=false so a still-cold tile doesn't loop.
+						this._getInfo(t, myGen, key, false);
+					});
+					this._inflight.add(warm);
 				},
 
 				_renderTile(t, grid) {
