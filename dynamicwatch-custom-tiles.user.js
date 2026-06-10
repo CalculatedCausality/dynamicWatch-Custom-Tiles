@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.98
+// @version      7.9.99
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -2545,17 +2545,19 @@
 				return tiles;
 			}
 
-			// The VISIBLE cache symbols come from Groundspeak's own map.png
-			// raster tiles (real per-type icons: traditional chest, mystery
-			// '?', earthcache, etc.) draped via an L.tileLayer. The markers
-			// built here are TRANSPARENT hit-areas sitting over each icon —
-			// they exist only to carry click/hover + the `_dwData` the 3D
-			// mirror reads. A ~28px box comfortably covers the PNG icon even
-			// with UTFGrid cell quantisation (cell centre is within a few
-			// screen px of the true position at z12-13). On touch-primary
-			// devices the box grows to 40px: a fat-finger tap that misses
-			// the hit-area lands on the MAP, which the planner reads as
-			// "add a waypoint here".
+			// ZOOM-STAGED VISUALS. Groundspeak's map.png raster (real
+			// per-type icons) only exists natively to z=FETCH_MAX_Z; past
+			// that, Leaflet CSS-stretches the bitmap and the icons inside
+			// it blow up blurry. So:
+			//   z10..13 — raster icons visible (native, crisp); the
+			//             markers are TRANSPARENT hit-areas over them.
+			//   z14+    — raster hidden (tile layer maxZoom); the markers
+			//             become VISIBLE constant-size pins, coloured by
+			//             cache type once details are known (eager-fetched
+			//             under a budget — cache counts are small at these
+			//             zooms — or on click).
+			// Hit-area is 28px (40px on touch-primary, where a fat-finger
+			// miss would land on the map and add a waypoint).
 			const HIT_PX = (L.Browser.mobile ||
 				(window.matchMedia &&
 				 window.matchMedia("(hover: none)").matches)) ? 40 : 28;
@@ -2567,6 +2569,49 @@
 					iconSize:   [HIT_PX, HIT_PX],
 					iconAnchor: [HIT_PX / 2, HIT_PX / 2],
 				});
+			}
+
+			// Visible pin for z14+ — 20px circle, single-letter type
+			// glyph, favourites badge. Generic green "G" until details
+			// resolve the real type.
+			function buildPinIcon(typeId, fill, opacity, favs) {
+				const label = TYPE_LABELS[typeId] || "G";
+				const favBadge = favs > 0
+					? `<div style="position:absolute;top:-6px;right:-8px;` +
+					  `background:#d33;color:#fff;font:bold 9px/1 sans-serif;` +
+					  `padding:2px 4px;border-radius:8px;border:1px solid #fff;` +
+					  `white-space:nowrap;box-shadow:0 0 2px rgba(0,0,0,.45);` +
+					  `pointer-events:none;">♥${favs > 99 ? "99+" : favs}</div>`
+					: "";
+				const html =
+					`<div style="position:relative;width:20px;height:20px;` +
+					`overflow:visible;cursor:pointer;">` +
+					`<div style="background:${fill};color:#fff;opacity:${opacity};` +
+					`width:20px;height:20px;border-radius:50%;` +
+					`display:flex;align-items:center;justify-content:center;` +
+					`font:bold 11px/1 sans-serif;border:1px solid #222;` +
+					`box-shadow:0 0 1px rgba(0,0,0,.6);">${label}</div>` +
+					favBadge + `</div>`;
+				return L.divIcon({
+					className: "dw-geo-icon",
+					html,
+					iconSize:   [20, 20],
+					iconAnchor: [10, 10],
+				});
+			}
+
+			// Pin matching whatever details we already have for a cache.
+			function pinForCode(code) {
+				const row = detailsCache.get(code);
+				if (!row) return buildPinIcon(2, TYPE_COLOR[2], 1, 0);
+				const typeId = (row.type && row.type.value) || 2;
+				const disabled = !row.available;
+				return buildPinIcon(
+					typeId,
+					disabled ? "#888" : (TYPE_COLOR[typeId] || "#1f8e3e"),
+					disabled ? 0.6 : 1,
+					parseInt(row.fp, 10) || 0,
+				);
 			}
 
 			const GeoLayer = L.Layer.extend({
@@ -2601,7 +2646,11 @@
 						subdomains:    CFG.GEOCACHING_TILE_SUBDOMAINS,
 						minZoom:       MIN_ZOOM,
 						maxNativeZoom: FETCH_MAX_Z,
-						maxZoom:       22,
+						// Hide the raster past its native zoom instead of
+						// CSS-stretching it — overzoomed bitmap icons blow
+						// up big and blurry. z14+ uses crisp DOM pins (see
+						// the zoom-staged visuals note above).
+						maxZoom:       FETCH_MAX_Z,
 						tileSize:      256,
 						// map.png sends NO Access-Control-Allow-Origin, so
 						// a CORS-enabled <img> (crossOrigin:true) fails its
@@ -2751,6 +2800,12 @@
 				_renderTile(t, grid) {
 					if (!this._group) return;
 					if (!grid || !Array.isArray(grid.keys)) return;
+					// z14+: the raster is hidden (past native zoom), so
+					// markers carry the visible pin. z<=13: transparent
+					// hit-areas over the raster icons.
+					const pinMode = !!this._map &&
+						this._map.getZoom() > FETCH_MAX_Z;
+					const newCodes = [];
 					const data = grid.data || {};
 					for (const k of grid.keys) {
 						if (!k) continue;
@@ -2770,14 +2825,13 @@
 							if (!entry || !entry.i) continue;
 							const code = entry.i;
 							if (this._byCode.has(code)) continue;
+							newCodes.push(code);
 
 							const [lat, lon] =
 								utfGridCellToLatLng(t.z, t.x, t.y, cx, cy);
 							const name = entry.n || code;
-							// Transparent hit-area; the visible icon is the
-							// map.png raster underneath.
 							const marker = L.marker([lat, lon], {
-								icon: buildHitIcon(),
+								icon: pinMode ? pinForCode(code) : buildHitIcon(),
 								pane:        "dwGeocachingPane",
 								interactive: true,
 							}).bindTooltip(
@@ -2833,14 +2887,30 @@
 							this._byCode.set(code, marker);
 						}
 					}
+
+					// Pin mode: colour the pins by real cache type without
+					// waiting for a click. Budgeted — at z14+ a view holds
+					// few caches, but a dense z13-parent tile can carry
+					// hundreds; never fan out more than the budget per
+					// render pass (the rest stay generic green until
+					// clicked).
+					if (pinMode) {
+						let budget = 40;
+						for (const code of newCodes) {
+							if (detailsCache.has(code)) continue;
+							if (budget-- <= 0) break;
+							this._fetchDetails(code, (row) => {
+								const mk = this._byCode.get(code);
+								if (!row || !mk) return;
+								this._applyDetails(mk, code, row, { open: false });
+							});
+						}
+					}
 				},
 
-				_onClick(marker, code) {
-					const cached = detailsCache.get(code);
-					if (cached) {
-						this._applyDetails(marker, code, cached);
-						return;
-					}
+				// Fetch + cache map.details for one cache. cb(row|null) —
+				// null means error or no data (caller decides fallback).
+				_fetchDetails(code, cb) {
 					const url = CFG.GEOCACHING_PUBLIC_DETAILS + code;
 					gmJsonGet(url, {
 						headers: {
@@ -2850,31 +2920,48 @@
 						timeout: 10000,
 					}, (err, data) => {
 						if (err || !data || data.status !== "success") {
-							// Fall through to opening the cache page in
-							// the browser — Groundspeak handles archived
-							// / private caches with its own UI.
+							cb(null);
+							return;
+						}
+						const row = (data.data && data.data[0]) || null;
+						if (row) detailsCache.set(code, row);
+						cb(row);
+					});
+				},
+
+				_onClick(marker, code) {
+					const cached = detailsCache.get(code);
+					if (cached) {
+						this._applyDetails(marker, code, cached, { open: true });
+						return;
+					}
+					this._fetchDetails(code, (row) => {
+						if (!row) {
+							// Details unavailable (archived/private/error) —
+							// open the cache page; Groundspeak has its own
+							// UI for those states.
 							window.open(
 								`https://www.geocaching.com/geocache/${code}`,
 								"_blank", "noopener");
 							return;
 						}
-						const row = (data.data && data.data[0]) || null;
-						if (!row) return;
-						detailsCache.set(code, row);
-						this._applyDetails(marker, code, row);
+						this._applyDetails(marker, code, row, { open: true });
 					});
 				},
 
-				_applyDetails(marker, code, row) {
+				_applyDetails(marker, code, row, opts) {
 					const typeId = (row.type && row.type.value) || 2;
 					const color = TYPE_COLOR[typeId] || "#1f8e3e";
 					const disabled = !row.available;
 					const fill = disabled ? "#888" : color;
 					const favs = parseInt(row.fp, 10) || 0;
-					// No icon recolour — the visible symbol is the map.png
-					// raster. We only enrich the tooltip + the `_dwData` the
-					// 3D mirror reads (so the 3D dot picks up the real type
-					// colour once a cache has been clicked).
+					// Recolour the pin only when pins are the visible
+					// symbol (z14+); below that the map.png raster is the
+					// visual and the marker stays a transparent hit-area.
+					if (this._map && this._map.getZoom() > FETCH_MAX_Z &&
+						marker.setIcon) {
+						marker.setIcon(pinForCode(code));
+					}
 
 					const name  = row.name || code;
 					const diff  = (row.difficulty && row.difficulty.value)
@@ -2904,11 +2991,13 @@
 							`</span>`);
 					}
 
-					// Always open the cache page on click — detail-fetch
-					// path is purely for the enriched tooltip / icon.
-					window.open(
-						`https://www.geocaching.com/geocache/${code}`,
-						"_blank", "noopener");
+					// Open the cache page only on an actual click — the
+					// eager pin-colouring path enriches silently.
+					if (opts && opts.open) {
+						window.open(
+							`https://www.geocaching.com/geocache/${code}`,
+							"_blank", "noopener");
+					}
 				},
 
 				getAttribution() {
