@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.95
+// @version      7.9.96
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -2532,14 +2532,20 @@
 			// they exist only to carry click/hover + the `_dwData` the 3D
 			// mirror reads. A ~28px box comfortably covers the PNG icon even
 			// with UTFGrid cell quantisation (cell centre is within a few
-			// screen px of the true position at z12-13).
+			// screen px of the true position at z12-13). On touch-primary
+			// devices the box grows to 40px: a fat-finger tap that misses
+			// the hit-area lands on the MAP, which the planner reads as
+			// "add a waypoint here".
+			const HIT_PX = (L.Browser.mobile ||
+				(window.matchMedia &&
+				 window.matchMedia("(hover: none)").matches)) ? 40 : 28;
 			function buildHitIcon() {
 				return L.divIcon({
 					className: "dw-geo-icon",
-					html: `<div style="width:28px;height:28px;` +
+					html: `<div style="width:${HIT_PX}px;height:${HIT_PX}px;` +
 						`background:transparent;cursor:pointer;"></div>`,
-					iconSize:   [28, 28],
-					iconAnchor: [14, 14],
+					iconSize:   [HIT_PX, HIT_PX],
+					iconAnchor: [HIT_PX / 2, HIT_PX / 2],
 				});
 			}
 
@@ -2763,7 +2769,36 @@
 								url:   `https://www.geocaching.com/geocache/${code}`,
 							};
 
-							marker.on("click", () => this._onClick(marker, code));
+							// Keep taps on the cache icon OURS — and handle the
+							// click with a RAW listener on the icon itself.
+							// Leaflet 1.x delivers marker clicks by
+							// delegation from the map container, so the DOM
+							// event must bubble all the way up before
+							// `marker.on("click")` would fire — and at the
+							// container, dynamic.watch's own listeners see
+							// it too, which on mobile reads as "add a
+							// waypoint here" (or, on long-press, opens the
+							// add-point/GPS menu), making cache details
+							// unreachable on touch. A raw icon-level
+							// listener fires FIRST, stops the bubble dead,
+							// and calls our handler directly; Leaflet's
+							// delegated path simply never runs (no double
+							// fire). disableClickPropagation kills the
+							// pointerdown/touchstart family (site long-
+							// press timer + drag-start); contextmenu stop
+							// covers the synthesized long-press menu.
+							marker.on("add", () => {
+								const el = marker._icon;
+								if (!el || el._dwStopWired) return;
+								el._dwStopWired = true;
+								L.DomEvent.disableClickPropagation(el);
+								L.DomEvent.on(el, "click", (ev) => {
+									L.DomEvent.stop(ev);
+									this._onClick(marker, code);
+								});
+								L.DomEvent.on(el, "contextmenu touchend",
+									L.DomEvent.stopPropagation);
+							});
 							marker.addTo(this._group);
 							this._byCode.set(code, marker);
 						}
@@ -2889,6 +2924,33 @@
 	 *
 	 * Returns: install(layer, map). Cleans up via layer._dwHoverOff.
 	 */
+	// One-shot ArcGIS point-identify — shared by the hover factory and the
+	// mobile tap-popup enrichment (touch devices have no hover, so the
+	// site's add-point popup doubles as the info surface there).
+	// cb(err, firstResultFeature|null).
+	function arcgisIdentify(map, latlng, opts, cb) {
+		const size  = map.getSize();
+		const b     = map.getBounds();
+		const mapExtent    = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(",");
+		const imageDisplay = `${size.x},${size.y},96`;
+		const geometry = encodeURIComponent(JSON.stringify({
+			x: latlng.lng, y: latlng.lat, spatialReference: { wkid: 4326 },
+		}));
+		const url =
+			`${opts.baseUrl}/identify` +
+			`?geometry=${geometry}` +
+			`&geometryType=esriGeometryPoint&sr=4326` +
+			`&layers=${opts.layers}` +
+			`&tolerance=${opts.tolerance || 3}` +
+			`&mapExtent=${mapExtent}` +
+			`&imageDisplay=${imageDisplay}` +
+			`&returnGeometry=false&f=json`;
+		gmJsonGet(url, (err, data) => {
+			if (err) { cb(err, null); return; }
+			cb(null, (data.results || [])[0] || null);
+		});
+	}
+
 	function makeHoverIdentify(opts) {
 		const debounceMs = opts.debounceMs || 200;
 		return function install(layer, map) {
@@ -2911,27 +2973,10 @@
 			};
 
 			const identify = (latlng) => {
-				const size  = map.getSize();
-				const b     = map.getBounds();
-				const mapExtent    = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(",");
-				const imageDisplay = `${size.x},${size.y},96`;
-				const geometry = encodeURIComponent(JSON.stringify({
-					x: latlng.lng, y: latlng.lat, spatialReference: { wkid: 4326 },
-				}));
 				const myGen = ++gen;
-				const url =
-					`${opts.baseUrl}/identify` +
-					`?geometry=${geometry}` +
-					`&geometryType=esriGeometryPoint&sr=4326` +
-					`&layers=${opts.layers}` +
-					`&tolerance=${opts.tolerance || 3}` +
-					`&mapExtent=${mapExtent}` +
-					`&imageDisplay=${imageDisplay}` +
-					`&returnGeometry=false&f=json`;
-				gmJsonGet(url, (err, data) => {
+				arcgisIdentify(map, latlng, opts, (err, feat) => {
 					if (err) return;
 					if (myGen !== gen) return;
-					const feat = (data.results || [])[0];
 					if (!feat) { clearTip(); return; }
 					const attrs = feat.attributes || {};
 					const oid =
@@ -5080,6 +5125,7 @@
 				clearTimeout(this._pendingRetry);
 				this._pendingRetry = null;
 			}
+			this._pendingRetryCount = 0;
 			this._unmount(map);
 			this._active = false;
 			console.info("[CustomTiles] 3D Mode disabled");
@@ -6200,15 +6246,29 @@
 			});
 			// One-shot retry if any token-aware getter returned null
 			// — gives the QLD CSRF/token bootstrap time to complete on
-			// its async path, then re-mirrors so QLD Roads / QLD Globe
-			// pop in once their tokens land.
-			if (this._hadPendingGetter && !this._pendingRetry) {
-				this._pendingRetry = setTimeout(() => {
-					this._pendingRetry = null;
-					if (this._active && this._mbMap) {
-						this._syncOverlays(map, this._mbMap);
-					}
-				}, 3000);
+			// its async path. Must be a FULL resync, not _syncOverlays:
+			// the pending getter can belong to the BASE layer (QLD Globe
+			// is token-gated), and only _fullResync rebuilds active-base
+			// — an overlays-only retry would leave the 3D base missing
+			// until some unrelated event forced a full pass.
+			if (!this._hadPendingGetter) {
+				// Everything resolved — re-arm the retry budget for the
+				// next time a token goes pending.
+				this._pendingRetryCount = 0;
+			} else if (!this._pendingRetry) {
+				// Cap the retries: a token that never resolves (QLD
+				// bootstrap failing outright) must not full-resync — and
+				// flicker every overlay — every 3 s forever.
+				this._pendingRetryCount = (this._pendingRetryCount || 0) + 1;
+				if (this._pendingRetryCount <= 5) {
+					this._pendingRetry = setTimeout(() => {
+						this._pendingRetry = null;
+						if (this._active && this._mbMap) {
+							const mb = this._mbMap;
+							this._runWhenStyleReady(mb, () => this._fullResync(map, mb));
+						}
+					}, 3000);
+				}
 			}
 		}
 
@@ -7455,7 +7515,7 @@
 					: e.popup._container;
 				if (!el) return;
 				const pod = el.querySelector(".popup-on-location");
-				if (!pod || pod.querySelector(".dw-sv-btn")) return;
+				if (!pod) return;
 
 				const titleEl = pod.querySelector("#waypoint-popup-title");
 				if (!titleEl) return;
@@ -7464,6 +7524,14 @@
 				const lat = parseFloat(parts[0]);
 				const lng = parseFloat(parts[1]);
 				if (isNaN(lat) || isNaN(lng)) return;
+
+				// Layer-identify enrichment runs on EVERY open (the popup
+				// container can be reused with new coordinates, so stale
+				// sections are dropped first). The SV button + copy
+				// handler below are once-per-container.
+				pod.querySelectorAll(".dw-popup-ident").forEach((n) => n.remove());
+				this._injectIdentifyIntoPopup(map, lat, lng, pod);
+				if (pod.querySelector(".dw-sv-btn")) return;
 
 				// Give the coordinate title a class we can style, and make it
 				// click-to-copy so "lat,lng" lands on the clipboard instantly.
@@ -7502,6 +7570,78 @@
 				});
 				pod.appendChild(btn);
 			});
+		}
+
+		// Touch devices have no hover, so the Cadastre / QPWS identify
+		// tooltips (and the cadastre Sales link → price window) were
+		// unreachable on mobile: tapping the map opens the site's
+		// add-point popup instead. So on touch-primary devices we make
+		// that popup the info surface — when those layers are active, run
+		// the same /identify the desktop hover uses for the tapped point
+		// and append the result (including the Sales ↗ link, which the
+		// document-level delegated handler already services wherever it
+		// appears in the DOM).
+		_injectIdentifyIntoPopup(map, lat, lng, pod) {
+			const noHover = L.Browser.mobile ||
+				(window.matchMedia && window.matchMedia("(hover: none)").matches);
+			if (!noHover) return;
+
+			const latlng = L.latLng(lat, lng);
+			const section = (cls, html) => {
+				if (!pod.isConnected) return;
+				const div = document.createElement("div");
+				div.className = "dw-popup-ident " + cls;
+				div.innerHTML = html;
+				pod.appendChild(div);
+				return div;
+			};
+
+			const cad = this.layers[CFG.LAYER_CADASTRE];
+			if (cad && map.hasLayer(cad) &&
+				map.getZoom() >= CFG.QLD_CADASTRE_HOVER_MIN_ZOOM) {
+				_ensureSalesHook(map);
+				arcgisIdentify(map, latlng, {
+					baseUrl: CFG.QLD_CADASTRE_SERVICE,
+					layers:  "all:" + CFG.QLD_CADASTRE_IDENTIFY_LAYER,
+					tolerance: 3,
+				}, (err, feat) => {
+					if (err || !feat) return;
+					const attrs = feat.attributes || {};
+					const lotplan = _cadVal(attrs["Lot/plan"]);
+					if (!lotplan) {
+						section("dw-popup-ident-cad",
+							_formatCadastreTooltip(attrs, null));
+						return;
+					}
+					// Resolve the address first (cached after first hit) so
+					// the Sales link — which needs street number + name —
+					// renders in one pass instead of popping in late.
+					fetchCadastreAddress(lotplan, (info) => {
+						section("dw-popup-ident-cad",
+							_formatCadastreTooltip(attrs, info));
+					});
+				});
+			}
+
+			const qpws = this.layers[CFG.LAYER_QPWS];
+			if (qpws && map.hasLayer(qpws) &&
+				map.getZoom() >= CFG.QLD_QPWS_HOVER_MIN_ZOOM) {
+				arcgisIdentify(map, latlng, {
+					baseUrl: CFG.QLD_QPWS_SERVICE,
+					layers:  "all:10",
+					tolerance: 5,
+				}, (err, feat) => {
+					if (err || !feat) return;
+					const a = feat.attributes || {};
+					const name = a.NAME || a.name || a.PARK_NAME || a.park_name || "";
+					const type = a.FEAT_TYPE || a.feat_type || a.MANAGE_TYPE || a.manage_type || "";
+					if (!name && !type) return;
+					section("dw-popup-ident-qpws",
+						(name ? `<b>${_escHtml(name)}</b>` : "") +
+						(name && type ? "<br>" : "") +
+						(type ? _escHtml(type) : ""));
+				});
+			}
 		}
 
 		_injectGroupHeaders(ctrl) {
@@ -7748,6 +7888,13 @@
 				".popup-on-location .dw-sv-btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; margin: 6px 0 0; padding: 12px 16px; font-size: 14px; font-family: inherit; font-weight: 500; line-height: 1.2; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; border-radius: 10px; cursor: pointer; box-sizing: border-box; }",
 				".popup-on-location .dw-sv-btn:hover { background: #dbeafe; border-color: #93c5fd; }",
 				".popup-on-location .dw-sv-btn svg { flex-shrink: 0; }",
+				// Layer-identify sections injected into the site's add-point
+				// popup on touch devices (Cadastre parcel + Sales link, QPWS
+				// protected area) — mobile's replacement for hover tooltips.
+				".popup-on-location .dw-popup-ident { border-top: 1px solid #e5e7eb; margin-top: 8px; padding-top: 8px; font-size: 12.5px; line-height: 1.5; text-align: left; }",
+				".popup-on-location .dw-popup-ident b { font-weight: 700; }",
+				".popup-on-location .dw-popup-ident .dw-cad-sub { color: #6b7280; font-size: 11px; }",
+				".popup-on-location .dw-popup-ident .dw-cad-link { font-weight: 600; }",
 				// 3D toggle in the planner action row. Matches the native
 				// btn-default look; `.active` darkens it the same way
 				// Bootstrap 3 does for pressed buttons.
