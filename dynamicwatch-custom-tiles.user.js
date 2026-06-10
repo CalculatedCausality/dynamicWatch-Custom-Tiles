@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.87
+// @version      7.9.89
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -2440,35 +2440,28 @@
 				return tiles;
 			}
 
-			function buildIcon(typeId, fill, opacity, favs) {
-				const label = TYPE_LABELS[typeId] || "G";
-				const favBadge = favs > 0
-					? `<div style="position:absolute;top:-6px;right:-8px;` +
-					  `background:#d33;color:#fff;font:bold 9px/1 sans-serif;` +
-					  `padding:2px 4px;border-radius:8px;border:1px solid #fff;` +
-					  `white-space:nowrap;box-shadow:0 0 2px rgba(0,0,0,.45);` +
-					  `pointer-events:none;">♥${favs > 99 ? "99+" : favs}</div>`
-					: "";
-				const html =
-					`<div style="position:relative;width:20px;height:20px;` +
-					`overflow:visible;"><div class="dw-geo-pin" style="` +
-					`background:${fill};color:#fff;opacity:${opacity};` +
-					`width:20px;height:20px;border-radius:50%;` +
-					`display:flex;align-items:center;justify-content:center;` +
-					`font:bold 11px/1 sans-serif;border:1px solid #222;` +
-					`box-shadow:0 0 1px rgba(0,0,0,.6);">${label}</div>` +
-					favBadge + `</div>`;
+			// The VISIBLE cache symbols come from Groundspeak's own map.png
+			// raster tiles (real per-type icons: traditional chest, mystery
+			// '?', earthcache, etc.) draped via an L.tileLayer. The markers
+			// built here are TRANSPARENT hit-areas sitting over each icon —
+			// they exist only to carry click/hover + the `_dwData` the 3D
+			// mirror reads. A ~28px box comfortably covers the PNG icon even
+			// with UTFGrid cell quantisation (cell centre is within a few
+			// screen px of the true position at z12-13).
+			function buildHitIcon() {
 				return L.divIcon({
 					className: "dw-geo-icon",
-					html,
-					iconSize:   [20, 20],
-					iconAnchor: [10, 10],
+					html: `<div style="width:28px;height:28px;` +
+						`background:transparent;cursor:pointer;"></div>`,
+					iconSize:   [28, 28],
+					iconAnchor: [14, 14],
 				});
 			}
 
 			const GeoLayer = L.Layer.extend({
 				initialize() {
 					this._group    = null;
+					this._tiles    = null;
 					this._debounce = null;
 					this._gen      = 0;
 					this._inflight = new Set();
@@ -2476,10 +2469,32 @@
 				},
 
 				onAdd(map) {
+					// Visual tiles sit just below the transparent hit-area
+					// markers so a click lands on the marker, not the raster.
+					if (!map.getPane("dwGeocachingTilePane")) {
+						map.createPane("dwGeocachingTilePane");
+						map.getPane("dwGeocachingTilePane").style.zIndex = "440";
+					}
 					if (!map.getPane("dwGeocachingPane")) {
 						map.createPane("dwGeocachingPane");
 						map.getPane("dwGeocachingPane").style.zIndex = "445";
 					}
+					// Groundspeak's rendered cache-icon raster. The <img>
+					// requests ALSO warm the server-side tiles, which is what
+					// makes the map.info UTFGrid (fetched below) return data.
+					// map.png works with any Referer, so a plain L.tileLayer
+					// is fine — and it auto-mirrors into 3D as a terrain
+					// drape via _syncOverlays.
+					this._tiles = L.tileLayer(CFG.GEOCACHING_PUBLIC_PNG, {
+						pane:          "dwGeocachingTilePane",
+						subdomains:    CFG.GEOCACHING_TILE_SUBDOMAINS,
+						minZoom:       MIN_ZOOM,
+						maxNativeZoom: FETCH_MAX_Z,
+						maxZoom:       22,
+						tileSize:      256,
+						crossOrigin:   true,
+						attribution:   'Caches © <a href="https://www.geocaching.com" target="_blank" rel="noreferrer">Geocaching.com</a>',
+					}).addTo(map);
 					this._group = L.layerGroup().addTo(map);
 					this._fetchSoon();
 					map.on("moveend zoomend", this._onViewChange, this);
@@ -2491,6 +2506,10 @@
 					map.off("moveend zoomend", this._onViewChange, this);
 					for (const h of this._inflight) gmCancel(h);
 					this._inflight.clear();
+					if (this._tiles) {
+						this._tiles.remove();
+						this._tiles = null;
+					}
 					if (this._group) {
 						this._group.remove();
 						this._group = null;
@@ -2634,9 +2653,10 @@
 							const [lat, lon] =
 								utfGridCellToLatLng(t.z, t.x, t.y, cx, cy);
 							const name = entry.n || code;
-							const icon = buildIcon(2, TYPE_COLOR[2], 1, 0);
+							// Transparent hit-area; the visible icon is the
+							// map.png raster underneath.
 							const marker = L.marker([lat, lon], {
-								icon,
+								icon: buildHitIcon(),
 								pane:        "dwGeocachingPane",
 								interactive: true,
 							}).bindTooltip(
@@ -2646,9 +2666,10 @@
 								{ className: "dw-flight-tip", sticky: true },
 							);
 
-							// 3D mirror metadata used by Mode3DController
-							// to project a colour-coded clickable dot.
-							// Fields populated on first details fetch.
+							// 3D mirror metadata used by Mode3DController to
+							// project a clickable dot over the terrain drape.
+							// Type/colour fields populate on first details
+							// fetch (UTFGrid only carries code + name).
 							marker._dwData = {
 								kind:  "geocache",
 								code,
@@ -2699,10 +2720,11 @@
 					const color = TYPE_COLOR[typeId] || "#1f8e3e";
 					const disabled = !row.available;
 					const fill = disabled ? "#888" : color;
-					const opacity = disabled ? 0.5 : 1;
 					const favs = parseInt(row.fp, 10) || 0;
-					const newIcon = buildIcon(typeId, fill, opacity, favs);
-					if (marker.setIcon) marker.setIcon(newIcon);
+					// No icon recolour — the visible symbol is the map.png
+					// raster. We only enrich the tooltip + the `_dwData` the
+					// 3D mirror reads (so the 3D dot picks up the real type
+					// colour once a cache has been clicked).
 
 					const name  = row.name || code;
 					const diff  = (row.difficulty && row.difficulty.value)
@@ -5313,7 +5335,27 @@
 		// which fires layeradd/layerremove → our debounced _fullResync
 		// picks it up within 40 ms.
 		_renderLeafletShapes(map, mbMap) {
-			if (!mbMap.isStyleLoaded || !mbMap.isStyleLoaded()) return;
+			if (!mbMap.isStyleLoaded || !mbMap.isStyleLoaded()) {
+				// Style isn't ready yet. This happens at 3D init: the
+				// `_syncOverlays` call right before us adds raster sources,
+				// which flips `isStyleLoaded()` to false until they settle.
+				// For overlays that were ALREADY active when 3D toggled on
+				// (e.g. Geocaches enabled in 2D first), there's no later
+				// layeradd to retrigger this sync — so without a retry they
+				// never mirror into 3D. Schedule one when the style idles.
+				if (!this._shapesRetryPending) {
+					this._shapesRetryPending = true;
+					const retry = () => {
+						this._shapesRetryPending = false;
+						if (this._active && this._mbMap === mbMap) {
+							this._renderLeafletShapes(map, mbMap);
+						}
+					};
+					try { mbMap.once("idle", retry); }
+					catch (_) { setTimeout(retry, 200); }
+				}
+				return;
+			}
 			const byPane = new Map();
 			const bucket = (pane) => {
 				let b = byPane.get(pane);
