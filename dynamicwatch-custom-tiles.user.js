@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.105
+// @version      7.9.106
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -1273,6 +1273,13 @@
 				this._lastKey = null;
 				this._gen = 0;
 				this._handles = [];
+				// Per-tile decoded-element cache ("z/x/y" → element[]). A pan
+				// that shifts the visible tile range by one column still shares
+				// most tiles with the previous view; caching their decoded
+				// features means we refetch + re-MVT-decode only the newcomers
+				// instead of every tile in the range. Bounded, insertion-order
+				// eviction (oldest first).
+				this._tileEls = new Map();
 			},
 
 			onAdd(map) {
@@ -1292,6 +1299,16 @@
 				this._cancel();
 				map.off("moveend zoomend", this._onViewChange, this);
 				if (this._group) { this._group.remove(); this._group = null; }
+				this._tileEls.clear();
+			},
+
+			_cacheTile(tk, els) {
+				const TILE_EL_MAX = 256;
+				this._tileEls.set(tk, els);
+				if (this._tileEls.size > TILE_EL_MAX) {
+					const oldest = this._tileEls.keys().next().value;
+					this._tileEls.delete(oldest);
+				}
 			},
 
 			_onViewChange() {
@@ -1344,12 +1361,28 @@
 
 				const myGen = ++this._gen;
 				this._cancel();
-				const elements = [];
-				let pending = coords.length;
-				if (!pending) { this._group.clearLayers(); return; }
+
+				// Split the visible range into tiles we already have decoded
+				// (cache hit — reuse) and tiles we must fetch. Only the latter
+				// hit the network / MVT decoder.
+				const need = [];
+				for (const [x, y] of coords) {
+					const tk = `${tz}/${x}/${y}`;
+					if (!this._tileEls.has(tk)) need.push([x, y, tk]);
+				}
+				let pending = need.length;
+				let failedAny = false;
 
 				const finish = () => {
 					if (myGen !== this._gen || !this._group) return;
+					// Gather every visible tile's cached elements. A tile that
+					// failed to fetch this round simply isn't in the cache yet
+					// and contributes nothing (it retries when the view shifts).
+					const elements = [];
+					for (const [x, y] of coords) {
+						const arr = this._tileEls.get(`${tz}/${x}/${y}`);
+						if (arr) for (const e of arr) elements.push(e);
+					}
 					// Prefer polygons over their centroid points; drop duplicate
 					// boundary points (see header).
 					const wayIds = new Set();
@@ -1365,14 +1398,23 @@
 					});
 					this._group.clearLayers();
 					opts.render(this._group, out, tz);
+					// A transient tile failure left a gap; clear the range key so
+					// an unchanged follow-up view re-attempts the missing tiles.
+					if (failedAny) this._lastKey = null;
 				};
 
-				for (const [x, y] of coords) {
+				if (!pending) { finish(); return; }
+
+				for (const [x, y, tk] of need) {
 					const h = gmGet(opts.tileUrl(tz, x, y),
 						{ responseType: "arraybuffer", timeout: timeoutMs },
 						(err, r) => {
-							if (myGen === this._gen && this._group &&
-							    !err && r && r.status === 200 && r.response) {
+							if (myGen !== this._gen || !this._group) {
+								if (--pending === 0) finish();
+								return;
+							}
+							if (!err && r && r.status === 200 && r.response) {
+								const tileEls = [];
 								try {
 									const layers = mvtDecode(r.response);
 									for (const layer of layers) {
@@ -1391,10 +1433,13 @@
 												})));
 											const els =
 												opts.toElements(layer.name, props, f.type, rings);
-											if (els) for (const e of els) elements.push(e);
+											if (els) for (const e of els) tileEls.push(e);
 										}
 									}
-								} catch (e) { /* skip a malformed tile */ }
+									this._cacheTile(tk, tileEls);
+								} catch (e) { failedAny = true; /* malformed tile */ }
+							} else {
+								failedAny = true;
 							}
 							if (--pending === 0) finish();
 						});
@@ -2123,6 +2168,20 @@
 				"MOUNTAIN_BIKING",
 			];
 
+			// Per-(activity,tile) negative cache. Garmin's activity feeds
+			// 404 heavily over ocean and sparsely-tracked regions, and each
+			// tile costs one request PER activity (5). Once a feed returns
+			// non-200 for a tile we record it and skip refetching that feed
+			// on pan-back (Leaflet recreates tiles on re-entry past its
+			// buffer), cutting redundant 404 traffic. Bounded set; once full
+			// we stop adding (existing entries still suppress).
+			const garminMiss = new Set();
+			const GARMIN_MISS_MAX = 4096;
+			const garminMissKey = (a, z, x, y) => a + "/" + z + "/" + x + "/" + y;
+			const garminNoteMiss = (key) => {
+				if (garminMiss.size < GARMIN_MISS_MAX) garminMiss.add(key);
+			};
+
 			const GarminHeatGrid = L.GridLayer.extend({
 				createTile(coords, done) {
 					const canvas = document.createElement("canvas");
@@ -2147,12 +2206,16 @@
 					};
 
 					for (const activity of ACTIVITIES) {
+						const missKey =
+							garminMissKey(activity, coords.z, coords.x, coords.y);
+						if (garminMiss.has(missKey)) { failed++; finish(); continue; }
 						const url =
 							"https://connecttile.garmin.com/" + activity + "/" +
 							coords.z + "/" + coords.x + "/" + coords.y + ".png";
 						canvas._dwHandles.push(
 							gmGet(url, { responseType: "arraybuffer" }, (err, r) => {
 								if (err || r.status !== 200) {
+									garminNoteMiss(missKey);
 									failed++; finish(); return;
 								}
 								const blob   = new Blob([r.response], { type: "image/png" });
@@ -2166,6 +2229,7 @@
 								};
 								img.onerror = () => {
 									URL.revokeObjectURL(objUrl);
+									garminNoteMiss(missKey);
 									failed++; finish();
 								};
 								img.src = objUrl;
@@ -2282,11 +2346,21 @@
 		create() {
 			const OPENSKY = "https://opensky-network.org/api/states/all";
 			const renderStates = (group, states) => {
-					group.clearLayers();
+					// Delta update keyed by ICAO24 (s[0], stable per aircraft):
+					// reuse existing markers (move + re-icon + re-tooltip) so a
+					// 10s poll where planes barely moved doesn't tear down and
+					// rebuild every DOM node (flicker + churn). Robust to the
+					// scaffold's clearLayers() below minZoom — a marker that's
+					// no longer on the group is treated as new.
+					const prev = group._dwFlights instanceof Map
+						? group._dwFlights : new Map();
+					const next = new Map();
 					for (const s of states) {
 						const lon = s[5],
 							lat = s[6];
 						if (lon == null || lat == null) continue;
+						const id = s[0];
+						if (!id || next.has(id)) continue;
 						const callsign = (s[1] || "").trim() || s[0];
 						const track = s[10] || 0;
 						const onGround = s[8];
@@ -2314,17 +2388,31 @@
 							iconSize: [20, 20],
 							iconAnchor: [10, 10],
 						});
-						L.marker([lat, lon], {
-							icon,
-							pane: "dwFlightsPane",
-							interactive: true,
-						})
-							.bindTooltip(
-								esc`<b>${callsign}</b><br>Alt: ${altStr}&nbsp; Speed: ${spdStr}<br>${country}`,
-								{ className: "dw-flight-tip", sticky: true },
-							)
-							.addTo(group);
+						const tip = esc`<b>${callsign}</b><br>Alt: ${altStr}&nbsp; Speed: ${spdStr}<br>${country}`;
+						let m = prev.get(id);
+						if (m && group.hasLayer(m)) {
+							// Reuse: only re-icon when the rotation/colour glyph
+							// actually changed (the common case is a small move).
+							m.setLatLng([lat, lon]);
+							if (m._dwIconKey !== plane) { m.setIcon(icon); m._dwIconKey = plane; }
+							m.setTooltipContent(tip);
+							prev.delete(id);
+						} else {
+							m = L.marker([lat, lon], {
+								icon,
+								pane: "dwFlightsPane",
+								interactive: true,
+							}).bindTooltip(tip, { className: "dw-flight-tip", sticky: true })
+								.addTo(group);
+							m._dwIconKey = plane;
+						}
+						next.set(id, m);
 					}
+					// Drop aircraft that left the feed / view.
+					for (const m of prev.values()) {
+						if (group.hasLayer(m)) group.removeLayer(m);
+					}
+					group._dwFlights = next;
 			};
 
 			const FlightsLayer = pollingDataLayer({
@@ -2740,6 +2828,15 @@
 					this._gen      = 0;
 					this._inflight = new Set();
 					this._byCode   = new Map();
+					// Incremental render bookkeeping: each visible tile keeps
+					// its own sub-group + the codes it owns, so a pan only drops
+					// tiles that left the viewport and renders tiles that newly
+					// entered — markers already on screen stay put (no full
+					// teardown/rebuild). _pinMode tracks the z<=13 hit-area vs
+					// z14+ pin mode; when it flips every tile must rebuild
+					// (icons change), so the cache is invalidated then only.
+					this._tileGroups = new Map();
+					this._pinMode    = null;
 				},
 
 				onAdd(map) {
@@ -2802,6 +2899,7 @@
 						this._group.remove();
 						this._group = null;
 					}
+					this._tileGroups.clear();
 					this._byCode.clear();
 				},
 
@@ -2818,6 +2916,7 @@
 					if (!map || !this._group) return;
 					if (map.getZoom() < MIN_ZOOM) {
 						this._group.clearLayers();
+						this._tileGroups.clear();
 						this._byCode.clear();
 						return;
 					}
@@ -2834,13 +2933,34 @@
 						return;
 					}
 
-					// We rebuild from scratch each pan; cross-tile dedup
-					// happens via _byCode which we reset here.
-					this._group.clearLayers();
-					this._byCode.clear();
+					// Pin mode (z14+) vs hit-area mode (z<=13) changes the icon
+					// every marker uses. When it flips we can't reuse rendered
+					// tiles — wipe and rebuild. Otherwise we keep them.
+					const pinMode = map.getZoom() > FETCH_MAX_Z;
+					if (this._pinMode !== pinMode) {
+						this._group.clearLayers();
+						this._tileGroups.clear();
+						this._byCode.clear();
+						this._pinMode = pinMode;
+					}
+
+					// Incremental diff: drop tiles that scrolled out of view,
+					// keep the ones still visible, fetch/render only the new
+					// ones. Each cache lives in exactly one UTFGrid tile (its
+					// lat/lng maps to a single slippy cell at the fetch zoom),
+					// so removing a tile cleanly removes only its own markers.
+					const visKeys = new Set(
+						tiles.map((t) => `${t.z}/${t.x}/${t.y}`));
+					for (const [key, rec] of this._tileGroups) {
+						if (visKeys.has(key)) continue;
+						this._group.removeLayer(rec.group);
+						for (const code of rec.codes) this._byCode.delete(code);
+						this._tileGroups.delete(key);
+					}
 
 					for (const t of tiles) {
 						const key = `${t.z}/${t.x}/${t.y}`;
+						if (this._tileGroups.has(key)) continue; // already shown
 						const cached = tileCache.get(key);
 						if (cached) {
 							this._renderTile(t, cached);
@@ -2918,11 +3038,19 @@
 				_renderTile(t, grid) {
 					if (!this._group) return;
 					if (!grid || !Array.isArray(grid.keys)) return;
+					const tileKey = `${t.z}/${t.x}/${t.y}`;
+					// Already on screen (e.g. a late fetch resolving for a tile
+					// that's still visible) — don't double-render.
+					if (this._tileGroups.has(tileKey)) return;
 					// z14+: the raster is hidden (past native zoom), so
 					// markers carry the visible pin. z<=13: transparent
 					// hit-areas over the raster icons.
 					const pinMode = !!this._map &&
 						this._map.getZoom() > FETCH_MAX_Z;
+					// Per-tile sub-group: removed wholesale when the tile
+					// scrolls out of view (see _fetch's incremental diff).
+					const tileGroup = L.layerGroup();
+					const tileCodes = [];
 					const newCodes = [];
 					const data = grid.data || {};
 					for (const k of grid.keys) {
@@ -3008,10 +3136,14 @@
 								L.DomEvent.on(el, "contextmenu touchend",
 									L.DomEvent.stopPropagation);
 							});
-							marker.addTo(this._group);
+							marker.addTo(tileGroup);
 							this._byCode.set(code, marker);
+							tileCodes.push(code);
 						}
 					}
+
+					tileGroup.addTo(this._group);
+					this._tileGroups.set(tileKey, { group: tileGroup, codes: tileCodes });
 
 					// Pin mode: colour the pins by real cache type without
 					// waiting for a click. Budgeted — at z14+ a view holds
@@ -7686,10 +7818,13 @@
 				this._restoreLayer(map);
 				this._restoreOverlays(map, ctrl);
 				this._normalizeBaseZoom(map);
-				// Re-normalise when the base set/zoom changes — catches the
-				// site's own bases and any added after init, and re-clears
-				// the zoom-disable the moment Leaflet would re-apply it.
-				map.on("baselayerchange zoomend", () => this._normalizeBaseZoom(map));
+				// Re-normalise when the base SET changes (rare) — catches the
+				// site's own bases and any added after init. On zoomend (frequent)
+				// we skip the O(bases) lift pass (idempotent once lifted) and only
+				// re-clear the zoom-disable, which Leaflet re-applies via its own
+				// captured _checkDisabledLayers reference on every zoomend.
+				map.on("baselayerchange", () => this._normalizeBaseZoom(map));
+				map.on("zoomend", () => this._reenableBaseSelectability());
 				new LayerManagerUI(ctrl).setup();
 				this._hookSitePopup(map);
 			} catch (e) {
@@ -7800,7 +7935,17 @@
 					}
 				};
 			}
-			if (typeof ctrl._checkDisabledLayers === "function") {
+			this._reenableBaseSelectability();
+		}
+
+		// Cheap zoomend path: re-clear the zoom-based radio disabling.
+		// Leaflet binds its ORIGINAL _checkDisabledLayers to zoomend at
+		// addTo time (captured by reference), so reassigning the method
+		// doesn't stop the original from re-disabling on zoom — we call
+		// our patched version again to undo it. No base-layer loop here.
+		_reenableBaseSelectability() {
+			const ctrl = this._ctrl;
+			if (ctrl && typeof ctrl._checkDisabledLayers === "function") {
 				try { ctrl._checkDisabledLayers(); } catch (_) {}
 			}
 		}
