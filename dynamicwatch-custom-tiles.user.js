@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.103
+// @version      7.9.104
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -3287,7 +3287,7 @@
 	// addressInfo is optional: { primary, extra } — primary is the headline
 	// address line, extra is a "+N more" hint when several addresses exist
 	// for the same lotplan (rural blocks with multiple dwellings, strata).
-	function _formatCadastreTooltip(attrs, addressInfo) {
+	function _formatCadastreTooltip(attrs, addressInfo, omitSalesLink) {
 		const lotPlan =
 			_cadVal(attrs["Lot/plan"]) ||
 			(_cadVal(attrs.Lot) && _cadVal(attrs.Plan)
@@ -3341,11 +3341,14 @@
 				`<a class="dw-cad-link" href="${_escHtml(smis)}" target="_blank" rel="noreferrer">SmartMap ↗</a>`,
 			);
 		}
-		// Only offer the OTH sales lookup once we have a numbered street
+		// Only offer the OTH sales LINK once we have a numbered street
 		// address — OTH's /odin/api/locations search only resolves to a
 		// propertyId when we feed it both a street number and a street
 		// name. Lat/lon is also required so the popup can anchor.
+		// `omitSalesLink`: the location popup auto-loads + embeds sales
+		// inline, so it suppresses this link (it'd be redundant there).
 		if (
+			!omitSalesLink &&
 			addressInfo &&
 			isFinite(addressInfo.lat) &&
 			isFinite(addressInfo.lon) &&
@@ -3864,31 +3867,18 @@
 		});
 	}
 
-	const _installCadastreHoverInner = makeHoverIdentify({
-		baseUrl:    CFG.QLD_CADASTRE_SERVICE,
-		layers:     "all:" + CFG.QLD_CADASTRE_IDENTIFY_LAYER,
-		tolerance:  3,
-		minZoom:    CFG.QLD_CADASTRE_HOVER_MIN_ZOOM,
-		debounceMs: 180,
-		tipClass:   "dw-cad-tip",
-		formatTooltip: (attrs) => {
-			const lotplan = _cadVal(attrs["Lot/plan"]);
-			return _formatCadastreTooltip(attrs, getCachedCadastreAddress(lotplan));
-		},
-		afterRender: (attrs, ctx) => {
-			const lotplan = _cadVal(attrs["Lot/plan"]);
-			if (!lotplan) return;
-			if (getCachedCadastreAddress(lotplan)) return; // already rendered
-			fetchCadastreAddress(lotplan, (info) => {
-				if (!info || !ctx.isCurrent()) return;
-				ctx.setContent(_formatCadastreTooltip(attrs, info));
-			});
-		},
-	});
+	// (Cadastre hover-identify removed — parcel info is delivered through
+	// the location popup now; see _injectIdentifyIntoPopup. The shared
+	// makeHoverIdentify factory is still used by QPWS.)
 
 	function installCadastreHover(layer, map) {
+		// Cadastre identify is delivered through the location popup on
+		// click / right-click (see _injectIdentifyIntoPopup), NOT a hover
+		// tooltip. The hover fought the right-click menu and kept
+		// re-popping over it; the popup is now the single surface, with
+		// sales auto-loaded inline. We only ensure the delegated
+		// sales-link handler exists (harmless belt-and-braces).
 		_ensureSalesHook(map);
-		_installCadastreHoverInner(layer, map);
 	}
 
 	const QldCadastreLayerProvider = arcgisExportProvider({
@@ -7915,28 +7905,23 @@
 					}).catch(() => {});
 				});
 
-				// Street View button — matches the native button shape; blue
-				// accent signals "leaves the app". Appended at the end of the
-				// pod rather than wrapped in a row, because the site applies
-				// its own block/full-width button styling we'd be fighting.
+				// "Google Maps" button — opens a dropped pin at the
+				// coordinates. (Was a direct Street View panorama deep-link
+				// `@lat,lng,3a,…!1e1`, but that load is glitchy/unreliable;
+				// landing on the Maps pin is solid and Street View is one
+				// click away from there via the pegman.) Pin marker icon.
 				const btn = document.createElement("button");
 				btn.className = "dw-sv-btn";
 				btn.type = "button";
 				btn.innerHTML =
 					'<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
-					'<circle cx="12" cy="5" r="3.5"/>' +
-					'<path d="M12 10c-3 0-5 1.8-5 4v1h10v-1c0-2.2-2-4-5-4z"/>' +
-					'<path d="M9 19l1-5h4l1 5H9z"/>' +
+					'<path d="M12 2C8.1 2 5 5.1 5 9c0 5.2 7 13 7 13s7-7.8 7-13c0-3.9-3.1-7-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/>' +
 					"</svg>" +
-					"<span>Street View</span>";
+					"<span>Google Maps</span>";
 				btn.addEventListener("click", () => {
-					const svUrl =
-						"https://www.google.com/maps/@" +
-						lat.toFixed(6) +
-						"," +
-						lng.toFixed(6) +
-						",3a,75y,90t/data=!3m7!1e1";
-					window.open(svUrl, "_blank", "noopener,noreferrer");
+					const url = "https://www.google.com/maps?q=" +
+						lat.toFixed(6) + "," + lng.toFixed(6);
+					window.open(url, "_blank", "noopener,noreferrer");
 				});
 				pod.appendChild(btn);
 			});
@@ -7952,20 +7937,24 @@
 		// document-level delegated handler already services wherever it
 		// appears in the DOM).
 		_injectIdentifyIntoPopup(map, lat, lng, pod) {
+			const latlng = L.latLng(lat, lng);
 			const noHover = L.Browser.mobile ||
 				(window.matchMedia && window.matchMedia("(hover: none)").matches);
-			if (!noHover) return;
-
-			const latlng = L.latLng(lat, lng);
 			const section = (cls, html) => {
-				if (!pod.isConnected) return;
+				if (!pod.isConnected) return null;
 				const div = document.createElement("div");
 				div.className = "dw-popup-ident " + cls;
 				div.innerHTML = html;
 				pod.appendChild(div);
 				return div;
 			};
+			const setSection = (div, html) => {
+				if (div && div.isConnected) div.innerHTML = html;
+			};
 
+			// CADASTRE — always (desktop + touch). The hover tooltip is
+			// disabled, so this popup is the sole surface; sales auto-load
+			// + embed inline (no separate "Sales ↗" click).
 			const cad = this.layers[CFG.LAYER_CADASTRE];
 			if (cad && map.hasLayer(cad) &&
 				map.getZoom() >= CFG.QLD_CADASTRE_HOVER_MIN_ZOOM) {
@@ -7978,23 +7967,29 @@
 					if (err || !feat) return;
 					const attrs = feat.attributes || {};
 					const lotplan = _cadVal(attrs["Lot/plan"]);
-					if (!lotplan) {
-						section("dw-popup-ident-cad",
-							_formatCadastreTooltip(attrs, null));
-						return;
-					}
-					// Resolve the address first (cached after first hit) so
-					// the Sales link — which needs street number + name —
-					// renders in one pass instead of popping in late.
+					// omitSalesLink=true — we embed sales below instead.
+					const cadSec = section("dw-popup-ident-cad",
+						_formatCadastreTooltip(attrs, null, true));
+					if (!lotplan) return;
 					fetchCadastreAddress(lotplan, (info) => {
-						section("dw-popup-ident-cad",
-							_formatCadastreTooltip(attrs, info));
+						setSection(cadSec, _formatCadastreTooltip(attrs, info, true));
+						// Auto-load sales once we have a numbered street
+						// address (OTH needs street number + name).
+						if (info && isFinite(info.lat) && isFinite(info.lon) &&
+							info.streetName && info.streetNumber) {
+							const salesSec = section("dw-popup-ident-sales",
+								`<div class="dw-sales-pop"><div class="dw-sales-loading">Loading sales…</div></div>`);
+							fetchOthSales(info, (result) => {
+								setSection(salesSec, _renderSalesContent(result));
+							});
+						}
 					});
 				});
 			}
 
+			// QPWS — touch only; on desktop QPWS keeps its hover tooltip.
 			const qpws = this.layers[CFG.LAYER_QPWS];
-			if (qpws && map.hasLayer(qpws) &&
+			if (noHover && qpws && map.hasLayer(qpws) &&
 				map.getZoom() >= CFG.QLD_QPWS_HOVER_MIN_ZOOM) {
 				arcgisIdentify(map, latlng, {
 					baseUrl: CFG.QLD_QPWS_SERVICE,
