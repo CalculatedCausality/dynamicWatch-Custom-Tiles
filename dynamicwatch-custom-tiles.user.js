@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.104
+// @version      7.9.105
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -3096,23 +3096,31 @@
 					const size  = (row.container && row.container.text) || "";
 					const owner = (row.owner && row.owner.text) || "";
 					const typeText = (row.type && row.type.text) || "";
+					// `subrOnly` = Premium-Member-Only. The public tile API
+					// returns these caches' basic metadata anonymously (it's
+					// shown below); only geocaching.com's listing PAGE
+					// paywalls them. We surface the data in-app and flag it
+					// so the marker isn't just a dead-end paywall link.
+					const premium = !!row.subrOnly;
 
 					marker._dwData = Object.assign(marker._dwData || {}, {
 						color: fill, disabled, label: TYPE_LABELS[typeId] || "G",
 						diff, terr, size, owner, favs,
-						typeText,
+						typeText, premium,
 					});
 
 					if (marker.setTooltipContent) {
 						marker.setTooltipContent(
 							`<b>${_escHtml(name)}</b>` +
 							(disabled ? " <i>(disabled)</i>" : "") +
+							(premium ? ` <span class="dw-geo-pmo" title="Premium Member Only on geocaching.com — basic info shown here">\u{1F512} Premium</span>` : "") +
 							`<br><span class="dw-cad-sub">` +
 							`${_escHtml(code)} · D ${diff} / T ${terr}` +
 							(size ? " · " + _escHtml(String(size)) : "") +
 							(favs ? ` · ♥ ${favs}` : "") +
 							(typeText ? " · " + _escHtml(typeText) : "") +
 							(owner ? "<br>by " + _escHtml(owner) : "") +
+							(premium ? `<br><i>Full listing needs geocaching.com Premium</i>` : "") +
 							`</span>`);
 					}
 
@@ -8278,6 +8286,7 @@
 				// Layer-identify sections injected into the site's add-point
 				// popup on touch devices (Cadastre parcel + Sales link, QPWS
 				// protected area) — mobile's replacement for hover tooltips.
+				".dw-geo-pmo { color: #b8860b; font-weight: 600; font-size: 10px; white-space: nowrap; }",
 				".popup-on-location .dw-popup-ident { border-top: 1px solid #e5e7eb; margin-top: 8px; padding-top: 8px; font-size: 12.5px; line-height: 1.5; text-align: left; }",
 				".popup-on-location .dw-popup-ident b { font-weight: 700; }",
 				".popup-on-location .dw-popup-ident .dw-cad-sub { color: #6b7280; font-size: 11px; }",
