@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.100
+// @version      7.9.101
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -467,6 +467,11 @@
 		// POST it to the token endpoint scoped to our service URL.
 		_fetch(done) {
 			gmGet(CFG.QLD_ORIGIN + "/", {
+				// Needs cookies: the XSRF-TOKEN set here must round-trip to
+				// the token POST (double-submit CSRF). Opt out of the
+				// privacy-default cookie stripping for this same-origin
+				// bootstrap.
+				anonymous: false,
 				headers: {
 					"Accept": "text/html,*/*;q=0.8",
 					"Accept-Language": "en-US,en;q=0.9",
@@ -494,6 +499,9 @@
 		_doPost(csrf, done) {
 			gmJsonGet(CFG.QLD_TOKEN_EP, {
 				method: "POST",
+				// Needs the XSRF-TOKEN cookie from _fetch's GET (CSRF
+				// double-submit) — opt out of cookie stripping.
+				anonymous: false,
 				headers: {
 					"Content-Type": "application/json",
 					"X-Requested-With": "XMLHttpRequest",
@@ -697,14 +705,17 @@
 			data: opts.data,
 			responseType: opts.responseType,
 			timeout: opts.timeout || 25000,
-			// Explicitly opt INTO same-domain cookies. Desktop
-			// Tampermonkey defaults to anonymous=false but several
-			// mobile managers (notably "Userscripts" on iOS Safari)
-			// default to true, which silently strips third-party
-			// session cookies. Set explicitly for cross-manager
-			// parity even though no current layer depends on it
-			// (Geocaching moved to the public tile API in v7.9.85).
-			anonymous: opts.anonymous === true ? true : false,
+			// Privacy-by-default: STRIP cookies (anonymous) unless a
+			// caller explicitly opts in with `anonymous: false`. Every
+			// layer hits public, no-auth endpoints — but several are
+			// third parties the user may be logged into (geocaching.com,
+			// Strava, Garmin, MarineTraffic). Sending their session
+			// cookies on every tile request correlates the user's
+			// identity with their map browsing for no functional gain.
+			// The ONE flow that genuinely needs cookies — the QLD CSRF
+			// token bootstrap (XSRF-TOKEN set on a GET, echoed on the
+			// POST) — opts in explicitly.
+			anonymous: opts.anonymous === false ? false : true,
 			onload: (r) => {
 				if (handle.aborted) return;
 				cb(null, r);
@@ -1016,13 +1027,101 @@
 		}
 	}
 
+	// --- Overzoom (stretch the deepest available tile) ------------------
+	// When a raster layer's tile cache ends before the requested zoom —
+	// either globally (maxNativeZoom) or, for ArcGIS aerial whose cache
+	// depth VARIES BY REGION (QLD Globe, Wayback), partway down — Leaflet
+	// otherwise shows blank. `wireOverzoomFallback` makes a tile that
+	// fails to load fall back to its deepest available ANCESTOR, stretched
+	// + clipped to fill the slot. That's "show the highest-resolution
+	// imagery available, scaled to the zoom" — never blank.
+
+	// Pure: where to place an ancestor `depth` levels up so its correct
+	// sub-quadrant fills one `size`-px tile. Exported for unit tests.
+	function _overzoomPlacement(x, y, depth, size) {
+		const scale = Math.pow(2, depth);
+		const qx = ((x % scale) + scale) % scale;
+		const qy = ((y % scale) + scale) % scale;
+		return {
+			scale,
+			imgSize: size * scale,   // ancestor stretched across 2^depth tiles
+			offsetX: -(qx * size),   // shift our sub-tile to the slot origin
+			offsetY: -(qy * size),
+		};
+	}
+
+	// Build the URL for an explicit (x,y,z) using the layer's own template
+	// + options (subdomain, retina, tms). We can't reuse layer.getTileUrl
+	// because Leaflet derives z from `_getZoomForUrl()` (current map zoom),
+	// not the coords we pass — which would defeat the parent lookup.
+	function _overzoomUrl(layer, x, y, z) {
+		const o = layer.options;
+		let ty = y;
+		if (o.tms) ty = (1 << z) - 1 - y;
+		const data = L.Util.extend({
+			r: (o.detectRetina && L.Browser.retina && o.maxZoom > 0) ? "@2x" : "",
+			s: layer._getSubdomain({ x, y, z }),
+			x, y: ty, z,
+		}, o);
+		return L.Util.template(layer._url, data);
+	}
+
+	function wireOverzoomFallback(layer, fallbackOpts) {
+		fallbackOpts = fallbackOpts || {};
+		const minLevel = fallbackOpts.minLevel != null ? fallbackOpts.minLevel : 0;
+		layer.createTile = function (coords, done) {
+			const size = this.getTileSize();
+			const cell = document.createElement("div");
+			cell.style.width = size.x + "px";
+			cell.style.height = size.y + "px";
+			cell.style.overflow = "hidden";
+			const img = document.createElement("img");
+			img.setAttribute("role", "presentation");
+			img.alt = "";
+			if (this.options.crossOrigin || this.options.crossOrigin === "") {
+				img.crossOrigin =
+					this.options.crossOrigin === true ? "" : this.options.crossOrigin;
+			}
+			cell.appendChild(img);
+
+			let depth = 0;
+			const place = () => {
+				const p = _overzoomPlacement(coords.x, coords.y, depth, size.x);
+				img.style.width  = p.imgSize + "px";
+				img.style.height = (size.y * p.scale) + "px";
+				img.style.marginLeft = p.offsetX + "px";
+				img.style.marginTop  = p.offsetY + "px";
+				img.src = _overzoomUrl(
+					this, coords.x >> depth, coords.y >> depth, coords.z - depth);
+			};
+			L.DomEvent.on(img, "load", () => { done(null, cell); });
+			L.DomEvent.on(img, "error", () => {
+				// Climb to the parent until a tile loads or we hit the floor.
+				if (coords.z - depth <= minLevel) { done(null, cell); return; }
+				depth += 1;
+				place();
+			});
+			place();
+			return cell;
+		};
+		return layer;
+	}
+
 	function tileProvider(url, opts = {}) {
 		return class extends LayerProvider {
 			create() {
-				return L.tileLayer(url, {
-					tileSize: 256, maxNativeZoom: 18, maxZoom: 22,
-					crossOrigin: true, ...opts,
+				// maxZoom 25 (= the map's deep max) so the layer never
+				// falls out of its zoom range — out-of-range is what makes
+				// the host control grey it out / unselect it, and what
+				// makes Leaflet hide it. maxNativeZoom caps the actual tile
+				// request; Leaflet stretches it the rest of the way.
+				const { overzoom, ...rest } = opts;
+				const layer = L.tileLayer(url, {
+					tileSize: 256, maxNativeZoom: 18, maxZoom: 25,
+					crossOrigin: true, ...rest,
 				});
+				if (overzoom) wireOverzoomFallback(layer);
+				return layer;
 			}
 		};
 	}
@@ -1043,11 +1142,18 @@
 			constructor(tokenMgr) { super(); this._token = tokenMgr; }
 			create() {
 				const tok = this._token;
+				const { overzoom, ...rest } = opts;
 				const layer = L.tileLayer(
 					tok.isValid() ? buildUrl(tok) : BLANK_TILE,
 					{ tileSize: 256, maxNativeZoom: 21, maxZoom: 25,
-					  crossOrigin: true, ...opts },
+					  crossOrigin: true, ...rest },
 				);
+				// `overzoom`: substitute the deepest available ancestor on
+				// tile error — for caches whose depth varies by region
+				// (QLD Globe aerial). Safe across token swaps: our
+				// createTile reads layer._url live, so setUrl() is picked
+				// up on the next redraw automatically.
+				if (overzoom) wireOverzoomFallback(layer);
 				if (!tok.isValid()) {
 					tok.get(() => {
 						if (tok.isValid()) layer.setUrl(buildUrl(tok));
@@ -1306,7 +1412,7 @@
 
 	const QldGlobeLayerProvider = tokenTileProvider(
 		(tok) => CFG.QLD_TILE_TPL + (tok.token ? "?token=" + tok.token : ""),
-		{ maxNativeZoom: 21, maxZoom: 25,
+		{ maxNativeZoom: 21, maxZoom: 25, overzoom: true,
 		  attribution: "&copy; State of Queensland (Department of Resources)" },
 	);
 
@@ -1328,7 +1434,7 @@
 
 	const AppleMapsLayerProvider = tokenTileProvider(
 		(tok) => buildAppleTileUrl(tok.accessKey, tok.version),
-		{ maxNativeZoom: 19, maxZoom: 22, attribution: "&copy; Apple" },
+		{ maxNativeZoom: 19, maxZoom: 25, attribution: "&copy; Apple" },
 	);
 
 	// -- Stamen Toner (via Stadia Maps, localhost-spoofed) -------------------
@@ -1382,7 +1488,10 @@
 			const layer = new TerrainGrid({
 				tileSize: TILE_PX,
 				maxNativeZoom: 18,    // Terrain caps at 18; tiles past 20 ship empty placeholders
-				maxZoom: 22,
+				// maxZoom 25 (= map deep max) so it stays in range and
+				// keeps stretching the z18 tile rather than being hidden
+				// (greyed) past 22.
+				maxZoom: 25,
 				attribution:
 					'&copy; <a href="https://stadiamaps.com/" target="_blank" rel="noreferrer">Stadia Maps</a> ' +
 					'&copy; <a href="https://stamen.com/" target="_blank" rel="noreferrer">Stamen Design</a> ' +
@@ -1481,6 +1590,11 @@
 				tileSize: 256,
 				attribution: "&copy; Esri, Maxar, Earthstar Geographics",
 			});
+			// Wayback coverage depth varies by release + region; on a
+			// missing tile, stretch the deepest available ancestor rather
+			// than blank. Reads layer._url live, so it follows setUrl()
+			// across release scrubs.
+			wireOverzoomFallback(layer);
 			this._layerRef = layer;
 
 			layer.getHistCount = () =>
@@ -2308,9 +2422,13 @@
 						`<b>${count} vessels</b><br><span class="dw-cad-sub">${sample}${more}</span>`,
 						{ className: "dw-marine-tip", sticky: true })
 					.on("click", () => {
-						map.flyTo([lat, lon],
-							Math.min(map.getZoom() + 2, map.getMaxZoom()),
-							{ duration: 0.5 });
+						const zoom = Math.min(map.getZoom() + 2, map.getMaxZoom());
+						// Honour prefers-reduced-motion: jump instead of the
+						// 0.5s fly for users with vestibular sensitivity.
+						const noMotion = window.matchMedia &&
+							window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+						if (noMotion) map.setView([lat, lon], zoom, { animate: false });
+						else map.flyTo([lat, lon], zoom, { duration: 0.5 });
 					})
 					.addTo(group);
 			}
@@ -2824,6 +2942,13 @@
 						for (const entry of entries) {
 							if (!entry || !entry.i) continue;
 							const code = entry.i;
+							// Validate the GC code at the SOURCE — it's an
+							// untrusted UTFGrid value that flows into URLs
+							// (geocaching.com/geocache/${code}), tooltips,
+							// and _dwData. A crafted/MITM'd tile could
+							// otherwise smuggle a path/scheme/markup payload.
+							// Real codes are GC + base31 (no 0/O/1/I/L/S/U).
+							if (!/^GC[0-9A-Z]+$/.test(code)) continue;
 							if (this._byCode.has(code)) continue;
 							newCodes.push(code);
 
@@ -2942,7 +3067,7 @@
 							// UI for those states.
 							window.open(
 								`https://www.geocaching.com/geocache/${code}`,
-								"_blank", "noopener");
+								"_blank", "noopener,noreferrer");
 							return;
 						}
 						this._applyDetails(marker, code, row, { open: true });
@@ -2996,7 +3121,7 @@
 					if (opts && opts.open) {
 						window.open(
 							`https://www.geocaching.com/geocache/${code}`,
-							"_blank", "noopener");
+							"_blank", "noopener,noreferrer");
 					}
 				},
 
@@ -5934,7 +6059,13 @@
 						this._wiredClick.add(id);
 						mbMap.on("click", id, (e) => {
 							const url = e.features?.[0]?.properties?.url;
-							if (url) window.open(url, "_blank", "noopener");
+							// Only open https — the url comes from serialised
+							// feature properties (external _dwData); a
+							// non-https scheme (javascript:/data:) must never
+							// reach window.open.
+							if (url && /^https:\/\//i.test(url)) {
+								window.open(url, "_blank", "noopener,noreferrer");
+							}
 						});
 						mbMap.on("mouseenter", id, () => {
 							mbMap.getCanvas().style.cursor = "pointer";
@@ -7605,11 +7736,19 @@
 		}
 
 		_syncZoomLevel(map) {
-			const isDeep =
-				map.hasLayer(this.layers[CFG.LAYER_QLD])  ||
-				map.hasLayer(this.layers[CFG.LAYER_HIST]) ||
-				map.hasLayer(this.layers[CFG.LAYER_TOPO]) ||
-				map.hasLayer(this.layers[CFG.LAYER_WAYBACK]);
+			// Every one of OUR bases now overzooms (stretches its deepest
+			// tile) to z25, so allow the deep range whenever any is active
+			// — not just the original four. This is what lets the user
+			// keep zooming in (and keeps every base in-range/selectable);
+			// the layers stretch rather than blank. Only when the site's
+			// OWN default base is active (none of ours) do we leave the
+			// conservative 22 cap, since we don't control its tile depth.
+			const ours = [
+				CFG.LAYER_QLD, CFG.LAYER_HIST, CFG.LAYER_TOPO, CFG.LAYER_WAYBACK,
+				CFG.LAYER_GOOGLE, CFG.LAYER_APPLE, CFG.LAYER_STAMEN_TERRAIN,
+			];
+			const isDeep = ours.some(
+				(name) => this.layers[name] && map.hasLayer(this.layers[name]));
 			const newMax = isDeep ? 25 : 22;
 			map.setMaxZoom(newMax);
 			if (map.getZoom() > newMax) map.setZoom(newMax);
@@ -7688,11 +7827,20 @@
 
 				const titleEl = pod.querySelector("#waypoint-popup-title");
 				if (!titleEl) return;
-				const parts = (titleEl.textContent || "").trim().split(",");
-				if (parts.length < 2) return;
-				const lat = parseFloat(parts[0]);
-				const lng = parseFloat(parts[1]);
-				if (isNaN(lat) || isNaN(lng)) return;
+				// Parse "lat, lng" robustly. A naive split(",") corrupts
+				// silently under decimal-comma locales: "-27,47, 153,03"
+				// splits into 4 parts and yields lat=-27, lng=47 — WRONG
+				// coordinates, not a caught NaN. Require EXACTLY two
+				// dot-decimal numbers and sane lat/lng ranges; bail
+				// otherwise (the site renders dot-decimals, so a 4-part
+				// split means we misread and must not act on it).
+				const txt = (titleEl.textContent || "").trim();
+				const cm = txt.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+				if (!cm) return;
+				const lat = parseFloat(cm[1]);
+				const lng = parseFloat(cm[2]);
+				if (isNaN(lat) || isNaN(lng) ||
+					lat < -90 || lat > 90 || lng < -180 || lng > 180) return;
 
 				// Layer-identify enrichment runs on EVERY open (the popup
 				// container can be reused with new coordinates, so stale
@@ -7848,14 +7996,29 @@
 					const hdr = document.createElement("div");
 					hdr.className = "dw-layer-group-header";
 					hdr.textContent = group.header;
-					hdr.addEventListener("click", () => {
+					// a11y: it's a div used as a toggle button — make it
+					// keyboard-focusable + operable and announce its state.
+					hdr.setAttribute("role", "button");
+					hdr.setAttribute("tabindex", "0");
+					hdr.setAttribute("aria-expanded",
+						String(!collapsedGroups.has(group.header)));
+					const toggleGroup = () => {
 						const nowClosed = grpDiv.classList.toggle("dw-layer-group--closed");
+						hdr.setAttribute("aria-expanded", String(!nowClosed));
 						if (nowClosed) collapsedGroups.add(group.header);
 						else collapsedGroups.delete(group.header);
-						GM_setValue(
-							"dw_collapsed_groups",
-							JSON.stringify([...collapsedGroups]),
-						);
+						// Guard the persist: GM_setValue can throw on quota.
+						try {
+							GM_setValue("dw_collapsed_groups",
+								JSON.stringify([...collapsedGroups]));
+						} catch (_) {}
+					};
+					hdr.addEventListener("click", toggleGroup);
+					hdr.addEventListener("keydown", (e) => {
+						if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+							e.preventDefault();
+							toggleGroup();
+						}
 					});
 					grpDiv.appendChild(hdr);
 					const content = document.createElement("div");
