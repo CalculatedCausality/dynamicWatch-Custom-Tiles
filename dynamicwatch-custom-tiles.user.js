@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.106
+// @version      7.9.107
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -7349,6 +7349,383 @@
 		}
 	}
 
+	/* -- Route & Collection Panel -----------------------------------------
+	 * Slide-out side panel listing the user's routes grouped by collection.
+	 * Clicking a route TRANSPORTS it onto the live planner in place via
+	 * leafletPlan.restoreRouteFromJson — no page reload / re-entry.
+	 *
+	 * Data (same-origin, cookie-authenticated — MUST use the page's fetch,
+	 * NOT gmGet, which strips cookies):
+	 *   GET /collections      → [{id,name,routesCount,...}]
+	 *   GET /me (HTML)        → RouteListAsync props.localRoutes (the user's
+	 *                           favourites: full objects incl cNames)
+	 *   GET /plan/<id> (HTML) → embeds `var route = {…route_legs…}` — the
+	 *                           editor shape restoreRouteFromJson consumes
+	 *
+	 * KNOWN LIMITATION: dynamic.watch's own collection-view endpoint
+	 * (GET /collections/<id>) returns HTTP 500, so NON-favourite routes
+	 * can't be enumerated per-collection right now. The panel lists every
+	 * collection (with its true total) and fills in the routes it can reach
+	 * (favourites), showing "loaded X of N". If a working all-routes
+	 * endpoint surfaces, only `_loadRoutes` needs to change.
+	 */
+	class RoutePanel {
+		static attach(map) {
+			const panel = new RoutePanel(map);
+			panel._mountButton();
+			return panel;
+		}
+
+		constructor(map) {
+			this._map = map;
+			this._win = pageWin;
+			this._panel = null;
+			this._open = false;
+			this._collections = null;
+			this._routes = null;
+			this._loaded = false;
+			this._loading = false;
+			this._filter = "";
+			this._closedGroups = this._restoreClosed();
+		}
+
+		_restoreClosed() {
+			try {
+				return new Set(
+					JSON.parse(localStorage.getItem("dwRoutePanelClosed") || "[]"));
+			} catch (e) { return new Set(); }
+		}
+		_saveClosed() {
+			try {
+				localStorage.setItem(
+					"dwRoutePanelClosed", JSON.stringify([...this._closedGroups]));
+			} catch (e) { /* private mode */ }
+		}
+
+		_mountButton() {
+			const tryMount = () => {
+				const row = document.querySelector(".leaflet-planner-controls");
+				if (!row || row.querySelector(".dw-routes-btn")) return false;
+				const btn = document.createElement("button");
+				btn.type = "button";
+				btn.className = "btn btn-default fixed-width dw-routes-btn";
+				btn.title = "My routes & collections";
+				btn.innerHTML = '<i class="fa fa-list-ul"></i>';
+				// Sit just left of the 3D toggle (or the distance readout).
+				const ref = row.querySelector(".dw-3d-btn") ||
+					row.querySelector(".distance");
+				if (ref) row.insertBefore(btn, ref); else row.appendChild(btn);
+				btn.addEventListener("click", (e) => {
+					e.preventDefault();
+					this.toggle();
+				});
+				return true;
+			};
+			if (tryMount()) return;
+			const obs = new MutationObserver(() => { if (tryMount()) obs.disconnect(); });
+			obs.observe(document.body, { childList: true, subtree: true });
+			setTimeout(() => obs.disconnect(), 15000);
+		}
+
+		toggle() { this._open ? this.close() : this.open(); }
+
+		open() {
+			if (!this._panel) this._build();
+			this._open = true;
+			this._panel.classList.add("dw-route-panel--open");
+			const b = document.querySelector(".dw-routes-btn");
+			if (b) b.classList.add("active");
+			if (!this._loaded && !this._loading) this._load();
+			else this._render();
+		}
+
+		close() {
+			this._open = false;
+			if (this._panel) this._panel.classList.remove("dw-route-panel--open");
+			const b = document.querySelector(".dw-routes-btn");
+			if (b) b.classList.remove("active");
+		}
+
+		_build() {
+			const p = document.createElement("div");
+			p.className = "dw-route-panel";
+			p.innerHTML =
+				'<div class="dw-rp-head">' +
+					'<span class="dw-rp-title">My Routes</span>' +
+					'<a class="dw-rp-close" title="Close">×</a>' +
+				'</div>' +
+				'<input class="dw-rp-search" type="search" placeholder="Search routes…" />' +
+				'<div class="dw-rp-body"></div>' +
+				'<div class="dw-rp-foot"></div>';
+			document.body.appendChild(p);
+			this._panel = p;
+			this._body = p.querySelector(".dw-rp-body");
+			this._foot = p.querySelector(".dw-rp-foot");
+			p.querySelector(".dw-rp-close")
+				.addEventListener("click", () => this.close());
+			const search = p.querySelector(".dw-rp-search");
+			search.addEventListener("input", () => {
+				this._filter = search.value.trim().toLowerCase();
+				this._render();
+			});
+		}
+
+		async _fetchText(url) {
+			const r = await this._win.fetch(url,
+				{ credentials: "same-origin", headers: { Accept: "text/html" } });
+			if (!r.ok) throw new Error(url + " -> " + r.status);
+			return r.text();
+		}
+		async _fetchJson(url) {
+			const r = await this._win.fetch(url,
+				{ credentials: "same-origin", headers: { Accept: "application/json" } });
+			if (!r.ok) throw new Error(url + " -> " + r.status);
+			return r.json();
+		}
+
+		async _load() {
+			this._loading = true;
+			this._renderStatus("Loading your routes…");
+			try {
+				const [collections, routes] = await Promise.all([
+					this._loadCollections(),
+					this._loadRoutes(),
+				]);
+				this._collections = collections;
+				this._routes = routes;
+				this._loaded = true;
+			} catch (e) {
+				this._loading = false;
+				this._renderStatus("Couldn't load routes: " + (e.message || e));
+				return;
+			}
+			this._loading = false;
+			this._render();
+		}
+
+		async _loadCollections() {
+			try {
+				const cs = await this._fetchJson("/collections");
+				return Array.isArray(cs) ? cs : [];
+			} catch (e) { return []; }
+		}
+
+		async _loadRoutes() {
+			// /me embeds RouteListAsync props whose localRoutes are the user's
+			// favourites (full objects incl cNames). Only clean JSON route list
+			// available while /collections/<id> 500s.
+			const html = await this._fetchText("/me");
+			const m = html.match(
+				/data-react-class="RouteListAsync"\s+data-react-props="([^"]*)"/);
+			if (!m) return [];
+			let props;
+			try {
+				props = JSON.parse(m[1]
+					.replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+					.replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+					.replace(/&amp;/g, "&"));
+			} catch (e) { return []; }
+			return Array.isArray(props.localRoutes) ? props.localRoutes : [];
+		}
+
+		// → [{name, id, total, routes:[]}] — collections first (with their true
+		// totals), favourites distributed by cNames, an "Ungrouped" bucket last.
+		_grouped() {
+			const byName = new Map();
+			for (const c of (this._collections || [])) {
+				byName.set(c.name,
+					{ name: c.name, id: c.id, total: c.routesCount || 0, routes: [] });
+			}
+			const ungrouped =
+				{ name: "Not in a collection", id: null, total: 0, routes: [] };
+			for (const r of (this._routes || [])) {
+				const names = (r.cNames && r.cNames.length) ? r.cNames : null;
+				if (!names) { ungrouped.routes.push(r); continue; }
+				for (const n of names) {
+					if (!byName.has(n)) {
+						byName.set(n, { name: n, id: null, total: 0, routes: [] });
+					}
+					byName.get(n).routes.push(r);
+				}
+			}
+			let groups = [...byName.values()];
+			if (ungrouped.routes.length) groups.push(ungrouped);
+			const f = this._filter;
+			if (f) {
+				groups = groups
+					.map((g) => ({
+						...g,
+						routes: g.routes.filter((r) =>
+							(r.name || "").toLowerCase().includes(f) ||
+							(r.city || "").toLowerCase().includes(f)),
+					}))
+					.filter((g) => g.routes.length);
+			}
+			// Groups with loaded routes first, then alphabetical.
+			groups.sort((a, b) =>
+				(b.routes.length > 0) - (a.routes.length > 0) ||
+				a.name.localeCompare(b.name));
+			return groups;
+		}
+
+		_renderStatus(msg) {
+			if (!this._panel) this._build();
+			this._body.innerHTML = '<p class="dw-rp-status"></p>';
+			this._body.querySelector(".dw-rp-status").textContent = msg;
+			this._foot.textContent = "";
+		}
+
+		_render() {
+			if (!this._panel) return;
+			if (!this._loaded) { this._renderStatus("Loading your routes…"); return; }
+			const groups = this._grouped();
+			const curId = this._win.leafletPlan && this._win.leafletPlan.routeId;
+			const frag = document.createDocumentFragment();
+			if (!groups.length) {
+				const e = document.createElement("p");
+				e.className = "dw-rp-status";
+				e.textContent = this._filter ? "No routes match." : "No routes found.";
+				frag.appendChild(e);
+			}
+			for (const g of groups) {
+				const closed = this._closedGroups.has(g.name) && !this._filter;
+				const grp = document.createElement("div");
+				grp.className = "dw-rp-group" + (closed ? " dw-rp-group--closed" : "");
+				const hd = document.createElement("div");
+				hd.className = "dw-rp-group-hd";
+				const loadedN = g.routes.length;
+				const totalN = g.total || loadedN;
+				const countTxt = totalN > loadedN ? loadedN + " of " + totalN : "" + loadedN;
+				hd.innerHTML =
+					'<span class="dw-rp-group-name"></span>' +
+					'<span class="dw-rp-group-ct"></span>';
+				hd.querySelector(".dw-rp-group-name").textContent = g.name;
+				hd.querySelector(".dw-rp-group-ct").textContent = countTxt;
+				hd.addEventListener("click", () => {
+					if (this._closedGroups.has(g.name)) this._closedGroups.delete(g.name);
+					else this._closedGroups.add(g.name);
+					this._saveClosed();
+					this._render();
+				});
+				grp.appendChild(hd);
+				const list = document.createElement("div");
+				list.className = "dw-rp-group-body";
+				for (const r of g.routes) {
+					const row = document.createElement("div");
+					row.className =
+						"dw-rp-route" + (r.id === curId ? " dw-rp-route--active" : "");
+					const km = r.distance
+						? (r.distance / 1000).toFixed(1) + " km" : "";
+					row.innerHTML =
+						'<span class="dw-rp-fav"></span>' +
+						'<span class="dw-rp-rn"></span>' +
+						'<span class="dw-rp-meta"></span>';
+					row.querySelector(".dw-rp-fav").textContent = r.favorite ? "★" : "";
+					row.querySelector(".dw-rp-rn").textContent = r.name || ("Route " + r.id);
+					row.querySelector(".dw-rp-meta").textContent = km;
+					row.title = (r.name || "") + (r.city ? " — " + r.city : "");
+					row.addEventListener("click", () => this._transport(r, row));
+					list.appendChild(row);
+				}
+				if (g.total > g.routes.length) {
+					const note = document.createElement("div");
+					note.className = "dw-rp-grp-note";
+					note.textContent = (g.routes.length ? "" : "No favourites here. ") +
+						"Other routes in this collection can't be listed yet " +
+						"(site endpoint unavailable).";
+					list.appendChild(note);
+				}
+				grp.appendChild(list);
+				frag.appendChild(grp);
+			}
+			this._body.innerHTML = "";
+			this._body.appendChild(frag);
+			const n = (this._routes || []).length;
+			this._foot.innerHTML =
+				'<a class="dw-rp-refresh">↻ Refresh</a>' +
+				'<span class="dw-rp-foot-ct"></span>';
+			this._foot.querySelector(".dw-rp-foot-ct").textContent =
+				n + " route" + (n === 1 ? "" : "s") + " loaded";
+			this._foot.querySelector(".dw-rp-refresh").addEventListener("click", () => {
+				this._loaded = false;
+				this._routes = this._collections = null;
+				this._load();
+			});
+		}
+
+		async _transport(r, row) {
+			const lp = this._win.leafletPlan;
+			if (!lp || !this._map) {
+				this._flashErr(row, "Planner not ready yet.");
+				return;
+			}
+			if (row) row.classList.add("dw-rp-route--loading");
+			try {
+				const html = await this._fetchText("/plan/" + r.id);
+				const route = RoutePanel._extractRoute(html);
+				if (!route) throw new Error("couldn't read route data");
+				// restoreRouteFromJson copies route_id→id; the embedded `route`
+				// var can carry a null route_id, which would blank the loaded
+				// route's identity (breaks the active highlight + a later Save
+				// targeting the wrong record). Pin it to the id we already know.
+				if (route.route_id == null) route.route_id = r.id;
+				// (map, route, removeExisting=true): clear the current route and
+				// load this one. The planner's map event handlers were attached at
+				// page init, so we deliberately DON'T re-add them (that path is for
+				// restoring into a fresh map) — the loaded route stays editable.
+				lp.restoreRouteFromJson(this._map, route, true);
+				this._fitToRoute(lp);
+			} catch (e) {
+				console.warn("[CustomTiles] route transport failed:", e);
+				if (row) row.classList.remove("dw-rp-route--loading");
+				this._flashErr(row);
+				return;
+			}
+			if (row) row.classList.remove("dw-rp-route--loading");
+			this._render(); // refresh the active-route highlight
+		}
+
+		_fitToRoute(lp) {
+			try {
+				const b = L.latLngBounds([]);
+				(lp.lines || []).forEach((line) => line.forEach((seg) => {
+					if (seg.polyline) b.extend(seg.polyline.getBounds());
+					else if (seg.marker_end) b.extend(seg.marker_end.getLatLng());
+				}));
+				(lp.waypoints || []).forEach((w) => {
+					if (w.marker) b.extend(w.marker.getLatLng());
+				});
+				if (b.isValid()) this._map.fitBounds(b, { padding: [48, 48] });
+			} catch (e) { /* non-fatal: route still loaded, just no auto-fit */ }
+		}
+
+		_flashErr(row) {
+			if (!row) return;
+			row.classList.add("dw-rp-route--err");
+			setTimeout(() => row.classList.remove("dw-rp-route--err"), 1600);
+		}
+
+		// Extract the editor-shape `var route = {…}` object embedded in the
+		// /plan/<id> HTML (referenced by load_planner_leaflet({route: route})).
+		static _extractRoute(html) {
+			const m = /\broute\s*=\s*\{/.exec(html);
+			if (!m) return null;
+			const start = html.indexOf("{", m.index);
+			let depth = 0, inStr = false, esc = false, q = "", j = start;
+			for (; j < html.length; j++) {
+				const c = html[j];
+				if (inStr) {
+					if (esc) esc = false;
+					else if (c === "\\") esc = true;
+					else if (c === q) inStr = false;
+				} else if (c === '"' || c === "'") { inStr = true; q = c; }
+				else if (c === "{") depth++;
+				else if (c === "}") { depth--; if (!depth) { j++; break; } }
+			}
+			try { return JSON.parse(html.slice(start, j)); } catch (e) { return null; }
+		}
+	}
+
 	/* -- Layer Manager UI -------------------------------------------------- */
 
 	class LayerManagerUI {
@@ -7827,6 +8204,7 @@
 				map.on("zoomend", () => this._reenableBaseSelectability());
 				new LayerManagerUI(ctrl).setup();
 				this._hookSitePopup(map);
+				RoutePanel.attach(map);
 			} catch (e) {
 				this.injected = false;
 				throw e;
@@ -8441,6 +8819,38 @@
 				// Bootstrap 3 does for pressed buttons.
 				".dw-3d-btn { padding: 5px 8px; }",
 				".dw-3d-btn.active { background: #e0e0e0; border-color: #999; box-shadow: inset 0 3px 5px rgba(0,0,0,.125); }",
+				// Route & Collection slide-out panel + its toolbar toggle.
+				".dw-routes-btn { padding: 5px 8px; }",
+				".dw-routes-btn.active { background: #e0e0e0; border-color: #999; box-shadow: inset 0 3px 5px rgba(0,0,0,.125); }",
+				".dw-route-panel { position: fixed; top: 0; left: 0; height: 100vh; width: 320px; max-width: 86vw; background: #fff; box-shadow: 2px 0 14px rgba(0,0,0,0.28); z-index: 100000; transform: translateX(-100%); transition: transform 0.22s ease; display: flex; flex-direction: column; font-family: sans-serif; }",
+				".dw-route-panel--open { transform: translateX(0); }",
+				".dw-rp-head { display: flex; align-items: center; justify-content: space-between; padding: 11px 13px; border-bottom: 1px solid #e5e7eb; }",
+				".dw-rp-title { font-weight: 700; font-size: 14px; color: #111827; }",
+				".dw-rp-close { font-size: 22px; line-height: 1; color: #9ca3af; cursor: pointer; text-decoration: none; padding: 0 4px; }",
+				".dw-rp-close:hover { color: #111827; }",
+				".dw-rp-search { margin: 9px 13px 4px; padding: 7px 10px; border: 1px solid #d1d5db; border-radius: 7px; font-size: 13px; outline: none; }",
+				".dw-rp-search:focus { border-color: #93c5fd; }",
+				".dw-rp-body { flex: 1; overflow-y: auto; padding: 4px 7px 8px; }",
+				".dw-rp-status { padding: 16px 13px; color: #6b7280; font-size: 13px; line-height: 1.5; }",
+				".dw-rp-group { margin: 2px 0; }",
+				".dw-rp-group-hd { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 7px 8px 4px; cursor: pointer; user-select: none; }",
+				".dw-rp-group-name { font-size: 11px; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+				".dw-rp-group:not(.dw-rp-group--closed) > .dw-rp-group-hd .dw-rp-group-name::before { content: '▾  '; }",
+				".dw-rp-group--closed > .dw-rp-group-hd .dw-rp-group-name::before { content: '▸  '; }",
+				".dw-rp-group--closed .dw-rp-group-body { display: none; }",
+				".dw-rp-group-ct { font-size: 10px; color: #9ca3af; background: #f3f4f6; border-radius: 9px; padding: 1px 8px; flex-shrink: 0; }",
+				".dw-rp-route { display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; color: #1f2937; }",
+				".dw-rp-route:hover { background: #f0f6ff; }",
+				".dw-rp-route--active { background: #dbeafe; font-weight: 600; cursor: default; }",
+				".dw-rp-route--loading { opacity: 0.5; pointer-events: none; }",
+				".dw-rp-route--err { background: #fee2e2 !important; }",
+				".dw-rp-fav { color: #f59e0b; width: 11px; flex-shrink: 0; font-size: 11px; text-align: center; }",
+				".dw-rp-rn { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+				".dw-rp-meta { color: #9ca3af; font-size: 11px; flex-shrink: 0; }",
+				".dw-rp-grp-note { font-size: 10.5px; color: #b45309; padding: 1px 10px 6px; line-height: 1.35; }",
+				".dw-rp-foot { display: flex; justify-content: space-between; align-items: center; padding: 8px 13px; border-top: 1px solid #e5e7eb; font-size: 11px; color: #6b7280; }",
+				".dw-rp-refresh { color: #1d4ed8; cursor: pointer; text-decoration: none; }",
+				".dw-rp-refresh:hover { text-decoration: underline; }",
 				".dw-flight-icon { background: none !important; border: none !important; }",
 				".dw-flight-tip { font-size: 11px; line-height: 1.4; }",
 				// Geocache icon — overflow:visible so the favourites-points
