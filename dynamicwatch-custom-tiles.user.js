@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.110
+// @version      7.9.111
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -12,7 +12,6 @@
 // @connect      qldglobe.information.qld.gov.au
 // @connect      spatial-img.information.qld.gov.au
 // @connect      spatial-gis.information.qld.gov.au
-// @connect      qimagery.information.qld.gov.au
 // @connect      connecttile.garmin.com
 // @connect      strava.com
 // @connect      content-a.strava.com
@@ -123,18 +122,6 @@
 		QLD_HIST_PHOTOS_SERVICE:
 			"https://spatial-img.information.qld.gov.au/arcgis/rest/services/" +
 			"QImagery/HistoricalAerialPhoto_AllUsers/ImageServer",
-		// The real archive of scanned survey-plane photos (1946→2008 at
-		// Brisbane). The *_AllUsers/_SISPUsers ImageServers 403 even with a
-		// qldglobe token; this one is only reachable through QImagery's own
-		// proxy, which injects auth server-side. Reached via QIMAGERY_PROXY +
-		// service URL, POSTed (geometry/mosaicRule JSON in the body) with
-		// where=" " — the proxy host's WAF rejects those JSON braces / "1=1"
-		// in a GET query string. See reference_qld_historical_imagery.
-		QLD_ARCHIVE_SERVICE:
-			"https://spatial-img.information.qld.gov.au/arcgis/rest/services/" +
-			"QImagery/QldArchive_AerialPhotos/ImageServer",
-		QIMAGERY_PROXY: "https://qimagery.information.qld.gov.au/proxy?",
-		QIMAGERY_ORIGIN: "https://qimagery.information.qld.gov.au",
 
 		LAYER_WATER: "Water Infrastructure",
 		LAYER_FLIGHTS: "Live Flights",
@@ -1817,11 +1804,11 @@
 					.filter((f) => f.objectid);
 
 			let orthoCaptures = null;
-			let archiveCaptures = null;
+			let photosCaptures = null;
 
 			const finish = () => {
 				this._fetching = false;
-				const all = [...(orthoCaptures || []), ...(archiveCaptures || [])];
+				const all = [...(orthoCaptures || []), ...(photosCaptures || [])];
 				all.sort((a, b) => {
 					const da = a.captureDate || "";
 					const db = b.captureDate || "";
@@ -1850,7 +1837,7 @@
 			};
 
 			const tryFinish = () => {
-				if (orthoCaptures !== null && archiveCaptures !== null) finish();
+				if (orthoCaptures !== null && photosCaptures !== null) finish();
 			};
 
 			// Query 1: AerialOrtho (no token, public)
@@ -1870,108 +1857,58 @@
 				},
 			);
 
-			// Query 2: QldArchive_AerialPhotos — the scanned survey-plane
-			// photos back to the 1940s. The *_AllUsers HistoricalAerialPhoto
-			// service 403s even with a qldglobe token (which is why Brisbane
-			// used to start at the ortho program's 1994); this archive is only
-			// reachable via QImagery's proxy, which injects auth server-side.
-			// MUST be POSTed (geometry JSON in the body, not the URL) with
-			// where=" " — the proxy host's WAF rejects JSON braces / "1=1" in
-			// a GET query string. begindate is epoch-ms.
-			const archiveBody = [
-				"f=json",
-				"where=" + encodeURIComponent(" "),
-				"geometry=" + encodeURIComponent(JSON.stringify({
-					x: c.lng, y: c.lat, spatialReference: { wkid: 4326 },
-				})),
-				"geometryType=esriGeometryPoint",
-				"inSR=4326",
-				"spatialRel=esriSpatialRelIntersects",
-				"outFields=" + encodeURIComponent("objectid,begindate,enddate,projectname"),
-				"returnGeometry=false",
-				"orderByFields=" + encodeURIComponent("begindate DESC"),
-				"resultRecordCount=2000",
-			].join("&");
-			gmJsonGet(CFG.QIMAGERY_PROXY + CFG.QLD_ARCHIVE_SERVICE + "/query", {
-				method: "POST",
-				data: archiveBody,
-				headers: {
-					"Content-Type": "application/x-www-form-urlencoded",
-					Origin:  CFG.QIMAGERY_ORIGIN,
-					Referer: CFG.QIMAGERY_ORIGIN + "/",
-				},
-			}, (err, data, raw) => {
-				if (err || !data || data.error) {
-					const e = (data && data.error) || {};
-					const body = raw && raw.responseText
-						? ` ${raw.responseText.slice(0, 160)}` : "";
-					console.warn("[CustomTiles] QLD Historical archive query:",
-						err ? err.message : (e.code + " " + (e.message || "")), body);
-					archiveCaptures = [];
-				} else {
-					// One survey flight drops MANY overlapping frames on the
-					// same day; the mosaic dataset lists each as its own raster.
-					// Group them by (project + date) into a single capture and
-					// lock-raster ALL their objectids together so exportImage
-					// mosaics the whole run into one aligned image — the same
-					// thing QImagery does (METHOD_LOCKRASTER, lockRasterIds[]) —
-					// instead of showing each frame as a separate scrubber stop.
-					const groups = new Map();
-					for (const f of (data.features || [])) {
-						const a = f.attributes || {};
-						if (a.objectid == null) continue;
-						const d = a.begindate ? new Date(a.begindate) : null;
-						const proj = (a.projectname && a.projectname.trim()) || "";
-						const day = d ? d.toISOString().slice(0, 10) : "";
-						const key = proj + "|" + day;
-						let g = groups.get(key);
-						if (!g) {
-							g = {
-								oids: [],
-								title: proj || (d ? String(d.getUTCFullYear()) : ""),
-								captureDate: day || null,
-								service: CFG.QLD_ARCHIVE_SERVICE,
-								needsToken: false,
-								viaProxy: true,
-								mosaicWhere: null,
-							};
-							groups.set(key, g);
-						}
-						g.oids.push(a.objectid);
+			// Query 2: HistoricalAerialPhoto (requires token — holds the
+			// 1930s–1990s scanned aerial photos). Silent empty result here is
+			// why Brisbane appeared to start in 1994 (the AerialOrtho program's
+			// earliest capture). Verbose logging makes auth/pagination issues
+			// visible in the console so we can tell ortho-only fallback apart
+			// from a real "no coverage" result.
+			const doPhotosQuery = (tok) => {
+				const tokenParam = tok ? "&token=" + encodeURIComponent(tok) : "";
+				const url =
+					CFG.QLD_HIST_PHOTOS_SERVICE + "/query" + geomParam +
+					"&where=1%3D1" + tokenParam;
+				gmJsonGet(url, {
+					headers: {
+						Origin:  "https://qldglobe.information.qld.gov.au",
+						Referer: "https://qldglobe.information.qld.gov.au/",
+					},
+				}, (err, data, raw) => {
+					if (err) {
+						const body = raw && raw.responseText
+							? ` ${raw.responseText.slice(0, 200)}` : "";
+						console.warn("[CustomTiles] QLD Historical photos",
+							err.message,
+							tok ? "(token sent)" : "(no token)", body);
+						photosCaptures = [];
+					} else if (!data || data.error) {
+						const e = (data && data.error) || {};
+						console.warn(
+							"[CustomTiles] QLD Historical photos service error:",
+							e.code, e.message || (data ? "" : "null response body"),
+							tok ? "(token sent — may be expired or wrong scope)"
+							    : "(no token)");
+						photosCaptures = [];
+					} else {
+						photosCaptures = parseCaptures(
+							data, CFG.QLD_HIST_PHOTOS_SERVICE, !!tok, null);
+						const total = (data.features || []).length;
+						const limited = !!data.exceededTransferLimit;
+						console.info("[CustomTiles] QLD Historical photos:",
+							total, "features",
+							limited
+								? "(LIMITED — older captures cut off, see maxRecordCount)"
+								: "");
 					}
-					archiveCaptures = [...groups.values()].map((g) => {
-						// objectid kept as the representative id (catalog
-						// resolution / 3D getter key off it); oids drives the
-						// lock-raster mosaic at render time.
-						g.objectid = g.oids[0];
-						return g;
-					});
-					const frameCount = (data.features || []).length;
-					console.info("[CustomTiles] QLD Historical archive:",
-						archiveCaptures.length, "surveys from", frameCount, "frames",
-						data.exceededTransferLimit ? "(transfer-limited)" : "");
-				}
-				tryFinish();
-			});
-		}
+					tryFinish();
+				});
+			};
 
-		// Form body for an exportImage POST through the QImagery proxy. `oids`
-		// is the array of frame raster ids in the survey — locking ALL of them
-		// mosaics the full run (aligned, continuous) rather than one frame.
-		// bbox is "west,south,east,north" in 3857.
-		_exportImageBody(bbox, oids) {
-			return [
-				"f=image",
-				"bbox=" + encodeURIComponent(bbox),
-				"bboxSR=102100", "imageSR=102100",
-				"size=256,256",
-				"format=jpg",
-				"mosaicRule=" + encodeURIComponent(JSON.stringify({
-					mosaicMethod: "esriMosaicLockRaster",
-					lockRasterIds: Array.isArray(oids) ? oids : [oids],
-					ascending: true,
-				})),
-			].join("&");
+			if (this._qldToken) {
+				this._qldToken.get((err, tok) => doPhotosQuery(err ? null : tok));
+			} else {
+				doPhotosQuery(null);
+			}
 		}
 
 		create() {
@@ -1987,7 +1924,6 @@
 					const bbox = encodeURIComponent(
 						`${b.west},${b.south},${b.east},${b.north}`);
 
-					const rawBbox = `${b.west},${b.south},${b.east},${b.north}`;
 					const myGen = provider._captureGeneration;
 					provider._queryCatalog(map, (oid) => {
 						if (!oid || provider._captureGeneration !== myGen) {
@@ -1997,46 +1933,6 @@
 						const cap = provider._captures[provider._captureIdx];
 						const svc = cap ? cap.service : CFG.QLD_HIST_SERVICE;
 						const mosaicWhere = cap ? cap.mosaicWhere : "category=1";
-
-						img.onload = () => done(null, img);
-						img.onerror = () => done(new Error("QLD Hist tile failed"), img);
-
-						// Archive captures render through the QImagery proxy,
-						// which needs a POST (mosaicRule braces can't go in a GET
-						// URL past the WAF) — fetch the JPEG bytes via GM and feed
-						// them to the <img> as a blob URL. The Origin/Referer
-						// headers are why this must go through GM_xmlhttpRequest.
-						if (cap && cap.viaProxy) {
-							const handle = gmGet(
-								CFG.QIMAGERY_PROXY + svc + "/exportImage",
-								{
-									method: "POST",
-									responseType: "arraybuffer",
-									data: provider._exportImageBody(rawBbox, cap.oids || [oid]),
-									headers: {
-										"Content-Type": "application/x-www-form-urlencoded",
-										Origin:  CFG.QIMAGERY_ORIGIN,
-										Referer: CFG.QIMAGERY_ORIGIN + "/",
-									},
-								},
-								(err, r) => {
-									if (err || !r || r.status >= 400 || !r.response ||
-										provider._captureGeneration !== myGen) {
-										done(err || new Error("QLD archive tile"), img);
-										return;
-									}
-									const url = URL.createObjectURL(
-										new Blob([r.response], { type: "image/jpeg" }));
-									const revoke = () => URL.revokeObjectURL(url);
-									img.addEventListener("load", revoke, { once: true });
-									img.addEventListener("error", revoke, { once: true });
-									img.src = url;
-								},
-							);
-							img._dwHandle = handle;
-							return;
-						}
-
 						const needsToken = cap && cap.needsToken;
 						const tokenStr =
 							needsToken && provider._qldToken && provider._qldToken.token
@@ -2051,6 +1947,8 @@
 						const mosaicRule = encodeURIComponent(
 							JSON.stringify(mosaicRuleObj),
 						);
+						img.onload = () => done(null, img);
+						img.onerror = () => done(new Error("QLD Hist tile failed"), img);
 						img.src =
 							svc +
 							"/exportImage?bbox=" +
@@ -2079,9 +1977,6 @@
 					new Date().getFullYear(),
 			});
 			this._gridLayerRef = gridLayer;
-			// Cancel in-flight tile fetches (incl. the archive POST) when
-			// Leaflet drops a tile mid-pan — see img._dwHandle in createTile.
-			wireTileAbort(gridLayer);
 
 			gridLayer.getCaptureCount = function () {
 				return provider._captures.length;
@@ -2132,10 +2027,6 @@
 				const cap = provider._captures[provider._captureIdx];
 				const svc = cap ? cap.service : CFG.QLD_HIST_SERVICE;
 				const mosaicWhere = cap ? cap.mosaicWhere : "category=1";
-				// Archive captures need a POST through the proxy, which a plain
-				// tile-URL (addProtocol) cannot express; the blob bridge below
-				// handles those (null falls through to it).
-				if (cap && cap.viaProxy) return null;
 				const needsToken = cap && cap.needsToken;
 				const tokStr =
 					needsToken && provider._qldToken && provider._qldToken.token
@@ -2199,22 +2090,6 @@
 					if (mosaicWhere) mosaicRuleObj.where = mosaicWhere;
 					const mosaicRule = encodeURIComponent(
 						JSON.stringify(mosaicRuleObj));
-					// Archive captures: POST exportImage through the QImagery proxy
-					// (mosaicRule braces cannot survive a GET past its WAF), returning
-					// the JPEG bytes for the 3D drape.
-					if (cap && cap.viaProxy) {
-						const raw = `${b.west},${b.south},${b.east},${b.north}`;
-						dwMbGmFetchAB(CFG.QIMAGERY_PROXY + svc + "/exportImage", {
-							method: "POST",
-							data: provider._exportImageBody(raw, cap.oids || [oid]),
-							headers: {
-								"Content-Type": "application/x-www-form-urlencoded",
-								Origin:  CFG.QIMAGERY_ORIGIN,
-								Referer: CFG.QIMAGERY_ORIGIN + "/",
-							},
-						}).then(resolve, reject);
-						return;
-					}
 					const url =
 						svc +
 						"/exportImage?bbox=" + bbox +
