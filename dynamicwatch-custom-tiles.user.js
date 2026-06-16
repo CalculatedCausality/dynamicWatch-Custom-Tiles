@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.109
+// @version      7.9.110
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -1909,31 +1909,57 @@
 						err ? err.message : (e.code + " " + (e.message || "")), body);
 					archiveCaptures = [];
 				} else {
-					archiveCaptures = (data.features || []).map((f) => {
+					// One survey flight drops MANY overlapping frames on the
+					// same day; the mosaic dataset lists each as its own raster.
+					// Group them by (project + date) into a single capture and
+					// lock-raster ALL their objectids together so exportImage
+					// mosaics the whole run into one aligned image — the same
+					// thing QImagery does (METHOD_LOCKRASTER, lockRasterIds[]) —
+					// instead of showing each frame as a separate scrubber stop.
+					const groups = new Map();
+					for (const f of (data.features || [])) {
 						const a = f.attributes || {};
+						if (a.objectid == null) continue;
 						const d = a.begindate ? new Date(a.begindate) : null;
-						return {
-							objectid: a.objectid,
-							title: (a.projectname && a.projectname.trim()) ||
-								(d ? String(d.getUTCFullYear()) : ""),
-							captureDate: d ? d.toISOString().slice(0, 10) : null,
-							service: CFG.QLD_ARCHIVE_SERVICE,
-							needsToken: false,
-							viaProxy: true,
-							mosaicWhere: null,
-						};
-					}).filter((f) => f.objectid != null);
+						const proj = (a.projectname && a.projectname.trim()) || "";
+						const day = d ? d.toISOString().slice(0, 10) : "";
+						const key = proj + "|" + day;
+						let g = groups.get(key);
+						if (!g) {
+							g = {
+								oids: [],
+								title: proj || (d ? String(d.getUTCFullYear()) : ""),
+								captureDate: day || null,
+								service: CFG.QLD_ARCHIVE_SERVICE,
+								needsToken: false,
+								viaProxy: true,
+								mosaicWhere: null,
+							};
+							groups.set(key, g);
+						}
+						g.oids.push(a.objectid);
+					}
+					archiveCaptures = [...groups.values()].map((g) => {
+						// objectid kept as the representative id (catalog
+						// resolution / 3D getter key off it); oids drives the
+						// lock-raster mosaic at render time.
+						g.objectid = g.oids[0];
+						return g;
+					});
+					const frameCount = (data.features || []).length;
 					console.info("[CustomTiles] QLD Historical archive:",
-						archiveCaptures.length, "photo captures",
+						archiveCaptures.length, "surveys from", frameCount, "frames",
 						data.exceededTransferLimit ? "(transfer-limited)" : "");
 				}
 				tryFinish();
 			});
 		}
 
-		// Form body for an exportImage POST through the QImagery proxy (a
-		// single locked raster). bbox is "west,south,east,north" in 3857.
-		_exportImageBody(bbox, oid) {
+		// Form body for an exportImage POST through the QImagery proxy. `oids`
+		// is the array of frame raster ids in the survey — locking ALL of them
+		// mosaics the full run (aligned, continuous) rather than one frame.
+		// bbox is "west,south,east,north" in 3857.
+		_exportImageBody(bbox, oids) {
 			return [
 				"f=image",
 				"bbox=" + encodeURIComponent(bbox),
@@ -1942,7 +1968,7 @@
 				"format=jpg",
 				"mosaicRule=" + encodeURIComponent(JSON.stringify({
 					mosaicMethod: "esriMosaicLockRaster",
-					lockRasterIds: [oid],
+					lockRasterIds: Array.isArray(oids) ? oids : [oids],
 					ascending: true,
 				})),
 			].join("&");
@@ -1986,7 +2012,7 @@
 								{
 									method: "POST",
 									responseType: "arraybuffer",
-									data: provider._exportImageBody(rawBbox, oid),
+									data: provider._exportImageBody(rawBbox, cap.oids || [oid]),
 									headers: {
 										"Content-Type": "application/x-www-form-urlencoded",
 										Origin:  CFG.QIMAGERY_ORIGIN,
@@ -2180,7 +2206,7 @@
 						const raw = `${b.west},${b.south},${b.east},${b.north}`;
 						dwMbGmFetchAB(CFG.QIMAGERY_PROXY + svc + "/exportImage", {
 							method: "POST",
-							data: provider._exportImageBody(raw, oid),
+							data: provider._exportImageBody(raw, cap.oids || [oid]),
 							headers: {
 								"Content-Type": "application/x-www-form-urlencoded",
 								Origin:  CFG.QIMAGERY_ORIGIN,
