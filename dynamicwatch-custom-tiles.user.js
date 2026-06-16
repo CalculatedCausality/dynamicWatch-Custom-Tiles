@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.101
+// @version      7.9.103
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -7687,6 +7687,11 @@
 
 				this._restoreLayer(map);
 				this._restoreOverlays(map, ctrl);
+				this._normalizeBaseZoom(map);
+				// Re-normalise when the base set/zoom changes — catches the
+				// site's own bases and any added after init, and re-clears
+				// the zoom-disable the moment Leaflet would re-apply it.
+				map.on("baselayerchange zoomend", () => this._normalizeBaseZoom(map));
 				new LayerManagerUI(ctrl).setup();
 				this._hookSitePopup(map);
 			} catch (e) {
@@ -7752,6 +7757,54 @@
 			const newMax = isDeep ? 25 : 22;
 			map.setMaxZoom(newMax);
 			if (map.getZoom() > newMax) map.setZoom(newMax);
+		}
+
+		// Keep EVERY base layer — including dynamic.watch's own (Satellite,
+		// Satellite Hi-Res, OpenCycleMap, …) — selectable AND rendering at
+		// deep zoom. Two problems this solves:
+		//   1. Leaflet's L.Control.Layers disables the radio of any base
+		//      whose `maxZoom < current map zoom`. Once our overzooming
+		//      bases unlock z25, the site's shallower bases (cap ~19-20)
+		//      get their radios greyed out — you can't switch back to them.
+		//   2. Even if selectable, a base with maxZoom below the view drops
+		//      out of range and shows nothing.
+		// Fix: lift each base tile/grid layer's maxZoom to the deep max and
+		// pin maxNativeZoom at its old ceiling so Leaflet STRETCHES its
+		// deepest tile; and neutralise the zoom-based input disabling.
+		_normalizeBaseZoom(map) {
+			const ctrl = this._ctrl;
+			if (!ctrl || !ctrl._layers) return;
+			const DEEP = 25;
+			for (const entry of ctrl._layers) {
+				if (entry.overlay) continue;
+				const lyr = entry.layer;
+				const o = lyr && lyr.options;
+				if (!o) continue;
+				const isGrid = lyr instanceof L.GridLayer || lyr instanceof L.TileLayer;
+				if (!isGrid) continue;
+				const curMax = typeof o.maxZoom === "number" ? o.maxZoom : DEEP;
+				if (curMax < DEEP) {
+					if (o.maxNativeZoom == null) o.maxNativeZoom = curMax;
+					o.maxZoom = DEEP;
+					if (lyr._map && typeof lyr.redraw === "function") {
+						try { lyr.redraw(); } catch (_) {}
+					}
+				}
+			}
+			// Override the control's zoom-disable check once: every base
+			// overzooms now, so none should ever be disabled by zoom.
+			if (!ctrl._dwSelectablePatched &&
+				typeof ctrl._checkDisabledLayers === "function") {
+				ctrl._dwSelectablePatched = true;
+				ctrl._checkDisabledLayers = function () {
+					for (const inp of (this._layerControlInputs || [])) {
+						if (inp) inp.disabled = false;
+					}
+				};
+			}
+			if (typeof ctrl._checkDisabledLayers === "function") {
+				try { ctrl._checkDisabledLayers(); } catch (_) {}
+			}
 		}
 
 		// -- Layer restore ------------------------------------------------
