@@ -1,0 +1,64 @@
+import { CustomTilesApp } from './app/custom-tiles-app.js';
+import { CFG, DW_LAYER_GROUPS, DW_OVERLAY_GROUPS } from './config.js';
+import {
+	LayerProvider,
+	_overzoomPlacement,
+	tileProvider,
+	arcgisExportProvider,
+	tokenTileProvider,
+} from './layers/provider-factories.js';
+import { pollingDataLayer } from './layers/polling-data-layer.js';
+import {
+	_cadVal,
+	_formatAddressLine,
+	_formatCadastreTooltip,
+	_othCanonicalUrlFromLocation,
+	_othStreetTypeSlug,
+	_slugify,
+} from './providers/qld-cadastre.js';
+import { oimIcon } from './providers/openinframap.js';
+import { _escHtml, esc, _safeColor, _fmtPrice, _fmtDate } from './utils/html.js';
+import { hexAlpha, pointInRing, intvlActivityTime, intvlAgo, intvlArea } from './utils/intvl.js';
+import {
+	mvtDecode,
+	parseLayer,
+	parseValue,
+	parseFeature,
+	decodeGeometry,
+	zig,
+	readVarint,
+	skipField,
+	utf8,
+	prepareLayers,
+} from './utils/mvt.js';
+import { tileToBBox4326, tileToBBox3857, utfGridCellToLatLng } from './utils/tile-geometry.js';
+
+export function bootUserscript() {
+	// Visible version banner — answers "did Tampermonkey actually update?"
+	// on every page load without grepping for symptoms.
+	const SCRIPT_VERSION =
+		(typeof GM_info !== "undefined" && GM_info.script?.version) || "?";
+	console.info(
+		`%c[CustomTiles] v${SCRIPT_VERSION} loaded`,
+		"color:#fff;background:#0277bd;padding:2px 6px;border-radius:3px;",
+	);
+
+	if (globalThis.__DW_TEST_EXPORTS__) {
+		globalThis.__dw = {
+			CFG, DW_LAYER_GROUPS, DW_OVERLAY_GROUPS,
+			tileToBBox4326, tileToBBox3857, utfGridCellToLatLng,
+			_overzoomPlacement,
+			mvtDecode, parseLayer, parseValue, parseFeature,
+			decodeGeometry, zig, readVarint, skipField, utf8,
+			hexAlpha, pointInRing, prepareLayers,
+			intvlActivityTime, intvlAgo, intvlArea,
+			_cadVal, _escHtml, esc, _safeColor, _fmtPrice, _fmtDate,
+			_slugify, _othStreetTypeSlug, _othCanonicalUrlFromLocation,
+			_formatCadastreTooltip, _formatAddressLine,
+			LayerProvider, tileProvider, tokenTileProvider,
+			arcgisExportProvider, pollingDataLayer, oimIcon,
+		};
+	}
+
+	if (!globalThis.__DW_DISABLE_BOOT__) new CustomTilesApp().boot();
+}

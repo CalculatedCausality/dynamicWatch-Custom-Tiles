@@ -73,7 +73,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 | **Live Flights** | Aircraft positions from OpenSky Network, refreshed every 10s |
 | **Marine Vessels** | Ship positions from MarineTraffic, refreshed every 20s |
 | **INTVL Global Map** | The INTVL run-territory game's public global map; hover for territory size, owner colour, and exact recording time decoded from the activity's cuid |
-| **Geocaches** | Geocaches from geocaching.com — **requires you to be logged in** to geocaching.com in the same browser; markers click through to each cache's page |
+| **Geocaches** | Geocaches from geocaching.com via the public tile API (no login required); shows Groundspeak's real per-type icons (traditional/mystery/earthcache/…), clickable through to each cache's page; click also fetches difficulty/terrain/owner/favourites |
 
 **Heatmaps**
 
@@ -112,6 +112,12 @@ Your last active base layer and every active overlay are saved per-browser and r
 
 The ⚙ **Manage layers** link at the bottom of the layer switcher lets you hide layers you never use. Hidden layers stay in storage and reappear once you re-enable them.
 
+### 3D Mode
+
+Toggle the **3D** button next to the planner controls to flip into a tilted Mapbox GL JS view with Mapbox's Terrain-DEM elevation under your active basemap. Your route, waypoints, and active overlays mirror automatically; pan, rotate, pitch, and zoom all work. Toggle off to return to flat 2D.
+
+GM-fetcher-backed layers such as Stamen Terrain, QLD Historical, and Garmin Heatmap render in 3D through the script's tile-blob bridge on Mapbox builds that do not expose `addProtocol`, so tiles may appear progressively as the bridge warms.
+
 ---
 
 ## Manual install (if the one-click link above doesn't work)
@@ -127,12 +133,38 @@ If Tampermonkey doesn't pop the install dialog for some reason — for example, 
 
 ## How auth-gated layers work
 
-A few layers reach providers that require credentials. The script handles each silently — you never need to type a token anywhere.
+Quick-reference table — what you need to log in to for each layer to render.
+
+| Layer | Login required? | Source of credentials | Notes |
+|---|---|---|---|
+| QLD Globe | No | Script-bootstrapped QLD Gov bearer token | First-load CSRF + token POST, cached + auto-refreshed |
+| QLD Historical | No | Same QLD bearer token | Some captures are restricted (HTTP 403); falls back automatically |
+| QLD Roads / Labels | No | Same QLD bearer token | Auto-injected with QLD bases |
+| QLD Topo | No | None | Public open WMTS |
+| QLD Relief | No | None | Public QLD basemap tile cache |
+| QLD Cadastre | No | None | Public ArcGIS MapServer |
+| QPWS Estate / National Parks | No | None | Public ArcGIS MapServer |
+| Google Hybrid | No | None | Public tile URL |
+| Apple Maps | No | DuckDuckGo MapKit JWT → Apple accessKey | 30-min token, auto-refreshed |
+| Stamen Terrain | No | Stadia Maps keyless endpoint | `localhost` Origin spoof via GM_xmlhttpRequest |
+| Esri Wayback | No | None | Public catalog + tiles |
+| OpenSeaMap | No | None | Public tiles |
+| Strava Heatmap | No | Anonymous Strava endpoint | Capped at zoom 10 (higher zoom requires signed cookies) |
+| Garmin Heatmap | No | Anonymous Garmin Connect tile feeds | 5 sub-feeds blended additively on canvas |
+| Power / Telecoms / Water | No | OpenInfraMap MVT CDN | Public vector tiles |
+| Mobile Coverage | No | ACCC public endpoint | |
+| Light Pollution | No | lightpollutionmap.info WMS | |
+| Live Flights | No | OpenSky Network anonymous API | Rate-limited; can return 429 |
+| Marine Vessels | No | MarineTraffic anonymous endpoint | Cloudflare-protected; can drop out |
+| INTVL Global Map | No | Public Mapbox Vector Tile CDN | |
+| Geocaches | No | Groundspeak's public tile-info + map.details endpoints | No login. UTFGrid drives placement; lazy map.details fetch enriches on click. |
+
+**Auto-token implementation details:**
 
 - **QLD Globe / QLD Roads / QLD Historical** — uses QLD Government's public bearer-token endpoint. The script bootstraps a CSRF cookie + POSTs for a token on first load, caches it via Tampermonkey storage, and refreshes a few minutes before expiry. No QLD account needed.
 - **Apple Maps** — uses a short-lived JWT from DuckDuckGo's MapKit proxy, then exchanges it at Apple's bootstrap endpoint for an `accessKey` (30 min TTL). Refreshes are auto-scheduled.
 - **Stamen Terrain** — Stadia Maps' keyless endpoint accepts requests from a `localhost` Origin; the script spoofs that header via Tampermonkey's privileged XHR.
-- **Geocaches** — reads your existing geocaching.com session cookie (no key needed — just be logged in to geocaching.com in the same browser). The first time you toggle the layer without a session, a one-time console hint tells you to log in.
+- **Geocaches** — uses Groundspeak's pre-2018 public tile API (`tiles{01..04}.geocaching.com`). The visible cache icons are Groundspeak's own `map.png` raster tiles (real per-type symbology) drawn via a Leaflet tile layer; the `map.info` UTFGrid (a 64×64 grid per tile encoding code + name per occupied cell) drives transparent click/hover hit-areas and the 3D dots. Cell coordinates reverse to lat/lng at tile_size/64 precision (~150 m at z=12). Difficulty/terrain/container/owner/favourites are pulled lazily from `map.details?i=GC<code>` on click. Two quirks handled transparently: `map.info` requires a `geocaching.com` Referer (real Tampermonkey sets it; the tile-layer `<img>` requests don't need it), and "cold" tiles return HTTP 204 until a `map.png` GET warms them (the tile layer does this automatically). No login, no API key.
 
 ---
 
@@ -148,22 +180,32 @@ A few layers reach providers that require credentials. The script handles each s
 
 ## Development
 
-The script is a single ~5,500-line file ([`dynamicwatch-custom-tiles.user.js`](dynamicwatch-custom-tiles.user.js)). To work on it locally:
+Tampermonkey users still install [`dynamicwatch-custom-tiles.user.js`](dynamicwatch-custom-tiles.user.js). That filename remains the bundled release artifact so existing GitHub raw install links keep updating normally.
+
+Editable source is split under [`src/`](src/): providers, shared layer factories, the 3D runtime, UI modules, and a small boot wrapper. Rebuild the userscript after source changes:
+
+```bash
+npm run build
+```
+
+To work on it locally:
 
 1. Install once via the link above so Tampermonkey is wired up.
-2. Open Tampermonkey's dashboard → click the script → edit. Any save reloads automatically on the next page load.
+2. Edit the files under `src/`, run `npm run build`, then refresh dynamic.watch. If editing through Tampermonkey's dashboard, paste from the rebuilt `dynamicwatch-custom-tiles.user.js`.
 
 ### Test suite
 
 A multi-layer regression suite lives under [`tests/`](tests/) — see [tests/README.md](tests/README.md) for the full coverage manifest. Run from the repo root:
 
 ```bash
-bash tests/run.sh        # all three suites
+npm test                 # rebuild + run all suites
+bash tests/run.sh        # run suites against current bundle
 bash tests/run.sh --ci   # plain text output
 ```
 
-- **`unit.mjs`** (40 tests, no network, ~200 ms) — pure helpers: tile geometry, MVT/protobuf decode, Cadastre formatters, OnTheHouse URL builders, INTVL date utilities. Loaded into a sandboxed `vm.createContext` via [`_loader.mjs`](tests/_loader.mjs) so the production code itself is what gets exercised.
-- **`smoke.sh`** (32 tests, ~15 s) — HTTP probe every public layer endpoint over Brisbane CBD: HTTP 200 + content-type + minimum body size.
-- **`shape.mjs`** (37 tests, ~15 s) — deep structural validation: PNG/JPEG magic-byte sniff, PBF decoded via the userscript's own `mvtDecode`, JSON field walks asserting every field the script reads. Also runs the full QLD CSRF token bootstrap, Apple DuckDuckGo → bootstrap chain, and the Esri Wayback catalog → release → tile pipeline end-to-end.
+- **`unit.mjs`** (57 tests, no network, ~200 ms) — pure helpers: tile geometry, MVT/protobuf decode, Cadastre formatters, OnTheHouse URL builders, INTVL date utilities, layer-provider factories, and layer-group registration. Loaded into a sandboxed `vm.createContext` via [`_loader.mjs`](tests/_loader.mjs) so the production code itself is what gets exercised.
+- **`smoke.sh`** (34 tests, ~15 s) — HTTP probe every public layer endpoint over Brisbane CBD: HTTP 200 + content-type + minimum body size.
+- **`shape.mjs`** (40 tests, ~15 s) — deep structural validation: PNG/JPEG magic-byte sniff, PBF decoded via the userscript's own `mvtDecode`, JSON field walks asserting every field the script reads. Also runs the full QLD CSRF token bootstrap, Apple DuckDuckGo → bootstrap chain, and the Esri Wayback catalog → release → tile pipeline end-to-end.
+- **`e2e/run-3d-asserts.mjs`** (8 tests, ~60 s) — Playwright-driven assertions on a real Chromium against a saved plan. Covers 3D enable, marker reprojection under rotation, waypoint drag, the rapid-toggle stress path, heatmap persistence, overlay-above-base layer order, and the 3D → 2D → 3D cycle. Needs `npm install` + `npm run e2e:install` + `npm run e2e:auth` once; see [`tests/e2e/README.md`](tests/e2e/README.md).
 
 The suite exits with the sum of failures so it can drop into any pre-push hook.
