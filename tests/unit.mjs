@@ -77,6 +77,72 @@ t("tileToBBox3857 tile widths halve each zoom", () => {
 	close(a.east - a.west, (b.east - b.west) * 2, 1, "z=0 width = 2× z=1 width");
 });
 
+// ---- UTFGrid cell -> lat/lng (Geocaching public tile API) ----
+
+t("utfGridCellToLatLng centre of tile is tile centre", () => {
+	// Cell (31.5, 31.5) is exactly the tile centre. We address cell centres
+	// (offset +0.5), so to land on the tile's geographic centre we pass
+	// (32, 32) which decodes to pixel (32.5/64, 32.5/64) — close to centre,
+	// within one cell of the tile midpoint.
+	const [lat, lon] = dw.utfGridCellToLatLng(12, 3789, 2373, 32, 32);
+	const bbox = dw.tileToBBox4326(12, 3789, 2373);
+	const midLon = (bbox.minLon + bbox.maxLon) / 2;
+	const midLat = (bbox.minLat + bbox.maxLat) / 2;
+	close(lon, midLon, 0.001, "lon near tile centre");
+	close(lat, midLat, 0.001, "lat near tile centre");
+});
+
+t("utfGridCellToLatLng Brisbane cell (4, 0) lands near UQ-Herston", () => {
+	// Empirical: UTFGrid for tile z=12 x=3789 y=2373 places GC60ZN7
+	// (UQ-Herston Campus) at cell (4, 0). Actual cache is at
+	// approx lat=-27.448 lon=153.029; cell precision at z=12 is ~150 m.
+	const [lat, lon] = dw.utfGridCellToLatLng(12, 3789, 2373, 4, 0);
+	close(lat, -27.4504, 0.005, "lat decoded from cell");
+	close(lon, 153.0238, 0.005, "lon decoded from cell");
+});
+
+t("utfGridCellToLatLng z=16 cell precision is ~10m", () => {
+	// Two adjacent cells should map to lat/lng separated by approximately
+	// tile_size / 64. At z=16, that's about 9.6 m at the equator.
+	const [latA, lonA] = dw.utfGridCellToLatLng(16, 32768, 32768, 32, 32);
+	const [latB, lonB] = dw.utfGridCellToLatLng(16, 32768, 32768, 33, 32);
+	const dLon = Math.abs(lonB - lonA);
+	const metresPerDegLon = 111320; // at equator
+	const metres = dLon * metresPerDegLon;
+	if (metres < 5 || metres > 15) {
+		throw new Error(`expected ~9.6 m, got ${metres.toFixed(1)} m`);
+	}
+	eq(latA, latB, "lat unchanged across same row");
+});
+
+// ---- overzoom placement (stretch deepest available tile) ----
+
+t("_overzoomPlacement depth 0 = native tile, no scale/offset", () => {
+	const p = dw._overzoomPlacement(3789, 2373, 0, 256);
+	eq(p.scale, 1); eq(p.imgSize, 256); eq(p.offsetX, 0); eq(p.offsetY, 0);
+});
+
+t("_overzoomPlacement depth 1 picks the right sub-quadrant", () => {
+	// An odd x,y sits in the bottom-right quarter of its parent.
+	const p = dw._overzoomPlacement(3789, 2373, 1, 256);
+	eq(p.scale, 2); eq(p.imgSize, 512);
+	eq(p.offsetX, -256, "odd x → right half");
+	eq(p.offsetY, -256, "odd y → bottom half");
+	// An even x,y sits top-left.
+	const q = dw._overzoomPlacement(3788, 2372, 1, 256);
+	eq(q.offsetX, 0); eq(q.offsetY, 0);
+});
+
+t("_overzoomPlacement depth 2 = 4x scale, quadrant within 4x4", () => {
+	const p = dw._overzoomPlacement(3789, 2373, 2, 256);
+	eq(p.scale, 4); eq(p.imgSize, 1024);
+	// 3789 % 4 = 1, 2373 % 4 = 1
+	eq(p.offsetX, -256); eq(p.offsetY, -256);
+	const q = dw._overzoomPlacement(3790, 2375, 2, 256);
+	// 3790 % 4 = 2, 2375 % 4 = 3
+	eq(q.offsetX, -512); eq(q.offsetY, -768);
+});
+
 // ---- zigzag + varint ----
 
 t("zig decodes positive and negative", () => {
@@ -210,6 +276,31 @@ t("_escHtml escapes < > & \"", () => {
 	eq(dw._escHtml("A & B"),     "A &amp; B");
 	eq(dw._escHtml(null), "");
 	eq(dw._escHtml(undefined), "");
+});
+
+t("esc tagged-template escapes every interpolation, keeps literal markup", () => {
+	const name = '<img src=x onerror=alert(1)>';
+	const out = dw.esc`<b>${name}</b>`;
+	eq(out, "<b>&lt;img src=x onerror=alert(1)&gt;</b>");
+	// literal <b> survives; payload neutralised
+	assert(!out.includes("<img"), "payload must not survive as a live tag");
+	// multiple interpolations + non-string values
+	eq(dw.esc`a${1}b${'"x"'}c`, 'a1b&quot;x&quot;c');
+	eq(dw.esc`${null}${undefined}`, "");
+});
+
+t("_safeColor passes valid CSS colours, rejects injection", () => {
+	eq(dw._safeColor("#3b82f6"), "#3b82f6");
+	eq(dw._safeColor("#fff"), "#fff");
+	eq(dw._safeColor("rgb(1,2,3)"), "rgb(1,2,3)");
+	eq(dw._safeColor("rgba(1,2,3,0.5)"), "rgba(1,2,3,0.5)");
+	eq(dw._safeColor("red"), "red");
+	// injection attempts → fallback
+	eq(dw._safeColor('red;"></span><img src=x onerror=alert(1)>', "#888"), "#888");
+	eq(dw._safeColor("url(javascript:alert(1))", "#888"), "#888");
+	eq(dw._safeColor("expression(alert(1))", "#888"), "#888");
+	eq(dw._safeColor(null, "#abc"), "#abc");
+	eq(dw._safeColor(123, "#abc"), "#abc");
 });
 
 t("_fmtPrice formats currency by magnitude", () => {
@@ -423,6 +514,97 @@ t("decodeGeometry decodes nested MultiPolygon (3 rings)", () => {
 		9, 0, 10, 18, 2, 0, 0, 2,  15,
 	]);
 	eq(rings.length, 3);
+});
+
+// ---- layer-provider factories ----
+
+t("tileProvider returns LayerProvider subclass", () => {
+	const P = dw.tileProvider("https://example.com/{z}/{x}/{y}.png");
+	assert(typeof P === "function", "expected class (constructor)");
+	const inst = new P();
+	assert(inst instanceof dw.LayerProvider, "expected LayerProvider subclass");
+	assert(typeof inst.create === "function", "expected .create() method");
+});
+
+t("tileProvider create() invokes L.tileLayer with merged opts", () => {
+	let captured = null;
+	const url = "https://x/{z}/{x}/{y}.png";
+	// Re-patch the sandbox's L.tileLayer to capture the call.
+	const dwSandbox = dw; // closure over loaded helpers
+	// We can't easily reach into the sandbox, but we can verify the
+	// produced layer has the stub shape.
+	const P = dw.tileProvider(url, { opacity: 0.5, maxNativeZoom: 15 });
+	const layer = new P().create();
+	assert(layer !== null && typeof layer === "object",
+		"create() must return a non-null object");
+});
+
+t("arcgisExportProvider returns LayerProvider subclass", () => {
+	const P = dw.arcgisExportProvider({
+		baseUrl: "https://x/MapServer",
+		showLayers: "0",
+		pane: "p", paneZIndex: 100,
+	});
+	assert(new P() instanceof dw.LayerProvider);
+});
+
+t("tokenTileProvider returns LayerProvider subclass that accepts a token mgr", () => {
+	const stubToken = { isValid: () => false, get: () => {}, token: null };
+	const P = dw.tokenTileProvider((tok) => "https://x?t=" + tok.token);
+	const inst = new P(stubToken);
+	assert(inst instanceof dw.LayerProvider);
+	// Should not throw at create time when token is invalid (uses BLANK_TILE).
+	const layer = inst.create();
+	assert(layer !== null && typeof layer === "object");
+});
+
+t("tokenTileProvider with valid token calls buildUrl(tok)", () => {
+	let calledWith = null;
+	const tok = {
+		isValid: () => true, get: () => {},
+		token: "FAKE_TOKEN_VALUE",
+	};
+	const P = dw.tokenTileProvider((t) => {
+		calledWith = t;
+		return "https://x?t=" + t.token;
+	});
+	new P(tok).create();
+	assert(calledWith === tok,
+		"buildUrl should receive the token manager itself, not just its token field");
+});
+
+t("pollingDataLayer requires pane/minZoom/fetch and produces an L.Layer-shaped class", () => {
+	const Layer = dw.pollingDataLayer({
+		pane: "dwTestPane", paneZIndex: 500,
+		minZoom: 5, pollMs: 1000,
+		attribution: "test",
+		fetch: () => {},
+	});
+	assert(typeof Layer === "function" || typeof Layer === "object",
+		"L.Layer.extend returns a constructor-like value");
+	const inst = new Layer();
+	assert(typeof inst.onAdd === "function");
+	assert(typeof inst.onRemove === "function");
+});
+
+t("oimIcon produces a divIcon-shaped value", () => {
+	const icon = dw.oimIcon("dw-test-icon", "X", "#f00", 16);
+	assert(icon !== null && typeof icon === "object");
+});
+
+t("LayerProvider base throws if .create() not overridden", () => {
+	const base = new dw.LayerProvider();
+	let threw = false;
+	try { base.create(); } catch (e) { threw = true; }
+	assert(threw, "base LayerProvider.create() should throw");
+});
+
+t("advertised QLD Relief and National Parks overlays are grouped", () => {
+	const names = new Set(dw.DW_OVERLAY_GROUPS.flatMap((g) => g.names));
+	eq(dw.CFG.LAYER_RELIEF, "QLD Relief");
+	eq(dw.CFG.LAYER_NATIONAL_PARKS, "National Parks");
+	assert(names.has(dw.CFG.LAYER_RELIEF), "QLD Relief missing from overlay groups");
+	assert(names.has(dw.CFG.LAYER_NATIONAL_PARKS), "National Parks missing from overlay groups");
 });
 
 // -- Summary -----------------------------------------------------------

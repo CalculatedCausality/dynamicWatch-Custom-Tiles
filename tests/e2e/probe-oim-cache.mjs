@@ -1,0 +1,32 @@
+import { chromium } from "playwright";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const browser = await chromium.launch({ headless: true, args: ["--disable-web-security"] });
+const ctx = await browser.newContext({ storageState: resolve(REPO, ".auth/storage.json"), viewport: { width: 1400, height: 900 } });
+await ctx.addInitScript({ content: readFileSync(resolve(REPO, "tests/e2e/lib/bootstrap.js"), "utf8") });
+await ctx.addInitScript({ content: readFileSync(resolve(REPO, "dynamicwatch-custom-tiles.user.js"), "utf8") });
+const page = await ctx.newPage();
+let oimReq = 0;
+page.on("request", (r) => { if (/openinframap|openstreetmap|tiles\.openinfra/i.test(r.url())) oimReq++; });
+await page.goto("https://dynamic.watch/plan", { waitUntil: "domcontentloaded", timeout: 45000 });
+await page.waitForSelector(".leaflet-planner-controls", { timeout: 30000 });
+await page.waitForFunction(() => !!(window._dwLayerCtrl && window._dwLayerCtrl._map), { timeout: 15000 });
+// Enable Power Infrastructure over Brisbane.
+await page.evaluate(() => { const c=window._dwLayerCtrl,m=c._map; m.setView([-27.47,153.03],14); const e=c._layers.find(l=>l.name==="Power Infrastructure"&&l.overlay); if(e&&!m.hasLayer(e.layer))m.addLayer(e.layer); window.__oim=e.layer; });
+await page.waitForTimeout(6000);
+const s1 = await page.evaluate(() => ({ cache: window.__oim._tileEls ? window.__oim._tileEls.size : -1, drawn: window.__oim._group ? window.__oim._group.getLayers().length : -1 }));
+const reqAfterFirst = oimReq;
+// Pan one tile east, then back — back should reuse cached tiles (few/no new reqs).
+await page.evaluate(async () => { const m=window._dwLayerCtrl._map; m.panBy([260,0],{animate:false}); await new Promise(r=>setTimeout(r,2500)); });
+const reqAfterPan = oimReq;
+await page.evaluate(async () => { const m=window._dwLayerCtrl._map; m.panBy([-260,0],{animate:false}); await new Promise(r=>setTimeout(r,2500)); });
+const reqAfterBack = oimReq;
+const s2 = await page.evaluate(() => ({ cache: window.__oim._tileEls.size, drawn: window.__oim._group.getLayers().length }));
+console.log("after first load: ", JSON.stringify(s1), " OIM reqs:", reqAfterFirst);
+console.log("after pan east:    OIM reqs +", reqAfterPan - reqAfterFirst, "(new tiles fetched)");
+console.log("after pan back:    OIM reqs +", reqAfterBack - reqAfterPan, "(should be ~0 — cache hit)");
+console.log("final tile cache:", JSON.stringify(s2));
+console.log(s1.cache > 0 && s1.drawn > 0 && (reqAfterBack - reqAfterPan) <= (reqAfterPan - reqAfterFirst) ? "✓ OIM tile cache reuses on pan-back" : "⚠ check OIM caching");
+await browser.close();

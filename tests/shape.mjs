@@ -22,7 +22,7 @@ const C_RED = "\x1b[31m", C_GREEN = "\x1b[32m", C_DIM = "\x1b[2m", C_OFF = "\x1b
 const CI = process.argv.includes("--ci") || process.argv.includes("-c");
 const c = (col, s) => CI ? s : col + s + C_OFF;
 
-let pass = 0, fail = 0;
+let pass = 0, fail = 0, skip = 0;
 const results = [];
 
 async function test(name, fn) {
@@ -32,6 +32,10 @@ async function test(name, fn) {
 	} catch (e) {
 		fail++; results.push([false, name, e.message]);
 	}
+}
+
+async function skipTest(name, reason) {
+	skip++; results.push([null, name, reason]);
 }
 
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
@@ -82,6 +86,8 @@ function sniffImage(bytes) {
 
 // -- Common constants -------------------------------------------------
 
+const MAPBOX_TOKEN = process.env.MAPBOX_TOKEN || "";
+
 // Brisbane CBD tile coords (matches smoke.sh)
 const TILE = {
 	z08: { x: 236,  y: 148  },
@@ -122,6 +128,23 @@ await test("Strava heatmap → HiDPI PNG (@2x suffix)", async () => {
 		`dimensions: ${w}×${h} (want square ≥512 for HiDPI @2x suffix)`);
 });
 
+await test("Strava heatmap → NO CORS for arbitrary origin (why we bridge it)", async () => {
+	// Strava's CDN sends `Vary: Origin` and only returns
+	// Access-Control-Allow-Origin for allowlisted origins — NOT
+	// dynamic.watch. That's why the 2D layer uses crossOrigin:false and
+	// the 3D layer routes through the GM blob bridge (GM_xmlhttpRequest is
+	// CORS-exempt). If this assertion ever FAILS (ACAO present), Strava
+	// re-opened CORS and we could drop the bridge + restore a plain raster.
+	const r = await fetch(
+		`https://content-a.strava.com/anon/globalheat/all/blue/10/${TILE.z10.x}/${TILE.z10.y}@2x.png?v=19`,
+		{ headers: { Origin: "https://dynamic.watch" } });
+	assertEq(r.status, 200);
+	const acao = r.headers.get("access-control-allow-origin");
+	assert(!acao || acao === "null",
+		`expected NO Access-Control-Allow-Origin for dynamic.watch origin, got "${acao}" ` +
+		`— Strava may have re-opened CORS; the GM bridge could be dropped`);
+});
+
 for (const activity of ["RUNNING", "HIKING", "TRAIL_RUNNING", "ROAD_CYCLING", "MOUNTAIN_BIKING"]) {
 	await test(`Garmin ${activity} → PNG`, async () => {
 		const r = await fetchBuffer(`https://connecttile.garmin.com/${activity}/10/${TILE.z10.x}/${TILE.z10.y}.png`);
@@ -154,6 +177,55 @@ await test("Stamen Terrain (Stadia) → PNG with localhost spoof", async () => {
 		{ headers: { Origin: "http://localhost", Referer: "http://localhost/" } });
 	assertEq(r.status, 200);
 	assertEq(sniffImage(r.body), "png");
+});
+
+if (MAPBOX_TOKEN) await test("Mapbox Terrain-DEM v1 TileJSON resolves (3D Mode terrain source)", async () => {
+	// Mapbox's current DEM (replaces the legacy `mapbox.terrain-rgb`).
+	// Mapbox GL JS fetches the TileJSON to discover the tile URL +
+	// access constraints; that's also the first network round-trip
+	// when `setTerrain({source: "mapbox-dem"})` runs. Keep the token
+	// out of git; run with MAPBOX_TOKEN=pk... to probe this endpoint.
+	const r = await fetch(
+		`https://api.mapbox.com/v4/mapbox.mapbox-terrain-dem-v1.json?access_token=${MAPBOX_TOKEN}`,
+		{ headers: { Origin: "https://dynamic.watch", Referer: "https://dynamic.watch/" } });
+	assertEq(r.status, 200, "TileJSON HTTP — token may lack terrain-dem-v1 scope; fall back to Terrarium");
+	const tj = await r.json();
+	assert(Array.isArray(tj.tiles) && tj.tiles.length > 0, "TileJSON missing `tiles`");
+	assert(/terrain-dem/.test(tj.tiles[0]),
+		"TileJSON `tiles[0]` doesn't reference terrain-dem (got " + tj.tiles[0] + ")");
+});
+else await skipTest("Mapbox Terrain-DEM v1 TileJSON resolves (3D Mode terrain source)",
+	"set MAPBOX_TOKEN to probe terrain TileJSON");
+
+if (MAPBOX_TOKEN) await test("Mapbox Terrain-DEM v1 tile → valid raster (3D Mode terrain source)", async () => {
+	// Now fetch a real tile at z10 over Brisbane and confirm it's
+	// either a PNG or WebP raster with a sensible body length.
+	const r = await fetchBuffer(
+		`https://api.mapbox.com/v4/mapbox.mapbox-terrain-dem-v1/10/${TILE.z10.x}/${TILE.z10.y}.webp?access_token=${MAPBOX_TOKEN}`,
+		{ headers: { Origin: "https://dynamic.watch", Referer: "https://dynamic.watch/" } });
+	assertEq(r.status, 200, "tile HTTP — token-scope or tileset issue");
+	assert(r.body.length > 500, `tile body suspiciously small (${r.body.length}B)`);
+	// WebP signature: bytes 0–3 = "RIFF", 8–11 = "WEBP"; PNG signature
+	// = 0x89,0x50,0x4E,0x47 at the start.
+	const isPng = r.body[0] === 0x89 && r.body[1] === 0x50 &&
+	              r.body[2] === 0x4e && r.body[3] === 0x47;
+	const isWebp = r.body[0] === 0x52 && r.body[1] === 0x49 &&
+	               r.body[2] === 0x46 && r.body[3] === 0x46 &&
+	               r.body[8] === 0x57 && r.body[9] === 0x45 &&
+	               r.body[10] === 0x42 && r.body[11] === 0x50;
+	assert(isPng || isWebp, "expected PNG or WebP raster signature");
+});
+else await skipTest("Mapbox Terrain-DEM v1 tile → valid raster (3D Mode terrain source)",
+	"set MAPBOX_TOKEN to probe terrain tile");
+
+await test("Mapbox GL JS CDN (v3.7.0) reachable + non-trivial", async () => {
+	const r = await fetch("https://api.mapbox.com/mapbox-gl-js/v3.7.0/mapbox-gl.js");
+	assertEq(r.status, 200, "CDN HTTP");
+	const text = await r.text();
+	// v3 ships a UMD bundle with `mapboxgl` exposed as a global. The
+	// userscript depends on that global existing after script load.
+	assert(text.includes("mapboxgl"), "script body missing 'mapboxgl' reference");
+	assert(text.length > 100000,     `body suspiciously small (${text.length}B)`);
 });
 
 // ----- Vector tiles (PBF, decoded with userscript's own mvtDecode) -----
@@ -391,9 +463,112 @@ await test("QLD token endpoint → HTTP 500 + {error} on bare POST", async () =>
 	assertHasKeys(data, ["error"]);
 });
 
-await test("Geocaching.com search/v2 → HTTP 401 on anon", async () => {
-	const r = await fetch("https://www.geocaching.com/api/proxy/web/search/v2?box=-27.4,153.0,-27.5,153.1&take=10");
-	assertEq(r.status, 401);
+await test("Geocaching.com UTFGrid → encodes cache code + name per cell", async () => {
+	// Probes the public tile-info endpoint at a cache-dense Brisbane
+	// tile and verifies the response is the same UTFGrid shape the
+	// userscript depends on: `keys[]` of "(cx, cy)" strings + `data{}`
+	// mapping each key to `{i: GC<code>, n: <name>}`. If Groundspeak
+	// ever changes the encoding or starts auth-gating this endpoint,
+	// the layer breaks silently — this test catches it.
+	//
+	// WARM FIRST: map.info returns HTTP 204 for "cold" tiles (not
+	// recently rendered server-side). A map.png GET triggers generation,
+	// after which map.info returns the grid. The userscript does exactly
+	// this (warm-on-204); we replicate it here so the test is
+	// deterministic regardless of whether the tile happens to be warm.
+	await fetch("https://tiles01.geocaching.com/map.png?x=3789&y=2373&z=12", {
+		headers: { Referer: "https://www.geocaching.com/play/map" },
+	});
+	const r = await fetch("https://tiles01.geocaching.com/map.info?x=3789&y=2373&z=12", {
+		headers: { Referer: "https://www.geocaching.com/play/map" },
+	});
+	assertEq(r.status, 200);
+	const j = await r.json();
+	if (!Array.isArray(j.keys) || j.keys.length < 50) {
+		throw new Error(`expected >=50 keys, got ${j.keys && j.keys.length}`);
+	}
+	if (!Array.isArray(j.grid) || j.grid.length !== 64) {
+		throw new Error(`expected grid[64], got ${j.grid && j.grid.length}`);
+	}
+	const firstNonEmptyKey = j.keys.find((k) => k);
+	if (!/^\(\d+,\s*\d+\)$/.test(firstNonEmptyKey)) {
+		throw new Error(`key not in (cx, cy) form: ${firstNonEmptyKey}`);
+	}
+	const raw = j.data[firstNonEmptyKey];
+	const entry = Array.isArray(raw) ? raw[0] : raw;
+	if (!entry || !entry.i || !entry.n) {
+		throw new Error(`data entry missing i/n: ${JSON.stringify(raw)}`);
+	}
+	if (!/^GC[0-9A-Z]+$/.test(entry.i)) {
+		throw new Error(`cache code not GC… form: ${entry.i}`);
+	}
+});
+
+await test("Geocaching.com map.details → success JSON with D/T/owner/type", async () => {
+	// Per-cache enrichment endpoint. The userscript calls this on
+	// marker click; if the schema changes (`difficulty`, `terrain`,
+	// `owner`, `type`, `available`, `fp`), our enriched tooltip
+	// degrades silently — pin the shape here.
+	const r = await fetch("https://tiles01.geocaching.com/map.details?i=GC60ZN7", {
+		headers: { Referer: "https://www.geocaching.com/play/map" },
+	});
+	assertEq(r.status, 200);
+	const j = await r.json();
+	assertEq(j.status, "success");
+	const row = j.data && j.data[0];
+	if (!row) throw new Error("no data[0] row");
+	for (const f of ["gc", "name", "difficulty", "terrain", "container", "type", "owner", "available"]) {
+		if (!(f in row)) throw new Error(`missing field: ${f}`);
+	}
+	if (typeof row.available !== "boolean") {
+		throw new Error(`available not bool: ${typeof row.available}`);
+	}
+});
+
+await test("Geocaching map.png → NO CORS for arbitrary origin (why crossOrigin:false)", async () => {
+	// map.png sends no Access-Control-Allow-Origin, so the icon tile
+	// layer MUST be a plain <img> (crossOrigin:false) — a CORS-enabled
+	// image fails its check and renders nothing in a real browser (the
+	// e2e harness masks this with --disable-web-security). If this
+	// assertion ever FAILS (ACAO appears), Groundspeak opened CORS and
+	// crossOrigin could be re-enabled if pixel reads are ever needed.
+	const r = await fetch("https://tiles01.geocaching.com/map.png?x=3789&y=2373&z=12", {
+		headers: { Origin: "https://dynamic.watch", Referer: "https://www.geocaching.com/play/map" },
+	});
+	assertEq(r.status, 200);
+	const acao = r.headers.get("access-control-allow-origin");
+	assert(!acao || acao === "null",
+		`expected NO ACAO on map.png, got "${acao}" — Groundspeak may have opened CORS`);
+});
+
+await test("Geocaching.com cold-tile warming → png GET unlocks map.info", async () => {
+	// Pins the load-bearing warm-on-204 contract: map.info 204s for a
+	// cold tile; a map.png GET warms it; map.info then returns the grid.
+	// If Groundspeak ever changes this (e.g. serves map.info directly, or
+	// stops honouring the png-warm), the userscript's 3-round-trip cold
+	// path becomes wrong and this test tells us to simplify it.
+	//
+	// We can't guarantee a given tile is COLD (another client may have
+	// warmed it), so we only assert the POSITIVE direction: after a png
+	// GET, map.info returns 200 with a grid. That holds whether the tile
+	// was warm already or we just warmed it — which is exactly the
+	// invariant the layer relies on. Use a quiet rural tile to maximise
+	// the chance we're actually exercising the warm path.
+	const tile = "x=3787&y=2364&z=12"; // Maleny hinterland, QLD
+	await fetch(`https://tiles01.geocaching.com/map.png?${tile}`, {
+		headers: { Referer: "https://www.geocaching.com/play/map" },
+	});
+	const r = await fetch(`https://tiles01.geocaching.com/map.info?${tile}`, {
+		headers: { Referer: "https://www.geocaching.com/play/map" },
+	});
+	// 200 (warmed, has caches) is the success case. 204 is acceptable
+	// ONLY if the tile genuinely has no caches — but Maleny does, so a
+	// 204 here means the png-warm contract broke.
+	assertEq(r.status, 200);
+	const j = await r.json();
+	if (!Array.isArray(j.keys)) {
+		throw new Error("warmed tile did not return a UTFGrid");
+	}
 });
 
 // ----- Auth-gated end-to-end (bootstrap + use the credential) -----
@@ -618,8 +793,9 @@ console.log("shape tests");
 console.log("===========");
 for (const [ok, name, err] of results) {
 	if (ok) console.log(`  ${c(C_GREEN, "PASS")}  ${name}`);
+	else if (ok === null) console.log(`  SKIP  ${name}\n        ${c(C_DIM, err)}`);
 	else    console.log(`  ${c(C_RED, "FAIL")}  ${name}\n        ${c(C_DIM, err)}`);
 }
 console.log("");
-console.log(`${pass} passed, ${fail} failed`);
+console.log(`${pass} passed, ${fail} failed, ${skip} skipped`);
 process.exit(fail ? 1 : 0);

@@ -6,7 +6,7 @@
 #   3. Response is at least N bytes (catches empty/error JSON masquerading
 #      as success)
 #
-# Auth-gated layers (QLD imagery, Apple Maps, Geocaching) are listed but
+# Auth-gated layers (QLD imagery, Apple Maps) are listed but
 # skipped — they need credentials this script doesn't have. If a public
 # endpoint regresses upstream, this is the test that fires.
 #
@@ -147,6 +147,19 @@ probe "Stamen Terrain (Stadia spoof)" "image/png" 50 \
 	"https://tiles.stadiamaps.com/tiles/stamen_terrain/10/947/593.png" \
 	-H "Origin: http://localhost" -H "Referer: http://localhost/"
 
+# 3D Mode: Mapbox Terrain-DEM v1 — Mapbox GL JS fetches the TileJSON
+# first to discover the tile URL pattern. Keep the token out of git;
+# run with MAPBOX_TOKEN=pk... to probe this endpoint locally.
+if [ -n "${MAPBOX_TOKEN:-}" ]; then
+	probe "Mapbox Terrain-DEM v1 TileJSON" "application/json" 500 \
+		"https://api.mapbox.com/v4/mapbox.mapbox-terrain-dem-v1.json?access_token=${MAPBOX_TOKEN}" \
+		-H "Origin: https://dynamic.watch" -H "Referer: https://dynamic.watch/"
+else
+	log_skip "Mapbox Terrain-DEM v1 TileJSON" "set MAPBOX_TOKEN to probe terrain TileJSON"
+fi
+probe "Mapbox GL JS CDN (v3.7.0)"     "javascript" 100000 \
+	"https://api.mapbox.com/mapbox-gl-js/v3.7.0/mapbox-gl.js"
+
 echo ""
 echo "--- Vector tiles (PBF) ---"
 
@@ -247,15 +260,33 @@ else
 	log_fail "QLD token endpoint alive" "HTTP $qld_token_code, ${qld_token_size}B (want 500 + error)"
 fi
 
-# Geocaching.com — confirm endpoint exists + 401 on anon. If it ever
-# starts returning 200 anon, that means the auth model changed.
+# Geocaching.com — confirm the PUBLIC tile-info UTFGrid endpoint is
+# alive without auth. map.info can return HTTP 204 on cold tiles until
+# the visible map.png request warms the backend, which is also the order
+# the production layer uses.
+curl -sS -o /dev/null --max-time 15 \
+	-H "Referer: https://www.geocaching.com/play/map" \
+	"https://tiles01.geocaching.com/map.png?x=3789&y=2373&z=12" || true
 gc_rsp=$(curl -sS -o "$TMP" -w "%{http_code}|%{size_download}" --max-time 15 \
-	"https://www.geocaching.com/api/proxy/web/search/v2?box=-27.4,153.0,-27.5,153.1&take=10")
+	-H "Referer: https://www.geocaching.com/play/map" \
+	"https://tiles01.geocaching.com/map.info?x=3789&y=2373&z=12")
 gc_code=$(echo "$gc_rsp" | cut -d'|' -f1)
-if [ "$gc_code" = "401" ]; then
-	log_pass "Geocaching.com search/v2"  "HTTP 401 (anon, as expected — auth required)"
+gc_size=$(echo "$gc_rsp" | cut -d'|' -f2)
+if [ "$gc_code" = "200" ] && [ "$gc_size" -gt 1000 ]; then
+	log_pass "Geocaching.com UTFGrid"   "HTTP 200, ${gc_size}B (Brisbane z=12 cell-coded cache list)"
 else
-	log_fail "Geocaching.com search/v2"  "HTTP $gc_code (expected 401)"
+	log_fail "Geocaching.com UTFGrid"   "HTTP $gc_code, ${gc_size}B (expected 200 with non-trivial body)"
+fi
+# And map.details — proves the per-cache enrichment path also still works.
+gc_det_rsp=$(curl -sS -o "$TMP" -w "%{http_code}|%{size_download}" --max-time 10 \
+	-H "Referer: https://www.geocaching.com/play/map" \
+	"https://tiles01.geocaching.com/map.details?i=GC60ZN7")
+gc_det_code=$(echo "$gc_det_rsp" | cut -d'|' -f1)
+gc_det_size=$(echo "$gc_det_rsp" | cut -d'|' -f2)
+if [ "$gc_det_code" = "200" ] && [ "$gc_det_size" -gt 100 ]; then
+	log_pass "Geocaching.com map.details" "HTTP 200, ${gc_det_size}B (success JSON for GC60ZN7)"
+else
+	log_fail "Geocaching.com map.details" "HTTP $gc_det_code, ${gc_det_size}B (expected 200)"
 fi
 
 echo ""
@@ -266,7 +297,6 @@ log_skip "QLD Roads"               "needs QLD token"
 log_skip "QLD Historical photos"   "needs QLD photos token (separate scope)"
 log_skip "Apple Maps tiles"        "needs DuckDuckGo JWT → Apple bootstrap (DDG JWT tested above)"
 log_skip "Esri Wayback tile"       "needs release num from catalog (catalog tested above)"
-log_skip "Geocaching.com results"  "needs logged-in geocaching.com session cookie (liveness tested above)"
 log_skip "MarineTraffic vessels"   "Cloudflare-blocked anon, needs browser-realistic session"
 
 echo ""

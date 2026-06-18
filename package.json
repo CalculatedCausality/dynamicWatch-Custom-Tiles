@@ -1,0 +1,32 @@
+{
+  "name": "dynamicwatch-custom-tiles",
+  "version": "0.0.0",
+  "private": true,
+  "description": "dynamic.watch userscript + test harness",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-userscript.mjs",
+    "check": "npm run build && node --check dynamicwatch-custom-tiles.user.js",
+    "test": "npm run build && bash tests/run.sh",
+    "e2e:install": "playwright install chromium",
+    "e2e:auth": "node tests/e2e/save-auth.mjs",
+    "e2e:check": "node tests/e2e/run-3d-check.mjs",
+    "e2e:check:headed": "HEADED=1 node tests/e2e/run-3d-check.mjs",
+    "e2e:asserts": "node tests/e2e/run-3d-asserts.mjs",
+    "e2e:asserts:headed": "HEADED=1 node tests/e2e/run-3d-asserts.mjs",
+    "e2e:geocaches": "node tests/e2e/verify-geocaches.mjs",
+    "e2e:geocaches:headed": "HEADED=1 node tests/e2e/verify-geocaches.mjs",
+    "e2e:diag-layers": "node tests/e2e/diag-layers.mjs",
+    "e2e:diag-layers:headed": "HEADED=1 node tests/e2e/diag-layers.mjs",
+    "e2e:stamen-3d": "node tests/e2e/verify-stamen-3d.mjs",
+    "e2e:heatmaps-3d": "node tests/e2e/verify-heatmaps-3d.mjs",
+    "e2e:hist-3d": "node tests/e2e/verify-hist-3d.mjs",
+    "e2e:mobile-ident": "node tests/e2e/verify-mobile-ident.mjs",
+    "e2e:cadastre": "node tests/e2e/verify-cadastre.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "esbuild": "^0.28.1",
+    "playwright": "^1.49.0"
+  }
+}

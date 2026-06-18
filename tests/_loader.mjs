@@ -12,8 +12,11 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_PATH = path.join(HERE, "..", "dynamicwatch-custom-tiles.user.js");
 
 const HELPERS = [
+	// config/grouping
+	"CFG", "DW_LAYER_GROUPS", "DW_OVERLAY_GROUPS",
 	// tile geometry
-	"tileToBBox4326", "tileToBBox3857",
+	"tileToBBox4326", "tileToBBox3857", "utfGridCellToLatLng",
+	"_overzoomPlacement",
 	// MVT / protobuf
 	"mvtDecode", "parseLayer", "parseValue", "parseFeature",
 	"decodeGeometry", "zig", "readVarint", "skipField", "utf8",
@@ -22,25 +25,16 @@ const HELPERS = [
 	// INTVL formatters
 	"intvlActivityTime", "intvlAgo", "intvlArea",
 	// Cadastre / OnTheHouse formatters (underscore-prefixed module-scope)
-	"_cadVal", "_escHtml", "_fmtPrice", "_fmtDate",
+	"_cadVal", "_escHtml", "esc", "_safeColor", "_fmtPrice", "_fmtDate",
 	"_slugify", "_othStreetTypeSlug", "_othCanonicalUrlFromLocation",
 	"_formatCadastreTooltip", "_formatAddressLine",
+	// Layer-provider factories
+	"LayerProvider", "tileProvider", "tokenTileProvider",
+	"arcgisExportProvider", "pollingDataLayer", "oimIcon",
 ];
 
 export function loadHelpers() {
 	const raw = fs.readFileSync(SCRIPT_PATH, "utf8");
-	const patched = raw
-		.replace(
-			/new CustomTilesApp\(\)\.boot\(\);/,
-			"/* boot disabled for tests */",
-		)
-		.replace(
-			/(\}\)\(\);\s*)$/,
-			`globalThis.__dw = { ${HELPERS.join(", ")} };\n$1`,
-		);
-	if (!patched.includes("globalThis.__dw")) {
-		throw new Error("failed to inject export hook — IIFE shape changed?");
-	}
 
 	const noop = () => {};
 	const stubExtend = (proto) => function (opts) {
@@ -115,6 +109,8 @@ export function loadHelpers() {
 		L,
 		navigator: { clipboard: { writeText: () => Promise.resolve() }, language: "en-US" },
 		localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+		__DW_TEST_EXPORTS__: true,
+		__DW_DISABLE_BOOT__: true,
 		GM_getValue: (_k, d) => d,
 		GM_setValue: noop,
 		GM_xmlhttpRequest: () => ({ abort: noop }),
@@ -123,7 +119,10 @@ export function loadHelpers() {
 	sandbox.globalThis = sandbox;
 
 	vm.createContext(sandbox);
-	vm.runInContext(patched, sandbox, { filename: "userscript-under-test.js" });
+	vm.runInContext(raw, sandbox, { filename: "userscript-under-test.js" });
 	if (!sandbox.__dw) throw new Error("helpers not exported from sandbox");
+	for (const name of HELPERS) {
+		if (!(name in sandbox.__dw)) throw new Error(`helper not exported: ${name}`);
+	}
 	return sandbox.__dw;
 }

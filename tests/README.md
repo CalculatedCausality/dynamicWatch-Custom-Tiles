@@ -5,6 +5,7 @@ Regression coverage for `dynamicwatch-custom-tiles.user.js`.
 ## Run
 
 ```bash
+npm test                 # rebuild bundle, then run all suites
 bash tests/run.sh        # all three suites, coloured output
 bash tests/run.sh --ci   # plain text, log-scrapable, same exit code
 ```
@@ -12,17 +13,18 @@ bash tests/run.sh --ci   # plain text, log-scrapable, same exit code
 Exits with the sum of failures. Run individual suites:
 
 ```bash
-node tests/unit.mjs        # 19 tests, no network, ~200 ms
-bash tests/smoke.sh         # 32 tests + 7 skips, ~15 s
-node tests/shape.mjs        # 32 tests, ~10 s
+node tests/unit.mjs        # 57 tests, no network, ~200 ms
+bash tests/smoke.sh         # 34 tests + 7 skips, ~15 s
+node tests/shape.mjs        # 42 tests + 2 skips, ~15 s
 ```
 
 ## Three layers, increasing depth
 
-### `unit.mjs` — pure helpers (19 tests, no network)
+### `unit.mjs` — pure helpers (57 tests, no network)
 
-Loads the userscript via `_loader.mjs` in a `vm.createContext` sandbox
-(Leaflet + GM + browser globals stubbed; `boot()` no-op'd). Asserts the
+Loads the bundled userscript via `_loader.mjs` in a `vm.createContext`
+sandbox (Leaflet + GM + browser globals stubbed; boot disabled by test
+flags). Asserts the
 pure code paths the script relies on every frame:
 
 - `tileToBBox4326` / `tileToBBox3857` — world coverage, four-quadrant
@@ -35,8 +37,9 @@ pure code paths the script relies on every frame:
 - `intvlActivityTime` — cuid v1 prefix decode, garbage rejection
 - `intvlAgo` — today / yesterday / N days ago
 - `intvlArea` — m² under 0.1 km², km² with magnitude-aware precision
+- layer-provider factories and overlay group registration
 
-### `smoke.sh` — endpoint liveness (32 tests, 7 skips)
+### `smoke.sh` — endpoint liveness (34 tests, 7 skips)
 
 Each test fetches one representative request over Brisbane CBD
 (`-27.4698, 153.0251`) and verifies:
@@ -49,21 +52,25 @@ Coverage by group:
 
 | Group | Tests |
 | --- | --- |
-| Raster XYZ | Google Hybrid, OpenSeaMap, Strava, Garmin (all 5 activities), QLD Topo + Relief + Labels, Stamen via Stadia (localhost spoof) |
+| Raster XYZ | Google Hybrid, OpenSeaMap, Strava, Garmin (all 5 activities), QLD Topo + Relief + Labels, Stamen via Stadia (localhost spoof), Mapbox GL JS CDN |
 | Vector tiles | INTVL global, OpenInfraMap power + telecoms + water |
 | ArcGIS exportImage | ACCC Mobile Coverage, QLD QPWS Estate, QLD Cadastre |
 | WMS | Light Pollution (grid-aligned z=10 bbox) |
 | JSON APIs | OpenSky, QPWS national-park query, Wayback catalog, Cadastre `/identify` + attribute query, QLD AerialOrtho query, OnTheHouse locations + property + events |
-| Auth liveness | Apple DDG JWT (200 + JWT shape), QLD token endpoint (500 + structured error), Geocaching search/v2 (401 anon) |
-| Auth-gated (skipped) | QLD Globe + Roads + Historical photos (QLD token bootstrap), Apple tiles (DDG → Apple), Wayback tile, Geocaching results, MarineTraffic (Cloudflare-blocked anon) |
+| Auth liveness | Apple DDG JWT (200 + JWT shape), QLD token endpoint (500 + structured error), Geocaching UTFGrid (200, cell-coded list), Geocaching map.details (success JSON) |
+| Auth-gated / tokened (skipped) | Mapbox Terrain-DEM TileJSON unless `MAPBOX_TOKEN` is set, QLD Globe + Roads + Historical photos (QLD token bootstrap), Apple tiles (DDG → Apple), Wayback tile, MarineTraffic (Cloudflare-blocked anon) |
 
-### `shape.mjs` — structural validation (32 tests)
+### `shape.mjs` — structural validation (42 tests, 2 skips)
 
 The same endpoints but with deep assertions on response structure. This
 catches the case where an upstream silently renames a field or changes a
 type — smoke would still pass, shape would fail. Uses the userscript's
 own `mvtDecode` (loaded via `_loader.mjs`) so PBF decoding is exercised
 end-to-end with the same code the script runs in the browser.
+
+Mapbox Terrain-DEM structural probes are opt-in so no Mapbox token is
+committed to the repository. Run with `MAPBOX_TOKEN=pk...` to include
+the TileJSON and terrain-raster checks.
 
 What gets validated per type:
 
@@ -102,7 +109,8 @@ What gets validated per type:
   (`SoldEvent`/`ForRentEvent`/`ListedEvent`/`WithdrawnEvent`)
 - **Apple DDG JWT** — body matches `/^[\w-]+\.[\w-]+\.[\w-]+$/`
 - **QLD token endpoint** — `POST {}` returns HTTP 500 + `{error}`
-- **Geocaching search/v2** — anon → HTTP 401
+- **Geocaching UTFGrid** — anon → HTTP 200, `keys[]` of `(cx, cy)` strings, `data[k]` = array of `{i: GC<code>, n: <name>}`
+- **Geocaching map.details** — anon → `{status: "success", data: [{gc, name, difficulty, terrain, container, type, owner, available}]}`
 
 ## Adding tests
 
@@ -142,8 +150,8 @@ it's exported from the sandbox. Then write a `t(name, fn)` assertion.
 
 ### An auth-gated layer
 
-The 7 `SKIP` entries in `smoke.sh` are placeholders for layers that need
-real credentials. To wire one up, implement its bootstrap (the
+The `SKIP` entries in `smoke.sh` are placeholders for layers that need
+real credentials or an explicit local token. To wire one up, implement its bootstrap (the
 `QldTokenManager` / `AppleTokenManager` flows can be lifted from the
 userscript), acquire the token, and probe the tile URL. Worth doing
 only if you actively need that coverage — the credential dance is
