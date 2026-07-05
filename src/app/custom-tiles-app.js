@@ -1072,9 +1072,14 @@ export class CustomTilesApp {
 			".dw-scc-det-sec { margin-bottom: 5px; }",
 			".dw-scc-det-sec b { font-weight: 700; font-size: 11px; }",
 			".dw-scc-stages { max-height: 150px; overflow-y: auto; margin-top: 3px; }",
-			".dw-scc-stage { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; line-height: 1.45; padding: 1px 0; border-bottom: 1px dotted #eee; }",
-			".dw-scc-stage-desc { color: #374151; }",
-			".dw-scc-stage-val { color: #6b7280; text-align: right; flex-shrink: 0; }",
+			// flex-wrap + a min share for the description keep these rows
+			// readable in ANY container: a long meta ("In Progress ·
+			// lodged 26 Jun 2019") wraps under the description instead of
+			// crushing it into a one-word-per-line column (as happened in
+			// the site's location popup) or overflowing the popup edge.
+			".dw-scc-stage { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 10px; font-size: 11px; line-height: 1.45; padding: 2px 0; border-bottom: 1px dotted #eee; }",
+			".dw-scc-stage-desc { flex: 1 1 62%; min-width: 0; overflow-wrap: break-word; color: #374151; }",
+			".dw-scc-stage-val { flex: 0 1 auto; margin-left: auto; max-width: 100%; color: #6b7280; text-align: right; }",
 			".dw-cad-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
 			".dw-cad-tip b { font-weight: 700; }",
 			".dw-cad-tip .dw-cad-sub { color: #6b7280; }",
