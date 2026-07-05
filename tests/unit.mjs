@@ -664,6 +664,72 @@ t("SCC Applications overlay is registered and grouped", () => {
 		"SCC Applications missing from overlay groups");
 });
 
+t("_deviDetailUrl maps kind to Development.i layer type", () => {
+	eq(dw._deviDetailUrl("DA", "REC02/0156.04"),
+		"https://developmenti.sunshinecoast.qld.gov.au/Home/ApplicationDetail" +
+		"?type=plan_scc_development_apps_unique&id=REC02%2F0156.04");
+	assert(dw._deviDetailUrl("BA", "PC26/1").includes("building_apps_unique"));
+	assert(dw._deviDetailUrl("PL", "PLQ26/1").includes("plumbing_apps_unique"));
+	eq(dw._deviDetailUrl("DA", "<img src=x>"), "", "unsafe id rejected");
+	eq(dw._deviDetailUrl("XX", "PC26/1"), "", "unknown kind rejected");
+});
+
+// Fixture mirrors the real ApplicationDetail fragment's shapes:
+// thead row without a date span, data rows with data-date-number,
+// property anchors with landNumber links.
+const SCC_DETAIL_FIXTURE = `
+	<p><a href='/Home/PropertyDetailsView?landNumber=1530850' target="_blank">Elizabeth St NAMBOUR QLD 4560</a></p>
+	<p><a href='/Home/PropertyDetailsView?landNumber=1530851' target="_blank">83 Elizabeth &amp; Co St NAMBOUR</a></p>
+	<table class="table table-bordered">
+		<thead><tr><td>Description</td><td>Decision</td><td>Date</td></tr></thead>
+		<tr>
+			<td>   What type of change has been requested?</td>
+			<td>Minor Change To Application</td>
+			<td><span class="date-number" data-date-number="1733443200000"></span></td>
+		</tr>
+		<tr>
+			<td>   Applicants Resp &lt;pending&gt;</td>
+			<td></td>
+			<td><span class="date-number" data-date-number="0"></span></td>
+		</tr>
+	</table>`;
+
+t("_parseSccDetailHtml extracts properties + stages, skips thead", () => {
+	const d = dw._parseSccDetailHtml(SCC_DETAIL_FIXTURE);
+	deepEq(d.properties, [
+		"Elizabeth St NAMBOUR QLD 4560",
+		"83 Elizabeth & Co St NAMBOUR",
+	], "addresses decoded");
+	eq(d.stages.length, 2, "two data rows, thead skipped");
+	eq(d.stages[0].desc, "What type of change has been requested?");
+	eq(d.stages[0].decision, "Minor Change To Application");
+	eq(d.stages[0].dateMs, 1733443200000);
+	eq(d.stages[1].desc, "Applicants Resp <pending>", "entities decoded");
+	eq(d.stages[1].dateMs, 0);
+});
+
+t("_renderSccDetail re-escapes decoded text and handles empty", () => {
+	const d = dw._parseSccDetailHtml(SCC_DETAIL_FIXTURE);
+	const html = dw._renderSccDetail(d);
+	assert(html.includes("Elizabeth &amp; Co"), "ampersand re-escaped");
+	assert(html.includes("&lt;pending&gt;"), "angle brackets re-escaped");
+	assert(!html.includes("<pending>"), "no raw tag injection");
+	assert(html.includes("Assessment stages"), "stages section present");
+	assert(dw._renderSccDetail(null).includes("No further detail"),
+		"null → graceful message");
+	assert(dw._renderSccDetail({ properties: [], stages: [] })
+		.includes("No further detail"), "empty → graceful message");
+});
+
+t("SCC submenu state defaults to current-only and survives junk", () => {
+	const def = dw._sccDefaultState();
+	assert(def.DA_live && def.BA_live && def.PL_live, "current sets on");
+	assert(!def.DA_past && !def.BA_past && !def.PL_past, "decided sets off");
+	// Sandbox GM_getValue returns the default "{}" — loader must fall
+	// back cleanly to defaults (also covers corrupt-JSON path).
+	deepEq(dw._sccLoadState(), def, "empty storage → defaults");
+});
+
 t("advertised QLD Relief and National Parks overlays are grouped", () => {
 	const names = new Set(dw.DW_OVERLAY_GROUPS.flatMap((g) => g.names));
 	eq(dw.CFG.LAYER_RELIEF, "QLD Relief");

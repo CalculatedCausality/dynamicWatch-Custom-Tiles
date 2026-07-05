@@ -20,9 +20,14 @@ import {
 import { oimIcon } from './providers/openinframap.js';
 import {
 	_deviAppUrl,
+	_deviDetailUrl,
 	_fmtSccDate,
 	_formatSccPopup,
 	_formatSccTooltip,
+	_parseSccDetailHtml,
+	_renderSccDetail,
+	_sccDefaultState,
+	_sccLoadState,
 } from './providers/scc-applications.js';
 import { _escHtml, esc, _safeColor, _fmtPrice, _fmtDate } from './utils/html.js';
 import { hexAlpha, pointInRing, intvlActivityTime, intvlAgo, intvlArea } from './utils/intvl.js';
@@ -72,6 +77,8 @@ export function bootUserscript() {
 			_slugify, _othStreetTypeSlug, _othCanonicalUrlFromLocation,
 			_formatCadastreTooltip, _formatAddressLine,
 			_deviAppUrl, _fmtSccDate, _formatSccTooltip, _formatSccPopup,
+			_sccDefaultState, _sccLoadState,
+			_deviDetailUrl, _parseSccDetailHtml, _renderSccDetail,
 			LayerProvider, tileProvider, tokenTileProvider,
 			arcgisExportProvider, pollingDataLayer, oimIcon,
 		};

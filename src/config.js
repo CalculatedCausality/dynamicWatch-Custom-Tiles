@@ -84,7 +84,12 @@ export const CFG = {
 	LAYER_TOPO:    "QLD Topo",
 	LAYER_INTVL_GLOBAL: "INTVL Global Map",
 	LAYER_GEOCACHING: "Geocaches",
+	// Single layer-panel entry; which Development.i sublayers show
+	// (dev/building/plumbing × current/decided) is picked in the on-map
+	// submenu that appears while the overlay is active. Selection is
+	// persisted under SCC_APPS_STATE_KEY.
 	LAYER_SCC_APPS: "SCC Applications",
+	SCC_APPS_STATE_KEY: "dw_scc_apps_filters",
 	MODE_3D_STATE_KEY: "dw_mode_3d_on",
 	OVERLAY_STATE_KEY: "dw_active_overlays",
 

@@ -1024,6 +1024,25 @@ export class CustomTilesApp {
 			".dw-scc-pop-desc { margin: 4px 0; }",
 			".dw-scc-pop .dw-scc-sub { display: block; margin-top: 2px; }",
 			".dw-scc-link { display: inline-block; margin-top: 6px; font-weight: 600; }",
+			// Floating sublayer picker shown while the overlay is active
+			// (dev/building/plumbing × current/decided checkboxes).
+			".dw-scc-panel { position: absolute; right: 10px; bottom: 30px; z-index: 1000; background: rgba(255,255,255,0.96); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); padding: 7px 10px; font-size: 11px; font-family: sans-serif; line-height: 1.6; user-select: none; }",
+			".dw-scc-panel-hd { font-weight: 700; font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 3px; }",
+			".dw-scc-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }",
+			".dw-scc-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }",
+			".dw-scc-row-label { width: 78px; }",
+			".dw-scc-row label { display: flex; align-items: center; gap: 3px; cursor: pointer; margin: 0; font-weight: normal; }",
+			".dw-scc-row input { margin: 0; }",
+			".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
+			// Deep-detail section inside the application popup (assessment
+			// stages + associated parcels, auto-loaded from Development.i).
+			".dw-scc-detail { border-top: 1px solid #e5e7eb; margin-top: 6px; padding-top: 6px; }",
+			".dw-scc-det-sec { margin-bottom: 5px; }",
+			".dw-scc-det-sec b { font-weight: 700; font-size: 11px; }",
+			".dw-scc-stages { max-height: 150px; overflow-y: auto; margin-top: 3px; }",
+			".dw-scc-stage { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; line-height: 1.45; padding: 1px 0; border-bottom: 1px dotted #eee; }",
+			".dw-scc-stage-desc { color: #374151; }",
+			".dw-scc-stage-val { color: #6b7280; text-align: right; flex-shrink: 0; }",
 			".dw-cad-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
 			".dw-cad-tip b { font-weight: 700; }",
 			".dw-cad-tip .dw-cad-sub { color: #6b7280; }",

@@ -107,4 +107,5 @@ export const _CACHE_TTL = {
 	OTH_LOCATIONS:  7 * 24 * 3600 * 1000,
 	OTH_PROPERTY:       6 * 3600 * 1000,
 	OTH_EVENTS:        24 * 3600 * 1000,
+	SCC_DETAIL:         6 * 3600 * 1000,
 };
