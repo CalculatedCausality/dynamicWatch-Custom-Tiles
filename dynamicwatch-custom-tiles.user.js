@@ -5178,14 +5178,16 @@
   }
   function _formatSccTooltip(p, kind, live) {
     const meta = _KIND[kind];
-    const lines = [];
     const status = live ? p.progress || "In Progress" : p.decision || "Decided";
+    const chip = live ? "dw-scc-chip--live" : "dw-scc-chip--past";
+    const lines = [];
     lines.push(
-      esc`<b>${p.ram_id || "Application"}</b> · ${meta.label} — ${status}`
+      esc`<span class="dw-scc-tip-hd"><b>${p.ram_id || "Application"}</b>` + `<span class="dw-scc-chip ${chip}">${_escHtml(status)}</span></span>`
     );
     const cat = String(p.category_desc || "").trim();
-    if (cat) lines.push(_escHtml(cat));
-    const desc = _clip(p.description, 110);
+    const catLine = [meta.label, cat && cat !== meta.label ? cat : ""].filter(Boolean).join(" · ");
+    if (catLine) lines.push(esc`<span class="dw-scc-tip-cat">${catLine}</span>`);
+    const desc = _clip(p.description, 90);
     if (desc) lines.push(esc`<span class="dw-scc-sub">${desc}</span>`);
     const when = live ? p.d_date_rec ? "Lodged " + _fmtSccDate(p.d_date_rec) : "" : p.d_decision_made ? "Decided " + _fmtSccDate(p.d_decision_made) : "";
     if (when) lines.push(esc`<span class="dw-scc-sub">${when}</span>`);
@@ -5272,6 +5274,106 @@
     }
     return out;
   }
+  function _deviKindFromCategory(category) {
+    const c = String(category || "").toLowerCase();
+    if (c === "building") return "BA";
+    if (c === "plumbing") return "PL";
+    return "DA";
+  }
+  function _histFromFilterResults(data, excludeNum) {
+    const seen = new Set(excludeNum ? [excludeNum] : []);
+    const hist = [];
+    for (const f of _dedupeDeviFeatures(data)) {
+      const p = f.properties || {};
+      const num = p.application_number;
+      if (seen.has(num)) continue;
+      seen.add(num);
+      hist.push({
+        num,
+        kind: _deviKindFromCategory(p.category),
+        desc: String(p.description || ""),
+        progress: String(p.progress || ""),
+        decision: String(p.decision_desc || "").trim(),
+        dateMs: Date.parse(p.date_received || "") || 0,
+        decidedMs: Date.parse(p.date_determined || "") || 0
+      });
+    }
+    hist.sort((a, b) => b.dateMs - a.dateMs);
+    return hist;
+  }
+  function _decisionClass(decision) {
+    const d = String(decision || "").toLowerCase();
+    if (/refus|withdraw|not proceed|returned/.test(d)) return "dw-scc-dec--bad";
+    if (/approv|permit|agree|finalis|accept|compl/.test(d)) return "dw-scc-dec--ok";
+    return "";
+  }
+  function _histRowHtml(h, focalBase) {
+    const url = _deviAppUrl(h.kind, h.num);
+    const numHtml = url ? `<a href="${_escHtml(url)}" target="_blank" rel="noreferrer"><b>${_escHtml(h.num)}</b></a>` : esc`<b>${h.num}</b>`;
+    const related = focalBase && String(h.num).split(".")[0] === focalBase ? '<span class="dw-scc-chip dw-scc-chip--rel">same approval</span>' : "";
+    const inProgress = /in progress/i.test(h.progress);
+    let meta, metaCls = "";
+    if (!inProgress && h.decision) {
+      meta = h.decision + (h.decidedMs > 0 ? " · " + _fmtSccDate(h.decidedMs) : "");
+      metaCls = _decisionClass(h.decision);
+    } else if (inProgress) {
+      meta = "In Progress" + (h.dateMs > 0 ? " · lodged " + _fmtSccDate(h.dateMs) : "");
+    } else {
+      meta = [h.progress, h.dateMs > 0 ? _fmtSccDate(h.dateMs) : ""].filter(Boolean).join(" · ");
+    }
+    return `<div class="dw-scc-stage"><span class="dw-scc-stage-desc">${numHtml}${related} ${_escHtml(_clip(h.desc, 56))}</span>` + (meta ? `<span class="dw-scc-stage-val ${metaCls}">${_escHtml(meta)}</span>` : "") + "</div>";
+  }
+  function fetchSccPropertyHistory(lat, lng, cb) {
+    if (!isFinite(lat) || !isFinite(lng)) {
+      cb(null);
+      return;
+    }
+    gmJsonGet(
+      CFG.SCC_DEVI_BASE + "/Geo/GetPropertyDetailsByLatLng?lat=" + lat.toFixed(6) + "&lng=" + lng.toFixed(6),
+      (err, d) => {
+        const f = !err && d && Array.isArray(d.features) && d.features[0] || null;
+        const p = f && f.properties;
+        if (!p || p.land_no == null) {
+          cb(null);
+          return;
+        }
+        const prop = {
+          landNo: p.land_no,
+          address: String(p.address_format || p.address_short || "").trim(),
+          lotPlan: String(p.lot_plan || "").trim()
+        };
+        cachedFetch(
+          "scc_prophist_" + prop.landNo,
+          _CACHE_TTL.SCC_DETAIL,
+          (done) => gmJsonGet(
+            CFG.SCC_DEVI_BASE + "/Geo/GetApplicationFilterResults",
+            {
+              method: "POST",
+              data: JSON.stringify(_deviFilterBody({ landNumber: prop.landNo })),
+              headers: { "Content-Type": "application/json" }
+            },
+            (err2, data) => {
+              if (err2 || !data) {
+                done(err2 || new Error("no data"), void 0);
+                return;
+              }
+              done(null, _histFromFilterResults(data));
+            }
+          ),
+          (err2, hist) => cb(err2 ? null : { prop, hist: hist || [] })
+        );
+      }
+    );
+  }
+  function _renderSccPropertyHistory(res, maxRows) {
+    if (!res || !res.hist.length) {
+      return res && res.prop.address ? esc`<b>SCC applications</b><br><span class="dw-scc-sub">None on record for ${res.prop.address}.</span>` : "";
+    }
+    const max = maxRows || 8;
+    const rows = res.hist.slice(0, max).map((h) => _histRowHtml(h, "")).join("");
+    const extra = res.hist.length > max ? esc`<div class="dw-scc-sub">+${res.hist.length - max} more on this parcel</div>` : "";
+    return esc`<b>SCC applications (${res.hist.length})</b>` + `<div class="dw-scc-stages">${rows}${extra}</div>`;
+  }
   function _deviText(s) {
     return String(s || "").replace(/<[^>]*>/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
   }
@@ -5334,19 +5436,18 @@
     }
     const hist = d.history || [];
     if (hist.length) {
-      const rows = hist.slice(0, 8).map((h) => {
-        const meta = [h.progress, h.dateMs > 0 ? _fmtSccDate(h.dateMs) : ""].filter(Boolean).join(" · ");
-        return esc`<div class="dw-scc-stage"><span class="dw-scc-stage-desc">` + esc`<b>${h.num}</b> ${_histClip(h.desc)}</span>` + (meta ? esc`<span class="dw-scc-stage-val">${meta}</span>` : "") + "</div>";
-      }).join("");
+      const focalBase = d.focal ? String(d.focal).split(".")[0] : "";
+      const isRel = (h) => focalBase && String(h.num).split(".")[0] === focalBase ? 1 : 0;
+      const ordered = hist.slice().sort(
+        (a, b) => isRel(b) - isRel(a) || b.dateMs - a.dateMs
+      );
+      const rows = ordered.slice(0, 8).map((h) => _histRowHtml(h, focalBase)).join("");
       const extra = hist.length > 8 ? esc`<div class="dw-scc-sub">+${hist.length - 8} more on this parcel</div>` : "";
       bits.push(
         `<div class="dw-scc-det-sec"><b>Property history (${hist.length})</b><div class="dw-scc-stages">${rows}${extra}</div></div>`
       );
     }
     return bits.join("");
-  }
-  function _histClip(s) {
-    return _clip(s, 64);
   }
   function fetchSccDetail(kind, ramId, cb) {
     const fragUrl = _deviDetailUrl(kind, ramId);
@@ -5362,7 +5463,7 @@
         let frag = null, info = null, pending = 2;
         const finish = (history) => {
           const out = Object.assign(
-            { properties: [], stages: [], history: [] },
+            { properties: [], stages: [], history: [], focal: ramId },
             frag || {}
           );
           if (history) out.history = history;
@@ -5401,22 +5502,7 @@
                 finish();
                 return;
               }
-              const seen = /* @__PURE__ */ new Set([ramId]);
-              const hist = [];
-              for (const f of _dedupeDeviFeatures(data)) {
-                const p = f.properties || {};
-                const num = p.application_number;
-                if (seen.has(num)) continue;
-                seen.add(num);
-                hist.push({
-                  num,
-                  desc: String(p.description || ""),
-                  progress: String(p.progress || ""),
-                  dateMs: Date.parse(p.date_received || "") || 0
-                });
-              }
-              hist.sort((a, b) => b.dateMs - a.dateMs);
-              finish(hist);
+              finish(_histFromFilterResults(data, ramId));
             }
           );
         };
@@ -5515,9 +5601,9 @@
   }
   function _formatNotifTooltip(p) {
     const lines = [
-      esc`<b>${p.application_number || "Application"}</b> · ` + '<span class="dw-scc-notif-badge">On public notification</span>'
+      esc`<span class="dw-scc-tip-hd"><b>${p.application_number || "Application"}</b>` + '<span class="dw-scc-chip dw-scc-chip--notif">On public notification</span></span>'
     ];
-    const desc = _clip(p.description, 110);
+    const desc = _clip(p.description, 90);
     if (desc) lines.push(esc`<span class="dw-scc-sub">${desc}</span>`);
     const alertMs = Date.parse(p.alertDate || "") || 0;
     if (alertMs) {
@@ -7590,6 +7676,14 @@
           });
         });
       }
+      const scc = this.layers[CFG.LAYER_SCC_APPS];
+      if (scc && map.hasLayer(scc) && map.getZoom() >= 12) {
+        fetchSccPropertyHistory(lat, lng, (res) => {
+          if (!isCurrent() || !res) return;
+          const html = _renderSccPropertyHistory(res);
+          if (html) section("dw-popup-ident-scc", html);
+        });
+      }
       const qpws = this.layers[CFG.LAYER_QPWS];
       if (noHover && qpws && map.hasLayer(qpws) && map.getZoom() >= CFG.QLD_QPWS_HOVER_MIN_ZOOM) {
         arcgisIdentify(map, latlng, {
@@ -7891,8 +7985,20 @@
         ".dw-marine-tip { font-size: 11px; line-height: 1.4; }",
         // SCC applications (Development.i) — hover tooltip + click
         // popup with the full record and a Development.i deep link.
-        ".dw-scc-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; max-width: 260px; white-space: normal; }",
+        // width:max-content beats the site's shrink-to-fit tooltip
+        // sizing (which otherwise wraps into a skinny column), while
+        // max-width keeps long descriptions from sprawling.
+        ".dw-scc-tip { width: max-content; max-width: 280px; white-space: normal; font-size: 11.5px; line-height: 1.45; padding: 8px 10px; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.22); color: #1f2937; }",
         ".dw-scc-tip b { font-weight: 700; }",
+        ".dw-scc-tip-hd { display: flex; align-items: center; gap: 6px; }",
+        ".dw-scc-tip-cat { color: #374151; }",
+        ".dw-scc-chip { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 600; white-space: nowrap; }",
+        ".dw-scc-chip--live { background: #ecfdf5; color: #047857; }",
+        ".dw-scc-chip--past { background: #f3f4f6; color: #6b7280; }",
+        ".dw-scc-chip--notif { background: #fef2f2; color: #dc2626; }",
+        ".dw-scc-chip--rel { background: #eff6ff; color: #1d4ed8; margin-left: 4px; font-size: 9px; padding: 0 5px; vertical-align: 1px; }",
+        ".dw-scc-dec--ok { color: #047857 !important; }",
+        ".dw-scc-dec--bad { color: #dc2626 !important; }",
         ".dw-scc-sub { color: #6b7280; font-size: 10.5px; }",
         ".dw-scc-pop { font-size: 12.5px; line-height: 1.5; color: #1f2937; min-width: 200px; }",
         ".dw-scc-pop-hd { margin-bottom: 2px; }",
@@ -8040,6 +8146,11 @@
         _dedupeDeviFeatures,
         _formatNotifTooltip,
         _notifPopupProps,
+        _deviKindFromCategory,
+        _histFromFilterResults,
+        _decisionClass,
+        _histRowHtml,
+        _renderSccPropertyHistory,
         LayerProvider,
         tileProvider,
         tokenTileProvider,

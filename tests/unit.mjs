@@ -814,6 +814,88 @@ t("_notifPopupProps adapts Development.i fields to popup schema", () => {
 		"deep link built from adapted props");
 });
 
+t("_histFromFilterResults carries decisions + dates, excludes focal", () => {
+	const feat = (num, props) => ({
+		type: "Feature",
+		geometry: { type: "Point", coordinates: [152.9, -26.6] },
+		properties: Object.assign({ application_number: num }, props),
+	});
+	const hist = dw._histFromFilterResults({
+		features: [
+			feat("REC02/0156", {
+				category: "development", decision_desc: "Approved",
+				progress: "Decided or Past",
+				date_received: "2002-05-27T00:00:00Z",
+				date_determined: "2004-12-06T00:00:00Z",
+			}),
+			feat("PC19/1069", {
+				category: "building", decision_desc: "Finalised",
+				progress: "Decided or Past",
+				date_received: "2019-03-04T00:00:00Z",
+				date_determined: "2019-03-12T00:00:00Z",
+			}),
+			feat("REC02/0156.04", { category: "development" }),
+		],
+	}, "REC02/0156.04");
+	eq(hist.length, 2, "focal application excluded");
+	eq(hist[0].num, "PC19/1069", "sorted newest-first");
+	eq(hist[0].kind, "BA", "building category → BA");
+	eq(hist[1].decision, "Approved");
+	assert(hist[1].decidedMs > 0, "determination date parsed");
+});
+
+t("_deviKindFromCategory and _decisionClass classify correctly", () => {
+	eq(dw._deviKindFromCategory("development"), "DA");
+	eq(dw._deviKindFromCategory("building"), "BA");
+	eq(dw._deviKindFromCategory("plumbing"), "PL");
+	eq(dw._deviKindFromCategory(""), "DA", "default DA");
+	eq(dw._decisionClass("Approved"), "dw-scc-dec--ok");
+	eq(dw._decisionClass("Development Permit"), "dw-scc-dec--ok");
+	eq(dw._decisionClass("Refused"), "dw-scc-dec--bad");
+	eq(dw._decisionClass("Application returned"), "dw-scc-dec--bad");
+	eq(dw._decisionClass("Application undergoing assessment"), "");
+});
+
+t("_histRowHtml shows real decision + date and same-approval chip", () => {
+	const row = dw._histRowHtml({
+		num: "REC02/0156", kind: "DA",
+		desc: "Moderate Urban Subdivision <x>",
+		progress: "Decided or Past", decision: "Approved",
+		dateMs: Date.parse("2002-05-27T00:00:00Z"),
+		decidedMs: Date.parse("2004-12-06T00:00:00Z"),
+	}, "REC02/0156");
+	assert(row.includes("Approved"), "decision text shown");
+	assert(row.includes("2004"), "determination year shown");
+	assert(row.includes("dw-scc-dec--ok"), "approval styled green");
+	assert(row.includes("same approval"), "sibling chip when base matches");
+	assert(row.includes("FilterDirect"), "app number deep-links");
+	assert(row.includes("&lt;x&gt;") && !row.includes("<x>"), "desc escaped");
+	const refused = dw._histRowHtml({
+		num: "OPW24/0049", kind: "DA", desc: "Clearing",
+		progress: "Decided or Past", decision: "Refused",
+		dateMs: 1, decidedMs: Date.parse("2025-06-04T00:00:00Z"),
+	}, "REC02/0156");
+	assert(refused.includes("dw-scc-dec--bad"), "refusal styled red");
+	assert(!refused.includes("same approval"), "no chip for unrelated app");
+});
+
+t("_renderSccPropertyHistory renders count header and rows", () => {
+	const html = dw._renderSccPropertyHistory({
+		prop: { landNo: 1, address: "Elizabeth St NAMBOUR", lotPlan: "901SP311276" },
+		hist: [{
+			num: "REC02/0156", kind: "DA", desc: "Subdivision",
+			progress: "Decided or Past", decision: "Approved",
+			dateMs: 5, decidedMs: 6,
+		}],
+	});
+	assert(html.includes("SCC applications (1)"), "count header");
+	assert(html.includes("REC02/0156"), "row present");
+	const none = dw._renderSccPropertyHistory({
+		prop: { landNo: 1, address: "X St" }, hist: [],
+	});
+	assert(none.includes("None on record"), "empty-state message");
+});
+
 t("_renderSccDetail shows officer/status facts and property history", () => {
 	const html = dw._renderSccDetail({
 		properties: [], stages: [],
@@ -828,6 +910,30 @@ t("_renderSccDetail shows officer/status facts and property history", () => {
 	assert(html.includes("Application undergoing assessment"), "status line");
 	assert(html.includes("Property history (2)"), "history header + count");
 	assert(html.includes("RAL26/0028"), "history row");
+});
+
+t("_renderSccDetail promotes same-approval root above the row cap", () => {
+	// 9 unrelated newer apps + the 2004 root — newest-first alone would
+	// push the root past the 8-row cap; relation-first must surface it.
+	const hist = [];
+	for (let i = 0; i < 9; i++) {
+		hist.push({
+			num: `OPW2${i}/000${i}`, kind: "DA", desc: "works",
+			progress: "Decided or Past", decision: "Development Permit",
+			dateMs: 2000000000000 - i, decidedMs: 2000000000000 - i,
+		});
+	}
+	hist.push({
+		num: "REC02/0156", kind: "DA", desc: "Moderate Urban Subdivision",
+		progress: "Decided or Past", decision: "Approved",
+		dateMs: 1022457600000, decidedMs: 1102291200000,
+	});
+	const html = dw._renderSccDetail({
+		properties: [], stages: [], history: hist, focal: "REC02/0156.04",
+	});
+	assert(html.includes("REC02/0156"), "root approval visible");
+	assert(html.includes("same approval"), "root carries sibling chip");
+	assert(html.includes("+2 more"), "cap still applies to the rest");
 });
 
 t("advertised QLD Relief and National Parks overlays are grouped", () => {

@@ -39,7 +39,11 @@ import {
 	fetchOthSales,
 } from "../providers/qld-cadastre.js";
 import { IntvlGlobalTilesLayerProvider } from "../providers/intvl-global.js";
-import { SccApplicationsLayerProvider } from "../providers/scc-applications.js";
+import {
+	SccApplicationsLayerProvider,
+	_renderSccPropertyHistory,
+	fetchSccPropertyHistory,
+} from "../providers/scc-applications.js";
 import { GeocachingLayerProvider } from "../providers/geocaching.js";
 import {
 	PowerInfraLayerProvider,
@@ -692,6 +696,19 @@ export class CustomTilesApp {
 			});
 		}
 
+		// SCC APPLICATIONS — property history for ANY parcel (with or
+		// without visible markers) whenever the overlay is on. LatLng →
+		// Development.i property lookup → every application ever lodged
+		// on that land number, each deep-linking into Development.i.
+		const scc = this.layers[CFG.LAYER_SCC_APPS];
+		if (scc && map.hasLayer(scc) && map.getZoom() >= 12) {
+			fetchSccPropertyHistory(lat, lng, (res) => {
+				if (!isCurrent() || !res) return;
+				const html = _renderSccPropertyHistory(res);
+				if (html) section("dw-popup-ident-scc", html);
+			});
+		}
+
 		// QPWS — touch only; on desktop QPWS keeps its hover tooltip.
 		const qpws = this.layers[CFG.LAYER_QPWS];
 		if (noHover && qpws && map.hasLayer(qpws) &&
@@ -1015,8 +1032,20 @@ export class CustomTilesApp {
 			".dw-marine-tip { font-size: 11px; line-height: 1.4; }",
 			// SCC applications (Development.i) — hover tooltip + click
 			// popup with the full record and a Development.i deep link.
-			".dw-scc-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; max-width: 260px; white-space: normal; }",
+			// width:max-content beats the site's shrink-to-fit tooltip
+			// sizing (which otherwise wraps into a skinny column), while
+			// max-width keeps long descriptions from sprawling.
+			".dw-scc-tip { width: max-content; max-width: 280px; white-space: normal; font-size: 11.5px; line-height: 1.45; padding: 8px 10px; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.22); color: #1f2937; }",
 			".dw-scc-tip b { font-weight: 700; }",
+			".dw-scc-tip-hd { display: flex; align-items: center; gap: 6px; }",
+			".dw-scc-tip-cat { color: #374151; }",
+			".dw-scc-chip { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 600; white-space: nowrap; }",
+			".dw-scc-chip--live { background: #ecfdf5; color: #047857; }",
+			".dw-scc-chip--past { background: #f3f4f6; color: #6b7280; }",
+			".dw-scc-chip--notif { background: #fef2f2; color: #dc2626; }",
+			".dw-scc-chip--rel { background: #eff6ff; color: #1d4ed8; margin-left: 4px; font-size: 9px; padding: 0 5px; vertical-align: 1px; }",
+			".dw-scc-dec--ok { color: #047857 !important; }",
+			".dw-scc-dec--bad { color: #dc2626 !important; }",
 			".dw-scc-sub { color: #6b7280; font-size: 10.5px; }",
 			".dw-scc-pop { font-size: 12.5px; line-height: 1.5; color: #1f2937; min-width: 200px; }",
 			".dw-scc-pop-hd { margin-bottom: 2px; }",

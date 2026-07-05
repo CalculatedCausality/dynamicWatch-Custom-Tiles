@@ -34,6 +34,8 @@ const HELPERS = [
 	"_deviDetailUrl", "_parseSccDetailHtml", "_renderSccDetail",
 	"_deviAppByIdUrl", "_deviFilterBody", "_dedupeDeviFeatures",
 	"_formatNotifTooltip", "_notifPopupProps",
+	"_deviKindFromCategory", "_histFromFilterResults", "_decisionClass",
+	"_histRowHtml", "_renderSccPropertyHistory",
 	// Layer-provider factories
 	"LayerProvider", "tileProvider", "tokenTileProvider",
 	"arcgisExportProvider", "pollingDataLayer", "oimIcon",

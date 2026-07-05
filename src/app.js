@@ -19,18 +19,23 @@ import {
 } from './providers/qld-cadastre.js';
 import { oimIcon } from './providers/openinframap.js';
 import {
+	_decisionClass,
 	_dedupeDeviFeatures,
 	_deviAppByIdUrl,
 	_deviAppUrl,
 	_deviDetailUrl,
 	_deviFilterBody,
+	_deviKindFromCategory,
 	_fmtSccDate,
 	_formatNotifTooltip,
 	_formatSccPopup,
 	_formatSccTooltip,
+	_histFromFilterResults,
+	_histRowHtml,
 	_notifPopupProps,
 	_parseSccDetailHtml,
 	_renderSccDetail,
+	_renderSccPropertyHistory,
 	_sccDefaultState,
 	_sccLoadState,
 } from './providers/scc-applications.js';
@@ -86,6 +91,8 @@ export function bootUserscript() {
 			_deviDetailUrl, _parseSccDetailHtml, _renderSccDetail,
 			_deviAppByIdUrl, _deviFilterBody, _dedupeDeviFeatures,
 			_formatNotifTooltip, _notifPopupProps,
+			_deviKindFromCategory, _histFromFilterResults, _decisionClass,
+			_histRowHtml, _renderSccPropertyHistory,
 			LayerProvider, tileProvider, tokenTileProvider,
 			arcgisExportProvider, pollingDataLayer, oimIcon,
 		};

@@ -64,16 +64,20 @@ export function _deviAppUrl(kind, ramId) {
 
 export function _formatSccTooltip(p, kind, live) {
 	const meta = _KIND[kind];
-	const lines = [];
 	const status = live
 		? (p.progress || "In Progress")
 		: (p.decision || "Decided");
+	const chip = live ? "dw-scc-chip--live" : "dw-scc-chip--past";
+	const lines = [];
 	lines.push(
-		esc`<b>${p.ram_id || "Application"}</b> · ${meta.label} — ${status}`,
+		esc`<span class="dw-scc-tip-hd"><b>${p.ram_id || "Application"}</b>` +
+		`<span class="dw-scc-chip ${chip}">${_escHtml(status)}</span></span>`,
 	);
 	const cat = String(p.category_desc || "").trim();
-	if (cat) lines.push(_escHtml(cat));
-	const desc = _clip(p.description, 110);
+	const catLine = [meta.label, cat && cat !== meta.label ? cat : ""]
+		.filter(Boolean).join(" · ");
+	if (catLine) lines.push(esc`<span class="dw-scc-tip-cat">${catLine}</span>`);
+	const desc = _clip(p.description, 90);
 	if (desc) lines.push(esc`<span class="dw-scc-sub">${desc}</span>`);
 	const when = live
 		? (p.d_date_rec ? "Lodged " + _fmtSccDate(p.d_date_rec) : "")
@@ -181,6 +185,151 @@ export function _dedupeDeviFeatures(data) {
 	return out;
 }
 
+// Development.i's `category` field → our kind key (drives marker
+// colour dots and which FilterDirect param a deep link uses).
+export function _deviKindFromCategory(category) {
+	const c = String(category || "").toLowerCase();
+	if (c === "building") return "BA";
+	if (c === "plumbing") return "PL";
+	return "DA";
+}
+
+// Shared extraction: filter-results payload → sorted history entries.
+// Carries the actual DECISION ("Approved", "Refused", "Development
+// Permit"…) and both dates — the decision chain is the story of a
+// parcel (e.g. a 2004 subdivision approval still authorising works
+// today), so the UI must show it, not just "Decided or Past".
+export function _histFromFilterResults(data, excludeNum) {
+	const seen = new Set(excludeNum ? [excludeNum] : []);
+	const hist = [];
+	for (const f of _dedupeDeviFeatures(data)) {
+		const p = f.properties || {};
+		const num = p.application_number;
+		if (seen.has(num)) continue;
+		seen.add(num);
+		hist.push({
+			num,
+			kind: _deviKindFromCategory(p.category),
+			desc: String(p.description || ""),
+			progress: String(p.progress || ""),
+			decision: String(p.decision_desc || "").trim(),
+			dateMs: Date.parse(p.date_received || "") || 0,
+			decidedMs: Date.parse(p.date_determined || "") || 0,
+		});
+	}
+	hist.sort((a, b) => b.dateMs - a.dateMs);
+	return hist;
+}
+
+// Colour-classify a decision string for the history rows: approvals
+// green, refusals/withdrawals red, everything else neutral.
+export function _decisionClass(decision) {
+	const d = String(decision || "").toLowerCase();
+	if (/refus|withdraw|not proceed|returned/.test(d)) return "dw-scc-dec--bad";
+	if (/approv|permit|agree|finalis|accept|compl/.test(d)) return "dw-scc-dec--ok";
+	return "";
+}
+
+// One history row, shared by the application popup and the location-
+// popup property section. Shows the decision + determination date for
+// decided applications ("Approved · 6 Dec 2004") and lodgement for
+// in-progress ones; rows sharing the focal application's base number
+// (REC02/0156.* siblings) get a "same approval" chip.
+export function _histRowHtml(h, focalBase) {
+	const url = _deviAppUrl(h.kind, h.num);
+	const numHtml = url
+		? `<a href="${_escHtml(url)}" target="_blank" rel="noreferrer"><b>${_escHtml(h.num)}</b></a>`
+		: esc`<b>${h.num}</b>`;
+	const related = focalBase && String(h.num).split(".")[0] === focalBase
+		? '<span class="dw-scc-chip dw-scc-chip--rel">same approval</span>'
+		: "";
+	const inProgress = /in progress/i.test(h.progress);
+	let meta, metaCls = "";
+	if (!inProgress && h.decision) {
+		meta = h.decision +
+			(h.decidedMs > 0 ? " · " + _fmtSccDate(h.decidedMs) : "");
+		metaCls = _decisionClass(h.decision);
+	} else if (inProgress) {
+		meta = "In Progress" +
+			(h.dateMs > 0 ? " · lodged " + _fmtSccDate(h.dateMs) : "");
+	} else {
+		meta = [h.progress, h.dateMs > 0 ? _fmtSccDate(h.dateMs) : ""]
+			.filter(Boolean).join(" · ");
+	}
+	return (
+		`<div class="dw-scc-stage"><span class="dw-scc-stage-desc">` +
+		`${numHtml}${related} ${_escHtml(_clip(h.desc, 56))}</span>` +
+		(meta
+			? `<span class="dw-scc-stage-val ${metaCls}">${_escHtml(meta)}</span>`
+			: "") +
+		"</div>"
+	);
+}
+
+/* -- Property history for ANY parcel (location-popup section) ----------
+ * lat/lng → /Geo/GetPropertyDetailsByLatLng (land number, address,
+ * lot/plan) → filter-results POST for every application ever lodged
+ * there. Surfaces in the site's location popup on click/right-click,
+ * so parcels with no visible markers still expose their planning
+ * history. History is cached per land number; the point lookup itself
+ * is cheap and uncached (unbounded latlng keyspace).
+ */
+
+export function fetchSccPropertyHistory(lat, lng, cb) {
+	if (!isFinite(lat) || !isFinite(lng)) { cb(null); return; }
+	gmJsonGet(
+		CFG.SCC_DEVI_BASE + "/Geo/GetPropertyDetailsByLatLng" +
+			"?lat=" + lat.toFixed(6) + "&lng=" + lng.toFixed(6),
+		(err, d) => {
+			const f = (!err && d && Array.isArray(d.features) && d.features[0]) || null;
+			const p = f && f.properties;
+			if (!p || p.land_no == null) { cb(null); return; }
+			const prop = {
+				landNo: p.land_no,
+				address: String(p.address_format || p.address_short || "").trim(),
+				lotPlan: String(p.lot_plan || "").trim(),
+			};
+			cachedFetch(
+				"scc_prophist_" + prop.landNo,
+				_CACHE_TTL.SCC_DETAIL,
+				(done) => gmJsonGet(
+					CFG.SCC_DEVI_BASE + "/Geo/GetApplicationFilterResults",
+					{
+						method: "POST",
+						data: JSON.stringify(_deviFilterBody({ landNumber: prop.landNo })),
+						headers: { "Content-Type": "application/json" },
+					},
+					(err2, data) => {
+						if (err2 || !data) { done(err2 || new Error("no data"), undefined); return; }
+						done(null, _histFromFilterResults(data));
+					},
+				),
+				(err2, hist) => cb(err2 ? null : { prop, hist: hist || [] }),
+			);
+		},
+	);
+}
+
+// Location-popup section: parcel header + every application lodged on
+// it, newest first, each number deep-linking into Development.i.
+export function _renderSccPropertyHistory(res, maxRows) {
+	if (!res || !res.hist.length) {
+		return res && res.prop.address
+			? esc`<b>SCC applications</b><br><span class="dw-scc-sub">None on record for ${res.prop.address}.</span>`
+			: "";
+	}
+	const max = maxRows || 8;
+	const rows = res.hist.slice(0, max)
+		.map((h) => _histRowHtml(h, "")).join("");
+	const extra = res.hist.length > max
+		? esc`<div class="dw-scc-sub">+${res.hist.length - max} more on this parcel</div>`
+		: "";
+	return (
+		esc`<b>SCC applications (${res.hist.length})</b>` +
+		`<div class="dw-scc-stages">${rows}${extra}</div>`
+	);
+}
+
 // Tag-strip + entity-decode for text pulled out of the detail fragment.
 // The result is still treated as untrusted (escaped again on render).
 function _deviText(s) {
@@ -273,16 +422,17 @@ export function _renderSccDetail(d) {
 	}
 	const hist = d.history || [];
 	if (hist.length) {
-		const rows = hist.slice(0, 8).map((h) => {
-			const meta = [h.progress, h.dateMs > 0 ? _fmtSccDate(h.dateMs) : ""]
-				.filter(Boolean).join(" · ");
-			return (
-				esc`<div class="dw-scc-stage"><span class="dw-scc-stage-desc">` +
-				esc`<b>${h.num}</b> ${_histClip(h.desc)}</span>` +
-				(meta ? esc`<span class="dw-scc-stage-val">${meta}</span>` : "") +
-				"</div>"
-			);
-		}).join("");
+		const focalBase = d.focal ? String(d.focal).split(".")[0] : "";
+		// Same-approval siblings (REC02/0156.* of a REC02/0156.04 focal)
+		// jump the newest-first order so the ROOT approval — the thing
+		// that actually authorises works on the ground, however old —
+		// is always visible above the row cap, not lost in "+N more".
+		const isRel = (h) =>
+			focalBase && String(h.num).split(".")[0] === focalBase ? 1 : 0;
+		const ordered = hist.slice().sort(
+			(a, b) => (isRel(b) - isRel(a)) || (b.dateMs - a.dateMs));
+		const rows = ordered.slice(0, 8)
+			.map((h) => _histRowHtml(h, focalBase)).join("");
 		const extra = hist.length > 8
 			? esc`<div class="dw-scc-sub">+${hist.length - 8} more on this parcel</div>`
 			: "";
@@ -293,8 +443,6 @@ export function _renderSccDetail(d) {
 	}
 	return bits.join("");
 }
-
-function _histClip(s) { return _clip(s, 64); }
 
 // Collates three Development.i sources into one cached detail object:
 //   1. /Home/ApplicationDetail (HTML fragment) → assessment stages +
@@ -317,7 +465,7 @@ export function fetchSccDetail(kind, ramId, cb) {
 
 			const finish = (history) => {
 				const out = Object.assign(
-					{ properties: [], stages: [], history: [] },
+					{ properties: [], stages: [], history: [], focal: ramId },
 					frag || {},
 				);
 				if (history) out.history = history;
@@ -353,22 +501,7 @@ export function fetchSccDetail(kind, ramId, cb) {
 					},
 					(err, data) => {
 						if (err || !data) { finish(); return; }
-						const seen = new Set([ramId]);
-						const hist = [];
-						for (const f of _dedupeDeviFeatures(data)) {
-							const p = f.properties || {};
-							const num = p.application_number;
-							if (seen.has(num)) continue;
-							seen.add(num);
-							hist.push({
-								num,
-								desc: String(p.description || ""),
-								progress: String(p.progress || ""),
-								dateMs: Date.parse(p.date_received || "") || 0,
-							});
-						}
-						hist.sort((a, b) => b.dateMs - a.dateMs);
-						finish(hist);
+						finish(_histFromFilterResults(data, ramId));
 					},
 				);
 			};
@@ -503,10 +636,10 @@ function _makeSubLayer(kind, live) {
 
 export function _formatNotifTooltip(p) {
 	const lines = [
-		esc`<b>${p.application_number || "Application"}</b> · ` +
-		'<span class="dw-scc-notif-badge">On public notification</span>',
+		esc`<span class="dw-scc-tip-hd"><b>${p.application_number || "Application"}</b>` +
+		'<span class="dw-scc-chip dw-scc-chip--notif">On public notification</span></span>',
 	];
-	const desc = _clip(p.description, 110);
+	const desc = _clip(p.description, 90);
 	if (desc) lines.push(esc`<span class="dw-scc-sub">${desc}</span>`);
 	const alertMs = Date.parse(p.alertDate || "") || 0;
 	if (alertMs) {
