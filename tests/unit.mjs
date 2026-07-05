@@ -721,10 +721,11 @@ t("_renderSccDetail re-escapes decoded text and handles empty", () => {
 		.includes("No further detail"), "empty → graceful message");
 });
 
-t("SCC submenu state defaults to current-only and survives junk", () => {
+t("SCC submenu state defaults to all types, current status only", () => {
 	const def = dw._sccDefaultState();
-	assert(def.DA_live && def.BA_live && def.PL_live, "current sets on");
-	assert(!def.DA_past && !def.BA_past && !def.PL_past, "decided sets off");
+	assert(def.DA && def.BA && def.PL, "all application types on");
+	assert(def.live, "current status on");
+	assert(!def.past, "decided status off");
 	// Sandbox GM_getValue returns the default "{}" — loader must fall
 	// back cleanly to defaults (also covers corrupt-JSON path).
 	deepEq(dw._sccLoadState(), def, "empty storage → defaults");

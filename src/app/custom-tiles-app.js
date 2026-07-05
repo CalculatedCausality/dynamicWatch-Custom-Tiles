@@ -1028,11 +1028,12 @@ export class CustomTilesApp {
 			// (dev/building/plumbing × current/decided checkboxes).
 			".dw-scc-panel { position: absolute; right: 10px; bottom: 30px; z-index: 1000; background: rgba(255,255,255,0.96); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); padding: 7px 10px; font-size: 11px; font-family: sans-serif; line-height: 1.6; user-select: none; }",
 			".dw-scc-panel-hd { font-weight: 700; font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 3px; }",
-			".dw-scc-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }",
+			".dw-scc-row { display: flex; align-items: center; gap: 8px; white-space: nowrap; }",
 			".dw-scc-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }",
-			".dw-scc-row-label { width: 78px; }",
-			".dw-scc-row label { display: flex; align-items: center; gap: 3px; cursor: pointer; margin: 0; font-weight: normal; }",
+			".dw-scc-row-label { color: #888; }",
+			".dw-scc-row label { display: flex; align-items: center; gap: 5px; cursor: pointer; margin: 0; font-weight: normal; }",
 			".dw-scc-row input { margin: 0; }",
+			".dw-scc-status { border-top: 1px solid #eee; margin-top: 4px; padding-top: 4px; }",
 			".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
 			// Deep-detail section inside the application popup (assessment
 			// stages + associated parcels, auto-loaded from Development.i).

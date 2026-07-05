@@ -5348,14 +5348,7 @@
     }, gmJsonGet);
   }
   function _sccDefaultState() {
-    return {
-      DA_live: true,
-      BA_live: true,
-      PL_live: true,
-      DA_past: false,
-      BA_past: false,
-      PL_past: false
-    };
+    return { DA: true, BA: true, PL: true, live: true, past: false };
   }
   function _sccLoadState() {
     const state = _sccDefaultState();
@@ -5379,8 +5372,8 @@
     el.className = "dw-scc-panel";
     el.innerHTML = '<div class="dw-scc-panel-hd">SCC Applications</div>' + Object.keys(_KIND).map((kind) => {
       const m = _KIND[kind];
-      return `<div class="dw-scc-row"><span class="dw-scc-dot" style="background:${m.color}"></span><span class="dw-scc-row-label">${m.label}</span><label><input type="checkbox" data-key="${kind}_live"> current</label><label><input type="checkbox" data-key="${kind}_past"> decided</label></div>`;
-    }).join("") + '<div class="dw-scc-hint">decided sets appear from zoom 16</div>';
+      return `<div class="dw-scc-row"><label><input type="checkbox" data-key="${kind}"><span class="dw-scc-dot" style="background:${m.color}"></span>${m.label}</label></div>`;
+    }).join("") + '<div class="dw-scc-row dw-scc-status"><span class="dw-scc-row-label">Status</span><label><input type="checkbox" data-key="live"> current</label><label><input type="checkbox" data-key="past"> decided</label></div><div class="dw-scc-hint">decided sets appear from zoom 16</div>';
     el.querySelectorAll("input[data-key]").forEach((cb) => {
       cb.checked = !!state[cb.dataset.key];
       cb.addEventListener("change", () => onChange(cb.dataset.key, cb.checked));
@@ -5419,16 +5412,18 @@
         L.LayerGroup.prototype.onRemove.call(this, map);
       },
       _syncSubs() {
-        for (const key of Object.keys(this._state)) {
-          const on = this._state[key];
-          let sub = this._subs[key];
-          if (on && !sub) {
-            const [kind, phase] = key.split("_");
-            sub = this._subs[key] = _makeSubLayer(kind, phase === "live");
+        for (const kind of Object.keys(_KIND)) {
+          for (const phase of ["live", "past"]) {
+            const key = kind + "_" + phase;
+            const on = this._state[kind] && this._state[phase];
+            let sub = this._subs[key];
+            if (on && !sub) {
+              sub = this._subs[key] = _makeSubLayer(kind, phase === "live");
+            }
+            if (!sub) continue;
+            if (on && !this.hasLayer(sub)) this.addLayer(sub);
+            else if (!on && this.hasLayer(sub)) this.removeLayer(sub);
           }
-          if (!sub) continue;
-          if (on && !this.hasLayer(sub)) this.addLayer(sub);
-          else if (!on && this.hasLayer(sub)) this.removeLayer(sub);
         }
       }
     });
@@ -7674,11 +7669,12 @@
         // (dev/building/plumbing × current/decided checkboxes).
         ".dw-scc-panel { position: absolute; right: 10px; bottom: 30px; z-index: 1000; background: rgba(255,255,255,0.96); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); padding: 7px 10px; font-size: 11px; font-family: sans-serif; line-height: 1.6; user-select: none; }",
         ".dw-scc-panel-hd { font-weight: 700; font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 3px; }",
-        ".dw-scc-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }",
+        ".dw-scc-row { display: flex; align-items: center; gap: 8px; white-space: nowrap; }",
         ".dw-scc-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }",
-        ".dw-scc-row-label { width: 78px; }",
-        ".dw-scc-row label { display: flex; align-items: center; gap: 3px; cursor: pointer; margin: 0; font-weight: normal; }",
+        ".dw-scc-row-label { color: #888; }",
+        ".dw-scc-row label { display: flex; align-items: center; gap: 5px; cursor: pointer; margin: 0; font-weight: normal; }",
         ".dw-scc-row input { margin: 0; }",
+        ".dw-scc-status { border-top: 1px solid #eee; margin-top: 4px; padding-top: 4px; }",
         ".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
         // Deep-detail section inside the application popup (assessment
         // stages + associated parcels, auto-loaded from Development.i).

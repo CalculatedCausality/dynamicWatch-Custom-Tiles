@@ -321,11 +321,11 @@ function _makeSubLayer(kind, live) {
  * as small muted dots when wanted. Selection persists in GM storage.
  */
 
+// One flag per application type plus two status flags that apply
+// across all types: a sublayer renders iff its type AND its status are
+// both ticked. "current" = the In Progress sets, "past" = Decided.
 export function _sccDefaultState() {
-	return {
-		DA_live: true,  BA_live: true,  PL_live: true,
-		DA_past: false, BA_past: false, PL_past: false,
-	};
+	return { DA: true, BA: true, PL: true, live: true, past: false };
 }
 
 export function _sccLoadState() {
@@ -354,13 +354,17 @@ function _buildSccPanel(state, onChange) {
 			const m = _KIND[kind];
 			return (
 				'<div class="dw-scc-row">' +
+				`<label><input type="checkbox" data-key="${kind}">` +
 				`<span class="dw-scc-dot" style="background:${m.color}"></span>` +
-				`<span class="dw-scc-row-label">${m.label}</span>` +
-				`<label><input type="checkbox" data-key="${kind}_live"> current</label>` +
-				`<label><input type="checkbox" data-key="${kind}_past"> decided</label>` +
+				`${m.label}</label>` +
 				"</div>"
 			);
 		}).join("") +
+		'<div class="dw-scc-row dw-scc-status">' +
+		'<span class="dw-scc-row-label">Status</span>' +
+		'<label><input type="checkbox" data-key="live"> current</label>' +
+		'<label><input type="checkbox" data-key="past"> decided</label>' +
+		"</div>" +
 		'<div class="dw-scc-hint">decided sets appear from zoom 16</div>';
 	el.querySelectorAll("input[data-key]").forEach((cb) => {
 		cb.checked = !!state[cb.dataset.key];
@@ -410,18 +414,21 @@ function _getSccAppsLayerClass() {
 		},
 
 		_syncSubs() {
-			for (const key of Object.keys(this._state)) {
-				const on = this._state[key];
-				let sub = this._subs[key];
-				if (on && !sub) {
-					const [kind, phase] = key.split("_");
-					sub = this._subs[key] = _makeSubLayer(kind, phase === "live");
+			for (const kind of Object.keys(_KIND)) {
+				for (const phase of ["live", "past"]) {
+					const key = kind + "_" + phase;
+					const on = this._state[kind] && this._state[phase];
+					let sub = this._subs[key];
+					if (on && !sub) {
+						sub = this._subs[key] =
+							_makeSubLayer(kind, phase === "live");
+					}
+					if (!sub) continue;
+					// addLayer/removeLayer on an attached group
+					// adds/removes the child from the map immediately.
+					if (on && !this.hasLayer(sub)) this.addLayer(sub);
+					else if (!on && this.hasLayer(sub)) this.removeLayer(sub);
 				}
-				if (!sub) continue;
-				// addLayer/removeLayer on an attached group adds/removes
-				// the child from the map immediately.
-				if (on && !this.hasLayer(sub)) this.addLayer(sub);
-				else if (!on && this.hasLayer(sub)) this.removeLayer(sub);
 			}
 		},
 	});
