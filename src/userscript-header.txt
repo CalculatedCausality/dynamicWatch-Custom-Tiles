@@ -15,6 +15,7 @@
 // @connect      spatial-gis.information.qld.gov.au
 // @connect      geopublic.scc.qld.gov.au
 // @connect      developmenti.sunshinecoast.qld.gov.au
+// @connect      publicdocs.scc.qld.gov.au
 // @connect      connecttile.garmin.com
 // @connect      strava.com
 // @connect      content-a.strava.com

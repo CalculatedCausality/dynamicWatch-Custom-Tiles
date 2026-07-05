@@ -26,6 +26,7 @@ import {
 	_deviDetailUrl,
 	_deviFilterBody,
 	_deviKindFromCategory,
+	_deviReportUrl,
 	_fmtSccDate,
 	_formatNotifTooltip,
 	_formatSccPopup,
@@ -34,9 +35,12 @@ import {
 	_histRowHtml,
 	_notifPopupProps,
 	_parseSccDetailHtml,
+	_parseSccDocs,
 	_renderSccDetail,
 	_renderSccPropertyHistory,
 	_sccDefaultState,
+	_sccDocDownloadUrl,
+	_sccDocsSearchUrl,
 	_sccLoadState,
 } from './providers/scc-applications.js';
 import { _escHtml, esc, _safeColor, _fmtPrice, _fmtDate } from './utils/html.js';
@@ -93,6 +97,7 @@ export function bootUserscript() {
 			_formatNotifTooltip, _notifPopupProps,
 			_deviKindFromCategory, _histFromFilterResults, _decisionClass,
 			_histRowHtml, _renderSccPropertyHistory,
+			_deviReportUrl, _sccDocsSearchUrl, _sccDocDownloadUrl, _parseSccDocs,
 			LayerProvider, tileProvider, tokenTileProvider,
 			arcgisExportProvider, pollingDataLayer, oimIcon,
 		};

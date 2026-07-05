@@ -145,6 +145,59 @@ export function _deviAppByIdUrl(kind, ramId) {
 	);
 }
 
+// Development.i's own printable report for an application (the
+// "Download PDF" button in its modal).
+export function _deviReportUrl(kind, ramId) {
+	const appType = _DEVI_TYPE[kind]; // plan_scc_X_apps_unique
+	const id = _validRamId(ramId);
+	if (!appType || !id) return "";
+	return (
+		CFG.SCC_DEVI_BASE + "/Home/ApplicationDetailsView?appNo=" +
+		encodeURIComponent(id) +
+		"&type=" + appType.replace(/_unique$/, "") + "&do=pdf"
+	);
+}
+
+// SCC publicdocs (HPE CM WebDrawer) — JSON search for the actual
+// documents lodged against an application number (forms, plans,
+// reports, decision notices). Same query Development.i's own
+// "Application Documents" link runs, plus format=json.
+export function _sccDocsSearchUrl(ramId) {
+	const id = _validRamId(ramId);
+	if (!id) return "";
+	const q = `ApplicationNumberList:"${id}"` +
+		' And NOT recType:"Folder" And NOT recType:"Sub Folder"';
+	return (
+		CFG.SCC_DOCS_BASE + "/HPECMWebDrawer/Record?q=" +
+		encodeURIComponent(q) + "&format=json&pageSize=100"
+	);
+}
+
+export function _sccDocDownloadUrl(uri) {
+	const n = Number(uri);
+	if (!Number.isFinite(n) || n <= 0) return "";
+	return CFG.SCC_DOCS_BASE + "/HPECMWebDrawer/Record/" + n + "/file/document";
+}
+
+// WebDrawer JSON → lean doc entries (newest first).
+export function _parseSccDocs(data) {
+	const out = [];
+	for (const r of (data && Array.isArray(data.Results) ? data.Results : [])) {
+		const uri = Number(r && r.Uri);
+		const title = String(((r || {}).RecordTitle || {}).Value || "").trim();
+		if (!Number.isFinite(uri) || uri <= 0 || !title) continue;
+		out.push({
+			uri,
+			title,
+			ext: String(((r || {}).RecordExtension || {}).Value || "").trim(),
+			dateMs: Date.parse(
+				(((r || {}).RecordDateRegistered || {}).DateTime) || "") || 0,
+		});
+	}
+	out.sort((a, b) => b.dateMs - a.dateMs);
+	return out;
+}
+
 // POST body for /Geo/GetApplicationFilterResults — Development.i's map
 // query engine. Mirrors the site's own default filter object; we use
 // it two ways: LandNumber → every application ever lodged on a parcel
@@ -391,7 +444,8 @@ export function _parseSccDetailHtml(html) {
 
 export function _renderSccDetail(d) {
 	if (!d || (!d.properties.length && !d.stages.length &&
-		!(d.history || []).length && !d.officer && !d.statusDesc)) {
+		!(d.history || []).length && !d.officer && !d.statusDesc &&
+		!(d.docs || []).length)) {
 		return '<span class="dw-scc-sub">No further detail available.</span>';
 	}
 	const bits = [];
@@ -432,6 +486,31 @@ export function _renderSccDetail(d) {
 			`<div class="dw-scc-stages">${rows}</div></div>`,
 		);
 	}
+	// Lodged documents — direct downloads from SCC's public repository
+	// (the same files Development.i's "Application Documents" link
+	// reaches, minus the WebDrawer search UI detour).
+	const docs = d.docs || [];
+	if (docs.length) {
+		const rows = docs.map((doc) => {
+			const dl = _sccDocDownloadUrl(doc.uri);
+			const title = _clip(doc.title, 64);
+			const name = dl
+				? `<a href="${_escHtml(dl)}" target="_blank" rel="noreferrer">${_escHtml(title)}</a>`
+				: _escHtml(title);
+			const meta = [doc.ext, doc.dateMs > 0 ? _fmtSccDate(doc.dateMs) : ""]
+				.filter(Boolean).join(" · ");
+			return (
+				`<div class="dw-scc-stage"><span class="dw-scc-stage-desc">${name}</span>` +
+				(meta ? esc`<span class="dw-scc-stage-val">${meta}</span>` : "") +
+				"</div>"
+			);
+		}).join("");
+		bits.push(
+			`<div class="dw-scc-det-sec"><b>Documents (${docs.length})</b>` +
+			`<div class="dw-scc-stages">${rows}</div></div>`,
+		);
+	}
+
 	const hist = d.history || [];
 	if (hist.length) {
 		const focalBase = d.focal ? String(d.focal).split(".")[0] : "";
@@ -452,24 +531,27 @@ export function _renderSccDetail(d) {
 	return bits.join("");
 }
 
-// Collates three Development.i sources into one cached detail object:
+// Collates four SCC sources into one cached detail object:
 //   1. /Home/ApplicationDetail (HTML fragment) → assessment stages +
 //      associated parcel addresses
 //   2. /Geo/GetApplicationById (JSON)          → project officer,
 //      application type, appeal result, live status text, land_no
-//   3. /Geo/GetApplicationFilterResults (POST) → every other
+//   3. publicdocs WebDrawer (JSON)             → lodged documents
+//      (forms, plans, reports, decision notices) with download links
+//   4. /Geo/GetApplicationFilterResults (POST) → every other
 //      application on the same parcel (property history)
-// 1+2 run in parallel; 3 chains off 2's land_no. One cache entry per
+// 1+2+3 run in parallel; 4 chains off 2's land_no. One cache entry per
 // application; transient failures aren't persisted.
 export function fetchSccDetail(kind, ramId, cb) {
 	const fragUrl = _deviDetailUrl(kind, ramId);
 	const infoUrl = _deviAppByIdUrl(kind, ramId);
-	if (!fragUrl || !infoUrl) { cb(null); return; }
+	const docsUrl = _sccDocsSearchUrl(ramId);
+	if (!fragUrl || !infoUrl || !docsUrl) { cb(null); return; }
 	cachedFetch(
 		"scc_detail_" + kind + "_" + ramId,
 		_CACHE_TTL.SCC_DETAIL,
 		(done) => {
-			let frag = null, info = null, pending = 2;
+			let frag = null, info = null, docs = null, pending = 3;
 
 			const finish = (history) => {
 				const out = Object.assign(
@@ -477,6 +559,7 @@ export function fetchSccDetail(kind, ramId, cb) {
 					frag || {},
 				);
 				if (history) out.history = history;
+				out.docs = docs || [];
 				if (info) {
 					out.officer = String(info.project_officer || "").trim();
 					out.appType = String(info.application_type || "").trim();
@@ -487,9 +570,10 @@ export function fetchSccDetail(kind, ramId, cb) {
 					}
 				}
 				const hasAnything = out.properties.length || out.stages.length ||
-					out.history.length || out.officer || out.statusDesc;
-				if (!hasAnything && !frag && !info) {
-					// Both sources failed outright → transient, don't cache.
+					out.history.length || out.officer || out.statusDesc ||
+					out.docs.length;
+				if (!hasAnything && !frag && !info && !docs) {
+					// All sources failed outright → transient, don't cache.
 					done(new Error("devi detail unavailable"), undefined);
 					return;
 				}
@@ -526,6 +610,10 @@ export function fetchSccDetail(kind, ramId, cb) {
 			gmJsonGet(infoUrl, (err, d) => {
 				info = (!err && d && Array.isArray(d.features) && d.features[0])
 					? (d.features[0].properties || null) : null;
+				step();
+			});
+			gmJsonGet(docsUrl, (err, d) => {
+				docs = err ? null : _parseSccDocs(d);
 				step();
 			});
 		},
@@ -590,12 +678,31 @@ export function _formatSccPopup(p, kind, live) {
 		);
 	}
 
+	const links = [];
+	// Applications on public notification are open for formal
+	// submissions — surface council's "have your say" entry point.
+	if (/notification/i.test(String(p.progress || ""))) {
+		links.push(
+			`<a class="dw-scc-link dw-scc-link--notif" href="${_escHtml(CFG.SCC_SUBMISSION_URL)}"` +
+			` target="_blank" rel="noreferrer">Make a submission ↗</a>`,
+		);
+	}
 	const url = _deviAppUrl(kind, p.ram_id);
 	if (url) {
-		rows.push(
+		links.push(
 			`<a class="dw-scc-link" href="${_escHtml(url)}"` +
 			` target="_blank" rel="noreferrer">Open in Development.i ↗</a>`,
 		);
+	}
+	const report = _deviReportUrl(kind, p.ram_id);
+	if (report) {
+		links.push(
+			`<a class="dw-scc-link" href="${_escHtml(report)}"` +
+			` target="_blank" rel="noreferrer">Report PDF ↗</a>`,
+		);
+	}
+	if (links.length) {
+		rows.push(`<div class="dw-scc-links">${links.join(" ")}</div>`);
 	}
 	return `<div class="dw-scc-pop">${rows.join("")}</div>`;
 }

@@ -15,6 +15,7 @@
 // @connect      spatial-gis.information.qld.gov.au
 // @connect      geopublic.scc.qld.gov.au
 // @connect      developmenti.sunshinecoast.qld.gov.au
+// @connect      publicdocs.scc.qld.gov.au
 // @connect      connecttile.garmin.com
 // @connect      strava.com
 // @connect      content-a.strava.com
@@ -205,6 +206,13 @@
     // applies the querystring `filters` client-side (DANumber= /
     // BANumber= / PlumbNumber= inside the encoded value).
     SCC_DEVI_BASE: "https://developmenti.sunshinecoast.qld.gov.au",
+    // SCC public document repository (HPE Content Manager WebDrawer) —
+    // the actual lodged application documents (forms, plans, reports,
+    // decision notices). Anonymous JSON search by application number;
+    // Record/{uri}/file/document serves the file directly.
+    SCC_DOCS_BASE: "https://publicdocs.scc.qld.gov.au",
+    // "Make a submission" landing page linked from notifying apps.
+    SCC_SUBMISSION_URL: "https://haveyoursay.sunshinecoast.qld.gov.au/submissions-and-comments-development-applications",
     // QPWS estate: protected-area polygons + tracks/trails of all kinds.
     // Layer IDs in the source service:
     //   10 = Protected areas and forests   5 = Walking track
@@ -5222,6 +5230,41 @@
     if (!appType || !id) return "";
     return CFG.SCC_DEVI_BASE + "/Geo/GetApplicationById?applicationId=" + encodeURIComponent(id) + "&appType=" + appType;
   }
+  function _deviReportUrl(kind, ramId) {
+    const appType = _DEVI_TYPE[kind];
+    const id = _validRamId(ramId);
+    if (!appType || !id) return "";
+    return CFG.SCC_DEVI_BASE + "/Home/ApplicationDetailsView?appNo=" + encodeURIComponent(id) + "&type=" + appType.replace(/_unique$/, "") + "&do=pdf";
+  }
+  function _sccDocsSearchUrl(ramId) {
+    const id = _validRamId(ramId);
+    if (!id) return "";
+    const q = `ApplicationNumberList:"${id}" And NOT recType:"Folder" And NOT recType:"Sub Folder"`;
+    return CFG.SCC_DOCS_BASE + "/HPECMWebDrawer/Record?q=" + encodeURIComponent(q) + "&format=json&pageSize=100";
+  }
+  function _sccDocDownloadUrl(uri) {
+    const n = Number(uri);
+    if (!Number.isFinite(n) || n <= 0) return "";
+    return CFG.SCC_DOCS_BASE + "/HPECMWebDrawer/Record/" + n + "/file/document";
+  }
+  function _parseSccDocs(data) {
+    const out = [];
+    for (const r of data && Array.isArray(data.Results) ? data.Results : []) {
+      const uri = Number(r && r.Uri);
+      const title = String(((r || {}).RecordTitle || {}).Value || "").trim();
+      if (!Number.isFinite(uri) || uri <= 0 || !title) continue;
+      out.push({
+        uri,
+        title,
+        ext: String(((r || {}).RecordExtension || {}).Value || "").trim(),
+        dateMs: Date.parse(
+          ((r || {}).RecordDateRegistered || {}).DateTime || ""
+        ) || 0
+      });
+    }
+    out.sort((a, b) => b.dateMs - a.dateMs);
+    return out;
+  }
   function _deviFilterBody(o) {
     o = o || {};
     return {
@@ -5408,7 +5451,7 @@
     return out;
   }
   function _renderSccDetail(d) {
-    if (!d || !d.properties.length && !d.stages.length && !(d.history || []).length && !d.officer && !d.statusDesc) {
+    if (!d || !d.properties.length && !d.stages.length && !(d.history || []).length && !d.officer && !d.statusDesc && !(d.docs || []).length) {
       return '<span class="dw-scc-sub">No further detail available.</span>';
     }
     const bits = [];
@@ -5439,6 +5482,19 @@
         `<div class="dw-scc-det-sec"><b>Assessment stages</b><div class="dw-scc-stages">${rows}</div></div>`
       );
     }
+    const docs = d.docs || [];
+    if (docs.length) {
+      const rows = docs.map((doc) => {
+        const dl = _sccDocDownloadUrl(doc.uri);
+        const title = _clip(doc.title, 64);
+        const name = dl ? `<a href="${_escHtml(dl)}" target="_blank" rel="noreferrer">${_escHtml(title)}</a>` : _escHtml(title);
+        const meta = [doc.ext, doc.dateMs > 0 ? _fmtSccDate(doc.dateMs) : ""].filter(Boolean).join(" · ");
+        return `<div class="dw-scc-stage"><span class="dw-scc-stage-desc">${name}</span>` + (meta ? esc`<span class="dw-scc-stage-val">${meta}</span>` : "") + "</div>";
+      }).join("");
+      bits.push(
+        `<div class="dw-scc-det-sec"><b>Documents (${docs.length})</b><div class="dw-scc-stages">${rows}</div></div>`
+      );
+    }
     const hist = d.history || [];
     if (hist.length) {
       const focalBase = d.focal ? String(d.focal).split(".")[0] : "";
@@ -5456,7 +5512,8 @@
   function fetchSccDetail(kind, ramId, cb) {
     const fragUrl = _deviDetailUrl(kind, ramId);
     const infoUrl = _deviAppByIdUrl(kind, ramId);
-    if (!fragUrl || !infoUrl) {
+    const docsUrl = _sccDocsSearchUrl(ramId);
+    if (!fragUrl || !infoUrl || !docsUrl) {
       cb(null);
       return;
     }
@@ -5464,13 +5521,14 @@
       "scc_detail_" + kind + "_" + ramId,
       _CACHE_TTL.SCC_DETAIL,
       (done) => {
-        let frag = null, info = null, pending = 2;
+        let frag = null, info = null, docs = null, pending = 3;
         const finish = (history) => {
           const out = Object.assign(
             { properties: [], stages: [], history: [], focal: ramId },
             frag || {}
           );
           if (history) out.history = history;
+          out.docs = docs || [];
           if (info) {
             out.officer = String(info.project_officer || "").trim();
             out.appType = String(info.application_type || "").trim();
@@ -5480,8 +5538,8 @@
               out.appeal = appeal;
             }
           }
-          const hasAnything = out.properties.length || out.stages.length || out.history.length || out.officer || out.statusDesc;
-          if (!hasAnything && !frag && !info) {
+          const hasAnything = out.properties.length || out.stages.length || out.history.length || out.officer || out.statusDesc || out.docs.length;
+          if (!hasAnything && !frag && !info && !docs) {
             done(new Error("devi detail unavailable"), void 0);
             return;
           }
@@ -5520,6 +5578,10 @@
         );
         gmJsonGet(infoUrl, (err, d) => {
           info = !err && d && Array.isArray(d.features) && d.features[0] ? d.features[0].properties || null : null;
+          step();
+        });
+        gmJsonGet(docsUrl, (err, d) => {
+          docs = err ? null : _parseSccDocs(d);
           step();
         });
       },
@@ -5566,11 +5628,26 @@
         `<div class="dw-scc-detail" data-scc-kind="${kind}" data-scc-id="${_escHtml(id)}"><span class="dw-scc-sub">Loading Development.i detail…</span></div>`
       );
     }
+    const links = [];
+    if (/notification/i.test(String(p.progress || ""))) {
+      links.push(
+        `<a class="dw-scc-link dw-scc-link--notif" href="${_escHtml(CFG.SCC_SUBMISSION_URL)}" target="_blank" rel="noreferrer">Make a submission ↗</a>`
+      );
+    }
     const url = _deviAppUrl(kind, p.ram_id);
     if (url) {
-      rows.push(
+      links.push(
         `<a class="dw-scc-link" href="${_escHtml(url)}" target="_blank" rel="noreferrer">Open in Development.i ↗</a>`
       );
+    }
+    const report = _deviReportUrl(kind, p.ram_id);
+    if (report) {
+      links.push(
+        `<a class="dw-scc-link" href="${_escHtml(report)}" target="_blank" rel="noreferrer">Report PDF ↗</a>`
+      );
+    }
+    if (links.length) {
+      rows.push(`<div class="dw-scc-links">${links.join(" ")}</div>`);
     }
     return `<div class="dw-scc-pop">${rows.join("")}</div>`;
   }
@@ -8017,6 +8094,8 @@
         ".dw-scc-pop-desc { margin: 4px 0; }",
         ".dw-scc-pop .dw-scc-sub { display: block; margin-top: 2px; }",
         ".dw-scc-link { display: inline-block; margin-top: 6px; font-weight: 600; }",
+        ".dw-scc-links { display: flex; flex-wrap: wrap; gap: 0 14px; }",
+        ".dw-scc-link--notif { color: #dc2626 !important; }",
         // Floating sublayer picker shown while the overlay is active
         // (dev/building/plumbing × current/decided checkboxes).
         ".dw-scc-panel { position: absolute; right: 10px; bottom: 30px; z-index: 1000; background: rgba(255,255,255,0.96); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); padding: 7px 10px; font-size: 11px; font-family: sans-serif; line-height: 1.6; user-select: none; }",
@@ -8170,6 +8249,10 @@
         _decisionClass,
         _histRowHtml,
         _renderSccPropertyHistory,
+        _deviReportUrl,
+        _sccDocsSearchUrl,
+        _sccDocDownloadUrl,
+        _parseSccDocs,
         LayerProvider,
         tileProvider,
         tokenTileProvider,

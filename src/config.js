@@ -209,6 +209,14 @@ export const CFG = {
 	// applies the querystring `filters` client-side (DANumber= /
 	// BANumber= / PlumbNumber= inside the encoded value).
 	SCC_DEVI_BASE: "https://developmenti.sunshinecoast.qld.gov.au",
+	// SCC public document repository (HPE Content Manager WebDrawer) —
+	// the actual lodged application documents (forms, plans, reports,
+	// decision notices). Anonymous JSON search by application number;
+	// Record/{uri}/file/document serves the file directly.
+	SCC_DOCS_BASE: "https://publicdocs.scc.qld.gov.au",
+	// "Make a submission" landing page linked from notifying apps.
+	SCC_SUBMISSION_URL:
+		"https://haveyoursay.sunshinecoast.qld.gov.au/submissions-and-comments-development-applications",
 
 	// QPWS estate: protected-area polygons + tracks/trails of all kinds.
 	// Layer IDs in the source service:

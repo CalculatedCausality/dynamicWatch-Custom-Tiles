@@ -1053,6 +1053,8 @@ export class CustomTilesApp {
 			".dw-scc-pop-desc { margin: 4px 0; }",
 			".dw-scc-pop .dw-scc-sub { display: block; margin-top: 2px; }",
 			".dw-scc-link { display: inline-block; margin-top: 6px; font-weight: 600; }",
+			".dw-scc-links { display: flex; flex-wrap: wrap; gap: 0 14px; }",
+			".dw-scc-link--notif { color: #dc2626 !important; }",
 			// Floating sublayer picker shown while the overlay is active
 			// (dev/building/plumbing × current/decided checkboxes).
 			".dw-scc-panel { position: absolute; right: 10px; bottom: 30px; z-index: 1000; background: rgba(255,255,255,0.96); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); padding: 7px 10px; font-size: 11px; font-family: sans-serif; line-height: 1.6; user-select: none; }",

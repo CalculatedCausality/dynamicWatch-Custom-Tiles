@@ -896,6 +896,72 @@ t("_renderSccPropertyHistory renders count header and rows", () => {
 	assert(none.includes("None found"), "empty-state message");
 });
 
+t("_sccDocsSearchUrl / _sccDocDownloadUrl build and validate", () => {
+	const u = dw._sccDocsSearchUrl("MCU25/0135.02");
+	assert(u.startsWith("https://publicdocs.scc.qld.gov.au/HPECMWebDrawer/Record?q="),
+		"WebDrawer base");
+	assert(u.includes(encodeURIComponent('ApplicationNumberList:"MCU25/0135.02"')),
+		"app-number term encoded");
+	assert(u.includes("format=json"), "json format");
+	eq(dw._sccDocsSearchUrl("<bad>"), "", "unsafe id rejected");
+	eq(dw._sccDocDownloadUrl(28544862),
+		"https://publicdocs.scc.qld.gov.au/HPECMWebDrawer/Record/28544862/file/document");
+	eq(dw._sccDocDownloadUrl("x"), "", "non-numeric uri rejected");
+	eq(dw._sccDocDownloadUrl(-1), "", "negative uri rejected");
+});
+
+t("_parseSccDocs maps WebDrawer JSON to entries, newest first", () => {
+	const docs = dw._parseSccDocs({ Results: [
+		{ Uri: 2, RecordTitle: { Value: "DA Form 1" },
+		  RecordExtension: { Value: "PDF" },
+		  RecordDateRegistered: { DateTime: "2026-05-11T01:51:52Z" } },
+		{ Uri: 3, RecordTitle: { Value: "Decision Notice" },
+		  RecordExtension: { Value: "DOCX" },
+		  RecordDateRegistered: { DateTime: "2026-06-01T00:00:00Z" } },
+		{ Uri: 0, RecordTitle: { Value: "bad uri skipped" } },
+		{ Uri: 4, RecordTitle: { Value: "" } },
+	] });
+	eq(docs.length, 2, "invalid entries dropped");
+	eq(docs[0].title, "Decision Notice", "sorted newest first");
+	eq(docs[1].ext, "PDF");
+	deepEq(dw._parseSccDocs(null), [], "null-safe");
+});
+
+t("_renderSccDetail lists documents with escaped download links", () => {
+	const html = dw._renderSccDetail({
+		properties: [], stages: [], history: [],
+		docs: [{ uri: 28544862, title: "Plans <rev B>", ext: "PDF",
+			dateMs: Date.parse("2026-05-11T00:00:00Z") }],
+	});
+	assert(html.includes("Documents (1)"), "docs section header");
+	assert(html.includes("/HPECMWebDrawer/Record/28544862/file/document"),
+		"download link");
+	assert(html.includes("Plans &lt;rev B&gt;"), "title escaped");
+	assert(html.includes("PDF"), "extension shown");
+});
+
+t("_deviReportUrl builds the printable-report link per kind", () => {
+	eq(dw._deviReportUrl("DA", "REC02/0156.04"),
+		"https://developmenti.sunshinecoast.qld.gov.au/Home/ApplicationDetailsView" +
+		"?appNo=REC02%2F0156.04&type=plan_scc_development_apps&do=pdf");
+	assert(dw._deviReportUrl("BA", "PC26/1").includes("plan_scc_building_apps&do=pdf"));
+	eq(dw._deviReportUrl("DA", "<x>"), "", "unsafe id rejected");
+});
+
+t("_formatSccPopup adds submission link only for notifying apps", () => {
+	const notif = dw._formatSccPopup(dw._notifPopupProps({
+		application_number: "MCU26/0088", description: "Service Station",
+		date_received: "2026-05-01T14:00:00Z",
+	}), "DA", true);
+	assert(notif.includes("Make a submission"), "submission link on notifying app");
+	assert(notif.includes("haveyoursay.sunshinecoast.qld.gov.au"), "have-your-say URL");
+	assert(notif.includes("Report PDF"), "report link present");
+	const plain = dw._formatSccPopup({
+		ram_id: "BAC26/0042", progress: "In Progress",
+	}, "BA", true);
+	assert(!plain.includes("Make a submission"), "no submission link otherwise");
+});
+
 t("_renderSccDetail shows officer/status facts and property history", () => {
 	const html = dw._renderSccDetail({
 		properties: [], stages: [],
