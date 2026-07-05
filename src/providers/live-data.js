@@ -118,6 +118,49 @@ export class WazeLayerProvider extends LayerProvider {
 		const JAM_COLORS =
 			["#7CB342", "#C0CA33", "#F0A500", "#E67E22", "#D9534F", "#7F1D1D"];
 
+		// Wazer "mood" is Waze's avatar id. Base moods are 1-60 (matching
+		// Waze's own enum); FIRST_CUSTOM_MOOD=100, so anything >=100 is a
+		// paid/seasonal custom avatar with no base emotion — Waze itself
+		// renders those as the default "happy" face, so we do too. Female
+		// variants (14-26) map to the same emoji as their base.
+		const MOOD_EMOJI = {
+			1: "🙂", 14: "🙂",          // HAPPY
+			2: "😢", 15: "😢",          // SAD
+			3: "😠", 16: "😠",          // MAD
+			4: "😐", 17: "😐",          // BORED
+			5: "💨", 18: "💨",          // SPEEDY
+			6: "😋", 19: "😋",          // STARVING
+			7: "😴", 20: "😴",          // SLEEPY
+			8: "😎", 21: "😎",          // COOL
+			9: "😍", 22: "😍",          // IN_LOVE
+			10: "😂", 23: "😂",         // LOL
+			11: "😌", 24: "😌",         // PEACEFUL
+			12: "🎤", 25: "🎤",         // SINGING
+			13: "🤔", 26: "🤔",         // WONDERING
+			27: "🤖", 28: "👾", 29: "🦕", // ROBOT, BIT, DINO
+			30: "😫", 31: "😫",         // BUSY
+			32: "🏃", 33: "🏃",         // IN_A_HURRY
+			34: "👶", 35: "👹",         // BABY, MONSTER
+			36: "🦆", 37: "🦆",         // DUCK
+			38: "🤓", 39: "🤓",         // GEEK
+			40: "😏", 41: "😏",         // SARCASTIC
+			42: "😊", 43: "😊",         // SHY
+			44: "🤒", 45: "🤒",         // SICK
+			46: "🥷", 47: "🥷",         // NINJA
+			48: "🐶", 49: "🐱",         // DOG, CAT
+			50: "🌻", 51: "🧟", 52: "😤", 53: "😤", // SUNFLOWER, ZOMBIE, PROUD
+			54: "🗑️", 55: "❄️", 56: "👨‍🔬", 57: "🐛", // GARBAGE, SNOW, ALBERT, BUG_BUSTER
+			58: "🏍️", 59: "🏍️",        // BIKER_RED, BIKER_DARK
+		};
+		const moodEmoji = (m) => MOOD_EMOJI[m] || "🙂";
+		// Wazer marker: the mood emoji on a blue disc (keeps the "live
+		// driver" identity while replacing the bare dot).
+		const wazerIcon = (emoji) => L.divIcon({
+			className: "dw-waze-user-icon",
+			html: `<div style="background:#33ccff;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;line-height:1;border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,.5);">${emoji}</div>`,
+			iconSize: [20, 20], iconAnchor: [10, 10],
+		});
+
 		const agoStr = (ms) => {
 			if (!ms) return "";
 			const s = Math.max(0, (Date.now() - ms) / 1000);
@@ -269,16 +312,21 @@ export class WazeLayerProvider extends LayerProvider {
 					? Math.round(u.speed * 3.6) + " km/h" : "";
 				const coords = loc.y.toFixed(5) + ", " + loc.x.toFixed(5);
 				const meta = [spd, coords].filter(Boolean).join(" · ");
-				const tip = esc`<b>\u{1F697} ${title}</b><br>` +
+				const emoji = moodEmoji(u.mood);
+				const tip = esc`<b>${emoji} ${title}</b><br>` +
 					esc`<span class="dw-cad-sub">${meta}</span>`;
-				keep("u:" + u.id, () =>
-					L.circleMarker([loc.y, loc.x], {
-						pane: "dwWazePane", radius: 4,
-						color: "#fff", weight: 1,
-						fillColor: "#33ccff", fillOpacity: 0.9,
-						interactive: true,
-					}).bindTooltip(tip, { className: "dw-waze-tip", sticky: true }),
-				(c) => { c.setLatLng([loc.y, loc.x]); c.setTooltipContent(tip); });
+				keep("u:" + u.id, () => {
+					const m = L.marker([loc.y, loc.x], {
+						icon: wazerIcon(emoji), pane: "dwWazePane", interactive: true,
+					}).bindTooltip(tip, { className: "dw-waze-tip", sticky: true });
+					m._dwEmoji = emoji;
+					m._dwData = { color: "#33ccff", name: title };
+					return m;
+				}, (m) => {
+					m.setLatLng([loc.y, loc.x]);
+					if (m._dwEmoji !== emoji) { m.setIcon(wazerIcon(emoji)); m._dwEmoji = emoji; }
+					m.setTooltipContent(tip);
+				});
 			}
 
 			for (const lyr of prev.values()) {
