@@ -5365,14 +5365,12 @@
       }
     );
   }
-  function _renderSccPropertyHistory(res, maxRows) {
+  function _renderSccPropertyHistory(res) {
     if (!res || !res.hist.length) {
       return res && res.prop.address ? esc`<b>SCC applications</b><br><span class="dw-scc-sub">None on record for ${res.prop.address}.</span>` : "";
     }
-    const max = maxRows || 8;
-    const rows = res.hist.slice(0, max).map((h) => _histRowHtml(h, "")).join("");
-    const extra = res.hist.length > max ? esc`<div class="dw-scc-sub">+${res.hist.length - max} more on this parcel</div>` : "";
-    return esc`<b>SCC applications (${res.hist.length})</b>` + `<div class="dw-scc-stages">${rows}${extra}</div>`;
+    const rows = res.hist.map((h) => _histRowHtml(h, "")).join("");
+    return esc`<b>SCC applications (${res.hist.length})</b>` + `<div class="dw-scc-stages">${rows}</div>`;
   }
   function _deviText(s) {
     return String(s || "").replace(/<[^>]*>/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
@@ -5441,10 +5439,9 @@
       const ordered = hist.slice().sort(
         (a, b) => isRel(b) - isRel(a) || b.dateMs - a.dateMs
       );
-      const rows = ordered.slice(0, 8).map((h) => _histRowHtml(h, focalBase)).join("");
-      const extra = hist.length > 8 ? esc`<div class="dw-scc-sub">+${hist.length - 8} more on this parcel</div>` : "";
+      const rows = ordered.map((h) => _histRowHtml(h, focalBase)).join("");
       bits.push(
-        `<div class="dw-scc-det-sec"><b>Property history (${hist.length})</b><div class="dw-scc-stages">${rows}${extra}</div></div>`
+        `<div class="dw-scc-det-sec"><b>Property history (${hist.length})</b><div class="dw-scc-stages">${rows}</div></div>`
       );
     }
     return bits.join("");
@@ -8024,7 +8021,10 @@
         ".dw-scc-detail { border-top: 1px solid #e5e7eb; margin-top: 6px; padding-top: 6px; }",
         ".dw-scc-det-sec { margin-bottom: 5px; }",
         ".dw-scc-det-sec b { font-weight: 700; font-size: 11px; }",
-        ".dw-scc-stages { max-height: 150px; overflow-y: auto; margin-top: 3px; }",
+        ".dw-scc-stages { max-height: 240px; overflow-y: auto; margin-top: 3px; padding-right: 4px; }",
+        // The site's location popup has more vertical room than a
+        // Leaflet marker popup — let the full parcel history breathe.
+        ".popup-on-location .dw-scc-stages { max-height: 320px; }",
         // flex-wrap + a min share for the description keep these rows
         // readable in ANY container: a long meta ("In Progress ·
         // lodged 26 Jun 2019") wraps under the description instead of

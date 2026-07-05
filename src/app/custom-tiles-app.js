@@ -1071,7 +1071,10 @@ export class CustomTilesApp {
 			".dw-scc-detail { border-top: 1px solid #e5e7eb; margin-top: 6px; padding-top: 6px; }",
 			".dw-scc-det-sec { margin-bottom: 5px; }",
 			".dw-scc-det-sec b { font-weight: 700; font-size: 11px; }",
-			".dw-scc-stages { max-height: 150px; overflow-y: auto; margin-top: 3px; }",
+			".dw-scc-stages { max-height: 240px; overflow-y: auto; margin-top: 3px; padding-right: 4px; }",
+			// The site's location popup has more vertical room than a
+			// Leaflet marker popup — let the full parcel history breathe.
+			".popup-on-location .dw-scc-stages { max-height: 320px; }",
 			// flex-wrap + a min share for the description keep these rows
 			// readable in ANY container: a long meta ("In Progress ·
 			// lodged 26 Jun 2019") wraps under the description instead of

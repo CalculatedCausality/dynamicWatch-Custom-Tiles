@@ -912,9 +912,10 @@ t("_renderSccDetail shows officer/status facts and property history", () => {
 	assert(html.includes("RAL26/0028"), "history row");
 });
 
-t("_renderSccDetail promotes same-approval root above the row cap", () => {
-	// 9 unrelated newer apps + the 2004 root — newest-first alone would
-	// push the root past the 8-row cap; relation-first must surface it.
+t("_renderSccDetail renders ALL history rows, same-approval root first", () => {
+	// 9 unrelated newer apps + the 2004 root — relation-first ordering
+	// must lead with the root, and no row may be dropped to a "+N more"
+	// stub (the container scrolls instead).
 	const hist = [];
 	for (let i = 0; i < 9; i++) {
 		hist.push({
@@ -931,9 +932,32 @@ t("_renderSccDetail promotes same-approval root above the row cap", () => {
 	const html = dw._renderSccDetail({
 		properties: [], stages: [], history: hist, focal: "REC02/0156.04",
 	});
-	assert(html.includes("REC02/0156"), "root approval visible");
+	assert(html.indexOf("REC02/0156") <
+		html.indexOf("OPW20/0000"), "root approval leads the list");
 	assert(html.includes("same approval"), "root carries sibling chip");
-	assert(html.includes("+2 more"), "cap still applies to the rest");
+	for (let i = 0; i < 9; i++) {
+		assert(html.includes(`OPW2${i}/000${i}`), `row ${i} rendered`);
+	}
+	assert(!html.includes("more on this parcel"), "no +N truncation stub");
+});
+
+t("_renderSccPropertyHistory renders every row with no cap", () => {
+	const hist = [];
+	for (let i = 0; i < 17; i++) {
+		hist.push({
+			num: `OPW${i}/1`, kind: "DA", desc: "d",
+			progress: "Decided or Past", decision: "Approved",
+			dateMs: i, decidedMs: i,
+		});
+	}
+	const html = dw._renderSccPropertyHistory({
+		prop: { landNo: 1, address: "X" }, hist,
+	});
+	assert(html.includes("SCC applications (17)"), "count header");
+	for (let i = 0; i < 17; i++) {
+		assert(html.includes(`OPW${i}/1`), `row ${i} rendered`);
+	}
+	assert(!html.includes("more on this parcel"), "no +N truncation stub");
 });
 
 t("advertised QLD Relief and National Parks overlays are grouped", () => {

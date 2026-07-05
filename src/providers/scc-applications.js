@@ -311,22 +311,19 @@ export function fetchSccPropertyHistory(lat, lng, cb) {
 }
 
 // Location-popup section: parcel header + every application lodged on
-// it, newest first, each number deep-linking into Development.i.
-export function _renderSccPropertyHistory(res, maxRows) {
+// it, newest first, each number deep-linking into Development.i. The
+// FULL list always renders — the container scrolls rather than
+// truncating to a "+N more" stub.
+export function _renderSccPropertyHistory(res) {
 	if (!res || !res.hist.length) {
 		return res && res.prop.address
 			? esc`<b>SCC applications</b><br><span class="dw-scc-sub">None on record for ${res.prop.address}.</span>`
 			: "";
 	}
-	const max = maxRows || 8;
-	const rows = res.hist.slice(0, max)
-		.map((h) => _histRowHtml(h, "")).join("");
-	const extra = res.hist.length > max
-		? esc`<div class="dw-scc-sub">+${res.hist.length - max} more on this parcel</div>`
-		: "";
+	const rows = res.hist.map((h) => _histRowHtml(h, "")).join("");
 	return (
 		esc`<b>SCC applications (${res.hist.length})</b>` +
-		`<div class="dw-scc-stages">${rows}${extra}</div>`
+		`<div class="dw-scc-stages">${rows}</div>`
 	);
 }
 
@@ -426,19 +423,15 @@ export function _renderSccDetail(d) {
 		// Same-approval siblings (REC02/0156.* of a REC02/0156.04 focal)
 		// jump the newest-first order so the ROOT approval — the thing
 		// that actually authorises works on the ground, however old —
-		// is always visible above the row cap, not lost in "+N more".
+		// leads the list. Every row renders; the container scrolls.
 		const isRel = (h) =>
 			focalBase && String(h.num).split(".")[0] === focalBase ? 1 : 0;
 		const ordered = hist.slice().sort(
 			(a, b) => (isRel(b) - isRel(a)) || (b.dateMs - a.dateMs));
-		const rows = ordered.slice(0, 8)
-			.map((h) => _histRowHtml(h, focalBase)).join("");
-		const extra = hist.length > 8
-			? esc`<div class="dw-scc-sub">+${hist.length - 8} more on this parcel</div>`
-			: "";
+		const rows = ordered.map((h) => _histRowHtml(h, focalBase)).join("");
 		bits.push(
 			`<div class="dw-scc-det-sec"><b>Property history (${hist.length})</b>` +
-			`<div class="dw-scc-stages">${rows}${extra}</div></div>`,
+			`<div class="dw-scc-stages">${rows}</div></div>`,
 		);
 	}
 	return bits.join("");
