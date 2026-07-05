@@ -316,8 +316,12 @@ export function fetchSccPropertyHistory(lat, lng, cb) {
 // truncating to a "+N more" stub.
 export function _renderSccPropertyHistory(res) {
 	if (!res || !res.hist.length) {
+		// "None" ≠ never approved: Development.i only covers
+		// applications lodged since ~2007 (SCC's own disclaimer).
+		// Older approvals live in pre-amalgamation council archives.
 		return res && res.prop.address
-			? esc`<b>SCC applications</b><br><span class="dw-scc-sub">None on record for ${res.prop.address}.</span>`
+			? esc`<b>SCC applications</b><br><span class="dw-scc-sub">None on record for ${res.prop.address}.</span>` +
+				'<br><span class="dw-scc-sub">Development.i only lists applications lodged since ~2007 — older approvals sit in council archives.</span>'
 			: "";
 	}
 	const rows = res.hist.map((h) => _histRowHtml(h, "")).join("");

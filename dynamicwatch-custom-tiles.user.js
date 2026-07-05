@@ -5367,7 +5367,7 @@
   }
   function _renderSccPropertyHistory(res) {
     if (!res || !res.hist.length) {
-      return res && res.prop.address ? esc`<b>SCC applications</b><br><span class="dw-scc-sub">None on record for ${res.prop.address}.</span>` : "";
+      return res && res.prop.address ? esc`<b>SCC applications</b><br><span class="dw-scc-sub">None on record for ${res.prop.address}.</span>` + '<br><span class="dw-scc-sub">Development.i only lists applications lodged since ~2007 — older approvals sit in council archives.</span>' : "";
     }
     const rows = res.hist.map((h) => _histRowHtml(h, "")).join("");
     return esc`<b>SCC applications (${res.hist.length})</b>` + `<div class="dw-scc-stages">${rows}</div>`;
