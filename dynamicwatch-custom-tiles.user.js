@@ -5594,10 +5594,16 @@
         weight: (live ? 1.5 : 1) * (_isTouch() ? 1.5 : 1),
         opacity: live ? 0.9 : 0.5,
         fillColor: meta.color,
-        fillOpacity: live ? 0.85 : 0.35
+        fillOpacity: live ? 0.85 : 0.35,
+        // Keep marker taps OURS: without this the click re-fires
+        // on the map and the site opens its add-point popup on
+        // top of the application popup.
+        bubblingMouseEvents: false
       }),
       tipClass: "dw-scc-tip",
-      tooltip: (p) => _formatSccTooltip(p, kind, live),
+      // Touch has no hover — a bound tooltip would open on tap,
+      // stacking on the popup. The popup is the single touch surface.
+      tooltip: _isTouch() ? null : (p) => _formatSccTooltip(p, kind, live),
       popup: (p) => _formatSccPopup(p, kind, live),
       popupOpts: { maxWidth: 320, className: "dw-scc-pop-wrap" },
       attribution: 'Applications &copy; <a href="https://developmenti.sunshinecoast.qld.gov.au/" target="_blank" rel="noreferrer">Sunshine Coast Council</a>'
@@ -5656,10 +5662,11 @@
         weight: 2 * (_isTouch() ? 1.5 : 1),
         opacity: 0.95,
         fillColor: "#dc2626",
-        fillOpacity: 0.9
+        fillOpacity: 0.9,
+        bubblingMouseEvents: false
       }),
       tipClass: "dw-scc-tip",
-      tooltip: (p) => _formatNotifTooltip(p),
+      tooltip: _isTouch() ? null : (p) => _formatNotifTooltip(p),
       popup: (p) => _formatSccPopup(_notifPopupProps(p), "DA", true),
       popupOpts: { maxWidth: 320, className: "dw-scc-pop-wrap" },
       attribution: 'Applications &copy; <a href="https://developmenti.sunshinecoast.qld.gov.au/" target="_blank" rel="noreferrer">Sunshine Coast Council</a>'

@@ -622,9 +622,15 @@ function _makeSubLayer(kind, live) {
 				opacity: live ? 0.9 : 0.5,
 				fillColor: meta.color,
 				fillOpacity: live ? 0.85 : 0.35,
+				// Keep marker taps OURS: without this the click re-fires
+				// on the map and the site opens its add-point popup on
+				// top of the application popup.
+				bubblingMouseEvents: false,
 			}),
 		tipClass: "dw-scc-tip",
-		tooltip: (p) => _formatSccTooltip(p, kind, live),
+		// Touch has no hover — a bound tooltip would open on tap,
+		// stacking on the popup. The popup is the single touch surface.
+		tooltip: _isTouch() ? null : (p) => _formatSccTooltip(p, kind, live),
 		popup: (p) => _formatSccPopup(p, kind, live),
 		popupOpts: { maxWidth: 320, className: "dw-scc-pop-wrap" },
 		attribution:
@@ -702,9 +708,10 @@ function _makeNotifyingLayer() {
 				opacity: 0.95,
 				fillColor: "#dc2626",
 				fillOpacity: 0.9,
+				bubblingMouseEvents: false,
 			}),
 		tipClass: "dw-scc-tip",
-		tooltip: (p) => _formatNotifTooltip(p),
+		tooltip: _isTouch() ? null : (p) => _formatNotifTooltip(p),
 		popup: (p) => _formatSccPopup(_notifPopupProps(p), "DA", true),
 		popupOpts: { maxWidth: 320, className: "dw-scc-pop-wrap" },
 		attribution:
