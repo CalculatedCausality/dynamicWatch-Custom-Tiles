@@ -721,14 +721,113 @@ t("_renderSccDetail re-escapes decoded text and handles empty", () => {
 		.includes("No further detail"), "empty → graceful message");
 });
 
-t("SCC submenu state defaults to all types, current status only", () => {
+t("SCC submenu state defaults to all types, current + notifying", () => {
 	const def = dw._sccDefaultState();
 	assert(def.DA && def.BA && def.PL, "all application types on");
 	assert(def.live, "current status on");
 	assert(!def.past, "decided status off");
+	assert(def.notif, "public-notification layer on");
 	// Sandbox GM_getValue returns the default "{}" — loader must fall
 	// back cleanly to defaults (also covers corrupt-JSON path).
 	deepEq(dw._sccLoadState(), def, "empty storage → defaults");
+});
+
+t("_deviAppByIdUrl maps kind to appType and validates the id", () => {
+	eq(dw._deviAppByIdUrl("DA", "REC02/0156.04"),
+		"https://developmenti.sunshinecoast.qld.gov.au/Geo/GetApplicationById" +
+		"?applicationId=REC02%2F0156.04&appType=development");
+	assert(dw._deviAppByIdUrl("BA", "PC26/1").includes("appType=building"));
+	assert(dw._deviAppByIdUrl("PL", "PLQ26/1").includes("appType=plumbing"));
+	eq(dw._deviAppByIdUrl("DA", '"><script>'), "", "unsafe id rejected");
+	eq(dw._deviAppByIdUrl("ZZ", "PC26/1"), "", "unknown kind rejected");
+});
+
+t("_deviFilterBody builds land-history and notification variants", () => {
+	const hist = dw._deviFilterBody({ landNumber: 1530850 });
+	eq(hist.Progress, "all");
+	eq(hist.LandNumber, 1530850);
+	assert(hist.IncludeDA && hist.IncludeBA && hist.IncludePlumb,
+		"history includes all application kinds");
+	eq(hist.BBox, null);
+	const notif = dw._deviFilterBody({
+		progress: "notification", bbox: "152.5,-27.1,153.2,-26.0",
+		includeBA: false, includePlumb: false,
+	});
+	eq(notif.Progress, "notification");
+	eq(notif.BBox, "152.5,-27.1,153.2,-26.0");
+	assert(notif.IncludeDA && !notif.IncludeBA && !notif.IncludePlumb,
+		"notification variant is DA-only");
+	eq(notif.LandNumber, null);
+	eq(notif.MaxRecords, 200);
+});
+
+t("_dedupeDeviFeatures flattens multiSpot and dedupes per app+spot", () => {
+	const feat = (num, x) => ({
+		type: "Feature",
+		geometry: { type: "Point", coordinates: [x, -26.5] },
+		properties: { application_number: num },
+	});
+	const out = dw._dedupeDeviFeatures({
+		features: [feat("A1/1", 152.1), feat("A1/1", 152.1)],
+		multiSpot: {
+			"152.1,-26.5": [feat("A1/1", 152.1), feat("B2/2", 152.1)],
+			"152.2,-26.5": [feat("A1/1", 152.2)],
+		},
+	});
+	// A1/1@152.1 deduped across features+multiSpot; A1/1@152.2 is a
+	// different parcel spot of the same app, so it stays.
+	deepEq(
+		out.map((f) => f.properties.application_number + "@" +
+			f.geometry.coordinates[0]).sort(),
+		["A1/1@152.1", "A1/1@152.2", "B2/2@152.1"],
+	);
+	deepEq(dw._dedupeDeviFeatures(null), [], "null-safe");
+	deepEq(dw._dedupeDeviFeatures({}), [], "empty-safe");
+});
+
+t("_formatNotifTooltip flags the submission window and escapes", () => {
+	const html = dw._formatNotifTooltip({
+		application_number: "MCU26/0088",
+		description: "<b>551</b> David Low Way — Service Station",
+		alertDate: "2026-06-29T14:00:00Z",
+	});
+	assert(html.includes("MCU26/0088"), "app number");
+	assert(html.includes("On public notification"), "badge text");
+	assert(html.includes("Submissions invited"), "alert date line");
+	assert(html.includes("&lt;b&gt;551&lt;/b&gt;"), "description escaped");
+});
+
+t("_notifPopupProps adapts Development.i fields to popup schema", () => {
+	const p = dw._notifPopupProps({
+		application_number: "MCU26/0088",
+		application_type: "Material Change of Use",
+		category_desc: "Impact",
+		description: "Service Station",
+		assessment_level: "Impact",
+		date_received: "2026-05-01T14:00:00Z",
+	});
+	eq(p.ram_id, "MCU26/0088");
+	eq(p.progress, "In Progress — On Public Notification");
+	assert(p.d_date_rec > 0, "date parsed to epoch ms");
+	const html = dw._formatSccPopup(p, "DA", true);
+	assert(html.includes("FilterDirect?filters=DANumber%3DMCU26%2F0088"),
+		"deep link built from adapted props");
+});
+
+t("_renderSccDetail shows officer/status facts and property history", () => {
+	const html = dw._renderSccDetail({
+		properties: [], stages: [],
+		officer: "Marc <Cornell>", appType: "Reconfiguring A Lot",
+		statusDesc: "Application undergoing assessment",
+		history: [
+			{ num: "RAL26/0028", desc: "1 Lot into 20 Lots", progress: "In Progress", dateMs: 1745200000000 },
+			{ num: "OPW24/0165", desc: "Electrical Reticulation", progress: "Decided", dateMs: 1710000000000 },
+		],
+	});
+	assert(html.includes("Officer: Marc &lt;Cornell&gt;"), "officer escaped");
+	assert(html.includes("Application undergoing assessment"), "status line");
+	assert(html.includes("Property history (2)"), "history header + count");
+	assert(html.includes("RAL26/0028"), "history row");
 });
 
 t("advertised QLD Relief and National Parks overlays are grouped", () => {

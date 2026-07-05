@@ -97,14 +97,88 @@ const _DEVI_TYPE = {
 	PL: "plan_scc_plumbing_apps_unique",
 };
 
+// appType param for /Geo/GetApplicationById (Development.i's structured
+// JSON: project officer, decision_desc, appeal_result, land_no…).
+const _DEVI_APPTYPE = { DA: "development", BA: "building", PL: "plumbing" };
+
+function _validRamId(ramId) {
+	const id = String(ramId || "").trim();
+	return id && /^[A-Za-z0-9/\-. ]+$/.test(id) ? id : "";
+}
+
 export function _deviDetailUrl(kind, ramId) {
 	const type = _DEVI_TYPE[kind];
-	const id = String(ramId || "").trim();
-	if (!type || !id || !/^[A-Za-z0-9/\-. ]+$/.test(id)) return "";
+	const id = _validRamId(ramId);
+	if (!type || !id) return "";
 	return (
 		CFG.SCC_DEVI_BASE + "/Home/ApplicationDetail?type=" + type +
 		"&id=" + encodeURIComponent(id)
 	);
+}
+
+export function _deviAppByIdUrl(kind, ramId) {
+	const appType = _DEVI_APPTYPE[kind];
+	const id = _validRamId(ramId);
+	if (!appType || !id) return "";
+	return (
+		CFG.SCC_DEVI_BASE + "/Geo/GetApplicationById?applicationId=" +
+		encodeURIComponent(id) + "&appType=" + appType
+	);
+}
+
+// POST body for /Geo/GetApplicationFilterResults — Development.i's map
+// query engine. Mirrors the site's own default filter object; we use
+// it two ways: LandNumber → every application ever lodged on a parcel
+// (history collation), and Progress "notification" + BBox → apps
+// currently on public notification (open for submissions).
+export function _deviFilterBody(o) {
+	o = o || {};
+	return {
+		Progress: o.progress || "all",
+		StartDateUnixEpochNumber: null, EndDateUnixEpochNumber: null,
+		DateRangeField: "submitted", DateRangeDescriptor: null,
+		LotPlan: null,
+		LandNumber: o.landNumber != null ? o.landNumber : null,
+		PropNumber: null, DANumber: null, BANumber: null, PlumbNumber: null,
+		IncludeDA: true,
+		IncludeBA: o.includeBA !== false,
+		IncludePlumb: o.includePlumb !== false,
+		LocalityId: null, DivisionId: null,
+		ApplicationTypeId: null, SubCategoryUseId: null,
+		ShowCode: true, ShowImpact: true, ShowOther: true,
+		PagingStartIndex: 0, MaxRecords: o.maxRecords || 200,
+		Boundary: null, ViewPort: null, IncludeAroundMe: false,
+		SortField: "submitted", SortAscending: false,
+		BBox: o.bbox || null,
+		PixelWidth: 800, PixelHeight: 800,
+	};
+}
+
+// Filter-results responses split matches between `features` and a
+// `multiSpot` map (coordinate → feature[]) for co-located points.
+// Flatten both and dedupe (multi-parcel applications repeat per spot).
+export function _dedupeDeviFeatures(data) {
+	if (!data) return [];
+	const all = (Array.isArray(data.features) ? data.features : []).slice();
+	const ms = data.multiSpot;
+	if (ms && typeof ms === "object") {
+		for (const key of Object.keys(ms)) {
+			if (Array.isArray(ms[key])) all.push(...ms[key]);
+		}
+	}
+	const seen = new Set();
+	const out = [];
+	for (const f of all) {
+		const p = (f && f.properties) || {};
+		const num = p.application_number;
+		if (!num) continue;
+		const coords = (f.geometry && f.geometry.coordinates) || [];
+		const key = num + "@" + coords.join(",");
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(f);
+	}
+	return out;
 }
 
 // Tag-strip + entity-decode for text pulled out of the detail fragment.
@@ -155,10 +229,24 @@ export function _parseSccDetailHtml(html) {
 }
 
 export function _renderSccDetail(d) {
-	if (!d || (!d.properties.length && !d.stages.length)) {
+	if (!d || (!d.properties.length && !d.stages.length &&
+		!(d.history || []).length && !d.officer && !d.statusDesc)) {
 		return '<span class="dw-scc-sub">No further detail available.</span>';
 	}
 	const bits = [];
+
+	// Status/officer facts from the structured GetApplicationById JSON.
+	const facts = [];
+	if (d.statusDesc) facts.push(esc`${d.statusDesc}`);
+	if (d.appType)    facts.push(esc`Type: ${d.appType}`);
+	if (d.officer)    facts.push(esc`Officer: ${d.officer}`);
+	if (d.appeal)     facts.push(esc`Appeal: ${d.appeal}`);
+	if (facts.length) {
+		bits.push(
+			`<div class="dw-scc-det-sec dw-scc-sub">${facts.join("<br>")}</div>`,
+		);
+	}
+
 	if (d.properties.length) {
 		const shown = d.properties.slice(0, 3).map(_escHtml).join("<br>");
 		const extra = d.properties.length > 3
@@ -183,32 +271,123 @@ export function _renderSccDetail(d) {
 			`<div class="dw-scc-stages">${rows}</div></div>`,
 		);
 	}
+	const hist = d.history || [];
+	if (hist.length) {
+		const rows = hist.slice(0, 8).map((h) => {
+			const meta = [h.progress, h.dateMs > 0 ? _fmtSccDate(h.dateMs) : ""]
+				.filter(Boolean).join(" · ");
+			return (
+				esc`<div class="dw-scc-stage"><span class="dw-scc-stage-desc">` +
+				esc`<b>${h.num}</b> ${_histClip(h.desc)}</span>` +
+				(meta ? esc`<span class="dw-scc-stage-val">${meta}</span>` : "") +
+				"</div>"
+			);
+		}).join("");
+		const extra = hist.length > 8
+			? esc`<div class="dw-scc-sub">+${hist.length - 8} more on this parcel</div>`
+			: "";
+		bits.push(
+			`<div class="dw-scc-det-sec"><b>Property history (${hist.length})</b>` +
+			`<div class="dw-scc-stages">${rows}${extra}</div></div>`,
+		);
+	}
 	return bits.join("");
 }
 
+function _histClip(s) { return _clip(s, 64); }
+
+// Collates three Development.i sources into one cached detail object:
+//   1. /Home/ApplicationDetail (HTML fragment) → assessment stages +
+//      associated parcel addresses
+//   2. /Geo/GetApplicationById (JSON)          → project officer,
+//      application type, appeal result, live status text, land_no
+//   3. /Geo/GetApplicationFilterResults (POST) → every other
+//      application on the same parcel (property history)
+// 1+2 run in parallel; 3 chains off 2's land_no. One cache entry per
+// application; transient failures aren't persisted.
 export function fetchSccDetail(kind, ramId, cb) {
-	const url = _deviDetailUrl(kind, ramId);
-	if (!url) { cb(null); return; }
+	const fragUrl = _deviDetailUrl(kind, ramId);
+	const infoUrl = _deviAppByIdUrl(kind, ramId);
+	if (!fragUrl || !infoUrl) { cb(null); return; }
 	cachedFetch(
 		"scc_detail_" + kind + "_" + ramId,
 		_CACHE_TTL.SCC_DETAIL,
-		(done) => gmGet(
-			url,
-			{ headers: { "X-Requested-With": "XMLHttpRequest", Accept: "text/html" } },
-			(err, r) => {
-				if (err || !r || r.status < 200 || r.status >= 300) {
-					// Transient failure → don't persist (poisoned-cache
-					// lesson from the OnTheHouse pipeline).
-					done(err || new Error("http " + (r && r.status)), undefined);
+		(done) => {
+			let frag = null, info = null, pending = 2;
+
+			const finish = (history) => {
+				const out = Object.assign(
+					{ properties: [], stages: [], history: [] },
+					frag || {},
+				);
+				if (history) out.history = history;
+				if (info) {
+					out.officer = String(info.project_officer || "").trim();
+					out.appType = String(info.application_type || "").trim();
+					out.statusDesc = String(info.decision_desc || "").trim();
+					const appeal = String(info.appeal_result || "").trim();
+					if (appeal && !/^not applicable$/i.test(appeal)) {
+						out.appeal = appeal;
+					}
+				}
+				const hasAnything = out.properties.length || out.stages.length ||
+					out.history.length || out.officer || out.statusDesc;
+				if (!hasAnything && !frag && !info) {
+					// Both sources failed outright → transient, don't cache.
+					done(new Error("devi detail unavailable"), undefined);
 					return;
 				}
-				const parsed = _parseSccDetailHtml(r.responseText);
-				// Persist even an empty parse (as null) — a structurally
-				// empty page won't grow rows within the TTL.
-				done(null, (parsed.properties.length || parsed.stages.length)
-					? parsed : null);
-			},
-		),
+				done(null, hasAnything ? out : null);
+			};
+
+			const step = () => {
+				if (--pending) return;
+				const landNo = info && info.land_no;
+				if (landNo == null) { finish(); return; }
+				gmJsonGet(
+					CFG.SCC_DEVI_BASE + "/Geo/GetApplicationFilterResults",
+					{
+						method: "POST",
+						data: JSON.stringify(_deviFilterBody({ landNumber: landNo })),
+						headers: { "Content-Type": "application/json" },
+					},
+					(err, data) => {
+						if (err || !data) { finish(); return; }
+						const seen = new Set([ramId]);
+						const hist = [];
+						for (const f of _dedupeDeviFeatures(data)) {
+							const p = f.properties || {};
+							const num = p.application_number;
+							if (seen.has(num)) continue;
+							seen.add(num);
+							hist.push({
+								num,
+								desc: String(p.description || ""),
+								progress: String(p.progress || ""),
+								dateMs: Date.parse(p.date_received || "") || 0,
+							});
+						}
+						hist.sort((a, b) => b.dateMs - a.dateMs);
+						finish(hist);
+					},
+				);
+			};
+
+			gmGet(
+				fragUrl,
+				{ headers: { "X-Requested-With": "XMLHttpRequest", Accept: "text/html" } },
+				(err, r) => {
+					frag = (!err && r && r.status >= 200 && r.status < 300)
+						? _parseSccDetailHtml(r.responseText) : null;
+					step();
+				},
+			);
+			gmJsonGet(infoUrl, (err, d) => {
+				info = (!err && d && Array.isArray(d.features) && d.features[0])
+					? (d.features[0].properties || null) : null;
+				step();
+			});
+		},
 		(err, v) => cb(err ? null : v),
 	);
 }
@@ -313,6 +492,86 @@ function _makeSubLayer(kind, live) {
 	}, gmJsonGet);
 }
 
+/* -- "On public notification" sublayer ---------------------------------
+ * Development.i tracks a status the ArcGIS service doesn't expose:
+ * applications currently on public notification — the window where
+ * anyone can lodge a submission/objection. Queried straight from the
+ * filter-results POST API with Progress:"notification" + viewport
+ * BBox; council-wide it's only ~a dozen applications, so this renders
+ * from far out. All notifying apps are development applications.
+ */
+
+export function _formatNotifTooltip(p) {
+	const lines = [
+		esc`<b>${p.application_number || "Application"}</b> · ` +
+		'<span class="dw-scc-notif-badge">On public notification</span>',
+	];
+	const desc = _clip(p.description, 110);
+	if (desc) lines.push(esc`<span class="dw-scc-sub">${desc}</span>`);
+	const alertMs = Date.parse(p.alertDate || "") || 0;
+	if (alertMs) {
+		lines.push(esc`<span class="dw-scc-sub">Submissions invited — listed ${_fmtSccDate(alertMs)}</span>`);
+	}
+	return lines.join("<br>");
+}
+
+// Adapt the Development.i property names onto the shared popup
+// formatter (ArcGIS field names), so the notifying markers get the
+// same enriched popup as regular application markers.
+export function _notifPopupProps(p) {
+	return {
+		ram_id: p.application_number,
+		group_desc: p.group_desc || p.application_type,
+		category_desc: p.category_desc,
+		description: p.description,
+		progress: "In Progress — On Public Notification",
+		assessment_level: p.assessment_level,
+		d_date_rec: Date.parse(p.date_received || "") || null,
+	};
+}
+
+function _makeNotifyingLayer() {
+	return makeArcgisQueryLayer({
+		label: "SCC notifying applications",
+		pane: PANE,
+		paneZIndex: PANE_Z,
+		minZoom: 10,
+		buildRequest: (bbox) => ({
+			url: CFG.SCC_DEVI_BASE + "/Geo/GetApplicationFilterResults",
+			gmOpts: {
+				method: "POST",
+				data: JSON.stringify(_deviFilterBody({
+					progress: "notification",
+					bbox,
+					includeBA: false, includePlumb: false,
+				})),
+				headers: { "Content-Type": "application/json" },
+			},
+		}),
+		transform: (data) => ({
+			type: "FeatureCollection",
+			features: _dedupeDeviFeatures(data),
+		}),
+		pointToLayer: (f, latlng) =>
+			L.circleMarker(latlng, {
+				pane: PANE,
+				radius: 8,
+				color: "#ffffff",
+				weight: 2,
+				opacity: 0.95,
+				fillColor: "#dc2626",
+				fillOpacity: 0.9,
+			}),
+		tipClass: "dw-scc-tip",
+		tooltip: (p) => _formatNotifTooltip(p),
+		popup: (p) => _formatSccPopup(_notifPopupProps(p), "DA", true),
+		popupOpts: { maxWidth: 320, className: "dw-scc-pop-wrap" },
+		attribution:
+			'Applications &copy; <a href="https://developmenti.sunshinecoast.qld.gov.au/"' +
+			' target="_blank" rel="noreferrer">Sunshine Coast Council</a>',
+	}, gmJsonGet);
+}
+
 /* -- Sublayer selection state + on-map submenu -------------------------
  * The layer panel gets ONE "SCC Applications" entry; while it's on, a
  * small panel in the map corner picks which sublayers render
@@ -321,11 +580,13 @@ function _makeSubLayer(kind, live) {
  * as small muted dots when wanted. Selection persists in GM storage.
  */
 
-// One flag per application type plus two status flags that apply
-// across all types: a sublayer renders iff its type AND its status are
-// both ticked. "current" = the In Progress sets, "past" = Decided.
+// One flag per application type plus status flags that apply across
+// all types: a sublayer renders iff its type AND its status are both
+// ticked. "current" = the In Progress sets, "past" = Decided.
+// "notif" is the standalone public-notification layer (Development.i
+// data; always development applications, independent of type flags).
 export function _sccDefaultState() {
-	return { DA: true, BA: true, PL: true, live: true, past: false };
+	return { DA: true, BA: true, PL: true, live: true, past: false, notif: true };
 }
 
 export function _sccLoadState() {
@@ -364,6 +625,11 @@ function _buildSccPanel(state, onChange) {
 		'<span class="dw-scc-row-label">Status</span>' +
 		'<label><input type="checkbox" data-key="live"> current</label>' +
 		'<label><input type="checkbox" data-key="past"> decided</label>' +
+		"</div>" +
+		'<div class="dw-scc-row dw-scc-notif-row">' +
+		'<label><input type="checkbox" data-key="notif">' +
+		'<span class="dw-scc-dot" style="background:#dc2626"></span>' +
+		"on public notification</label>" +
 		"</div>" +
 		'<div class="dw-scc-hint">decided sets appear from zoom 16</div>';
 	el.querySelectorAll("input[data-key]").forEach((cb) => {
@@ -414,21 +680,31 @@ function _getSccAppsLayerClass() {
 		},
 
 		_syncSubs() {
+			const want = {};
 			for (const kind of Object.keys(_KIND)) {
 				for (const phase of ["live", "past"]) {
-					const key = kind + "_" + phase;
-					const on = this._state[kind] && this._state[phase];
-					let sub = this._subs[key];
-					if (on && !sub) {
-						sub = this._subs[key] =
-							_makeSubLayer(kind, phase === "live");
-					}
-					if (!sub) continue;
-					// addLayer/removeLayer on an attached group
-					// adds/removes the child from the map immediately.
-					if (on && !this.hasLayer(sub)) this.addLayer(sub);
-					else if (!on && this.hasLayer(sub)) this.removeLayer(sub);
+					want[kind + "_" + phase] =
+						!!(this._state[kind] && this._state[phase]);
 				}
+			}
+			// Public-notification layer is standalone (Development.i
+			// source, development apps only) — type flags don't gate it.
+			want.notif = !!this._state.notif;
+
+			for (const key of Object.keys(want)) {
+				const on = want[key];
+				let sub = this._subs[key];
+				if (on && !sub) {
+					sub = this._subs[key] = key === "notif"
+						? _makeNotifyingLayer()
+						: _makeSubLayer(key.split("_")[0],
+							key.split("_")[1] === "live");
+				}
+				if (!sub) continue;
+				// addLayer/removeLayer on an attached group adds/removes
+				// the child from the map immediately.
+				if (on && !this.hasLayer(sub)) this.addLayer(sub);
+				else if (!on && this.hasLayer(sub)) this.removeLayer(sub);
 			}
 		},
 	});

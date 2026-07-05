@@ -5028,10 +5028,18 @@
         this._lastBbox = bbox;
         const myGen = ++this._gen;
         const offset = 360 / (256 * Math.pow(2, z)) * 2;
-        const url = opts.queryUrl + "?f=geojson&returnGeometry=true&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326&spatialRel=esriSpatialRelIntersects&geometryPrecision=5&where=" + encodeURIComponent(opts.where) + "&outFields=" + encodeURIComponent(opts.outFields) + "&geometry=" + encodeURIComponent(bbox) + "&maxAllowableOffset=" + offset + // Deterministic order matters when the server truncates at
-        // maxRecordCount — e.g. newest applications survive the cut.
-        (opts.orderBy ? "&orderByFields=" + encodeURIComponent(opts.orderBy) : "");
-        gmJsonGet2(url, { timeout: timeoutMs }, (err, geojson) => {
+        let url, gmOpts = { timeout: timeoutMs };
+        if (opts.buildRequest) {
+          const req = opts.buildRequest(bbox, z);
+          url = req.url;
+          Object.assign(gmOpts, req.gmOpts || {});
+        } else {
+          url = opts.queryUrl + "?f=geojson&returnGeometry=true&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326&spatialRel=esriSpatialRelIntersects&geometryPrecision=5&where=" + encodeURIComponent(opts.where) + "&outFields=" + encodeURIComponent(opts.outFields) + "&geometry=" + encodeURIComponent(bbox) + "&maxAllowableOffset=" + offset + // Deterministic order matters when the server truncates
+          // at maxRecordCount — newest applications survive the cut.
+          (opts.orderBy ? "&orderByFields=" + encodeURIComponent(opts.orderBy) : "");
+        }
+        gmJsonGet2(url, gmOpts, (err, raw) => {
+          const geojson = !err && opts.transform ? opts.transform(raw) : raw;
           if (myGen !== this._gen || !this._group) return;
           if (err || geojson && geojson.error) {
             console.warn(
@@ -5188,11 +5196,81 @@
     BA: "plan_scc_building_apps_unique",
     PL: "plan_scc_plumbing_apps_unique"
   };
+  var _DEVI_APPTYPE = { DA: "development", BA: "building", PL: "plumbing" };
+  function _validRamId(ramId) {
+    const id = String(ramId || "").trim();
+    return id && /^[A-Za-z0-9/\-. ]+$/.test(id) ? id : "";
+  }
   function _deviDetailUrl(kind, ramId) {
     const type = _DEVI_TYPE[kind];
-    const id = String(ramId || "").trim();
-    if (!type || !id || !/^[A-Za-z0-9/\-. ]+$/.test(id)) return "";
+    const id = _validRamId(ramId);
+    if (!type || !id) return "";
     return CFG.SCC_DEVI_BASE + "/Home/ApplicationDetail?type=" + type + "&id=" + encodeURIComponent(id);
+  }
+  function _deviAppByIdUrl(kind, ramId) {
+    const appType = _DEVI_APPTYPE[kind];
+    const id = _validRamId(ramId);
+    if (!appType || !id) return "";
+    return CFG.SCC_DEVI_BASE + "/Geo/GetApplicationById?applicationId=" + encodeURIComponent(id) + "&appType=" + appType;
+  }
+  function _deviFilterBody(o) {
+    o = o || {};
+    return {
+      Progress: o.progress || "all",
+      StartDateUnixEpochNumber: null,
+      EndDateUnixEpochNumber: null,
+      DateRangeField: "submitted",
+      DateRangeDescriptor: null,
+      LotPlan: null,
+      LandNumber: o.landNumber != null ? o.landNumber : null,
+      PropNumber: null,
+      DANumber: null,
+      BANumber: null,
+      PlumbNumber: null,
+      IncludeDA: true,
+      IncludeBA: o.includeBA !== false,
+      IncludePlumb: o.includePlumb !== false,
+      LocalityId: null,
+      DivisionId: null,
+      ApplicationTypeId: null,
+      SubCategoryUseId: null,
+      ShowCode: true,
+      ShowImpact: true,
+      ShowOther: true,
+      PagingStartIndex: 0,
+      MaxRecords: o.maxRecords || 200,
+      Boundary: null,
+      ViewPort: null,
+      IncludeAroundMe: false,
+      SortField: "submitted",
+      SortAscending: false,
+      BBox: o.bbox || null,
+      PixelWidth: 800,
+      PixelHeight: 800
+    };
+  }
+  function _dedupeDeviFeatures(data) {
+    if (!data) return [];
+    const all = (Array.isArray(data.features) ? data.features : []).slice();
+    const ms = data.multiSpot;
+    if (ms && typeof ms === "object") {
+      for (const key of Object.keys(ms)) {
+        if (Array.isArray(ms[key])) all.push(...ms[key]);
+      }
+    }
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    for (const f of all) {
+      const p = f && f.properties || {};
+      const num = p.application_number;
+      if (!num) continue;
+      const coords = f.geometry && f.geometry.coordinates || [];
+      const key = num + "@" + coords.join(",");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(f);
+    }
+    return out;
   }
   function _deviText(s) {
     return String(s || "").replace(/<[^>]*>/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
@@ -5223,10 +5301,20 @@
     return out;
   }
   function _renderSccDetail(d) {
-    if (!d || !d.properties.length && !d.stages.length) {
+    if (!d || !d.properties.length && !d.stages.length && !(d.history || []).length && !d.officer && !d.statusDesc) {
       return '<span class="dw-scc-sub">No further detail available.</span>';
     }
     const bits = [];
+    const facts = [];
+    if (d.statusDesc) facts.push(esc`${d.statusDesc}`);
+    if (d.appType) facts.push(esc`Type: ${d.appType}`);
+    if (d.officer) facts.push(esc`Officer: ${d.officer}`);
+    if (d.appeal) facts.push(esc`Appeal: ${d.appeal}`);
+    if (facts.length) {
+      bits.push(
+        `<div class="dw-scc-det-sec dw-scc-sub">${facts.join("<br>")}</div>`
+      );
+    }
     if (d.properties.length) {
       const shown = d.properties.slice(0, 3).map(_escHtml).join("<br>");
       const extra = d.properties.length > 3 ? esc`<br><span class="dw-scc-sub">+${d.properties.length - 3} more</span>` : "";
@@ -5244,29 +5332,107 @@
         `<div class="dw-scc-det-sec"><b>Assessment stages</b><div class="dw-scc-stages">${rows}</div></div>`
       );
     }
+    const hist = d.history || [];
+    if (hist.length) {
+      const rows = hist.slice(0, 8).map((h) => {
+        const meta = [h.progress, h.dateMs > 0 ? _fmtSccDate(h.dateMs) : ""].filter(Boolean).join(" · ");
+        return esc`<div class="dw-scc-stage"><span class="dw-scc-stage-desc">` + esc`<b>${h.num}</b> ${_histClip(h.desc)}</span>` + (meta ? esc`<span class="dw-scc-stage-val">${meta}</span>` : "") + "</div>";
+      }).join("");
+      const extra = hist.length > 8 ? esc`<div class="dw-scc-sub">+${hist.length - 8} more on this parcel</div>` : "";
+      bits.push(
+        `<div class="dw-scc-det-sec"><b>Property history (${hist.length})</b><div class="dw-scc-stages">${rows}${extra}</div></div>`
+      );
+    }
     return bits.join("");
   }
+  function _histClip(s) {
+    return _clip(s, 64);
+  }
   function fetchSccDetail(kind, ramId, cb) {
-    const url = _deviDetailUrl(kind, ramId);
-    if (!url) {
+    const fragUrl = _deviDetailUrl(kind, ramId);
+    const infoUrl = _deviAppByIdUrl(kind, ramId);
+    if (!fragUrl || !infoUrl) {
       cb(null);
       return;
     }
     cachedFetch(
       "scc_detail_" + kind + "_" + ramId,
       _CACHE_TTL.SCC_DETAIL,
-      (done) => gmGet(
-        url,
-        { headers: { "X-Requested-With": "XMLHttpRequest", Accept: "text/html" } },
-        (err, r) => {
-          if (err || !r || r.status < 200 || r.status >= 300) {
-            done(err || new Error("http " + (r && r.status)), void 0);
+      (done) => {
+        let frag = null, info = null, pending = 2;
+        const finish = (history) => {
+          const out = Object.assign(
+            { properties: [], stages: [], history: [] },
+            frag || {}
+          );
+          if (history) out.history = history;
+          if (info) {
+            out.officer = String(info.project_officer || "").trim();
+            out.appType = String(info.application_type || "").trim();
+            out.statusDesc = String(info.decision_desc || "").trim();
+            const appeal = String(info.appeal_result || "").trim();
+            if (appeal && !/^not applicable$/i.test(appeal)) {
+              out.appeal = appeal;
+            }
+          }
+          const hasAnything = out.properties.length || out.stages.length || out.history.length || out.officer || out.statusDesc;
+          if (!hasAnything && !frag && !info) {
+            done(new Error("devi detail unavailable"), void 0);
             return;
           }
-          const parsed = _parseSccDetailHtml(r.responseText);
-          done(null, parsed.properties.length || parsed.stages.length ? parsed : null);
-        }
-      ),
+          done(null, hasAnything ? out : null);
+        };
+        const step = () => {
+          if (--pending) return;
+          const landNo = info && info.land_no;
+          if (landNo == null) {
+            finish();
+            return;
+          }
+          gmJsonGet(
+            CFG.SCC_DEVI_BASE + "/Geo/GetApplicationFilterResults",
+            {
+              method: "POST",
+              data: JSON.stringify(_deviFilterBody({ landNumber: landNo })),
+              headers: { "Content-Type": "application/json" }
+            },
+            (err, data) => {
+              if (err || !data) {
+                finish();
+                return;
+              }
+              const seen = /* @__PURE__ */ new Set([ramId]);
+              const hist = [];
+              for (const f of _dedupeDeviFeatures(data)) {
+                const p = f.properties || {};
+                const num = p.application_number;
+                if (seen.has(num)) continue;
+                seen.add(num);
+                hist.push({
+                  num,
+                  desc: String(p.description || ""),
+                  progress: String(p.progress || ""),
+                  dateMs: Date.parse(p.date_received || "") || 0
+                });
+              }
+              hist.sort((a, b) => b.dateMs - a.dateMs);
+              finish(hist);
+            }
+          );
+        };
+        gmGet(
+          fragUrl,
+          { headers: { "X-Requested-With": "XMLHttpRequest", Accept: "text/html" } },
+          (err, r) => {
+            frag = !err && r && r.status >= 200 && r.status < 300 ? _parseSccDetailHtml(r.responseText) : null;
+            step();
+          }
+        );
+        gmJsonGet(infoUrl, (err, d) => {
+          info = !err && d && Array.isArray(d.features) && d.features[0] ? d.features[0].properties || null : null;
+          step();
+        });
+      },
       (err, v) => cb(err ? null : v)
     );
   }
@@ -5347,8 +5513,70 @@
       attribution: 'Applications &copy; <a href="https://developmenti.sunshinecoast.qld.gov.au/" target="_blank" rel="noreferrer">Sunshine Coast Council</a>'
     }, gmJsonGet);
   }
+  function _formatNotifTooltip(p) {
+    const lines = [
+      esc`<b>${p.application_number || "Application"}</b> · ` + '<span class="dw-scc-notif-badge">On public notification</span>'
+    ];
+    const desc = _clip(p.description, 110);
+    if (desc) lines.push(esc`<span class="dw-scc-sub">${desc}</span>`);
+    const alertMs = Date.parse(p.alertDate || "") || 0;
+    if (alertMs) {
+      lines.push(esc`<span class="dw-scc-sub">Submissions invited — listed ${_fmtSccDate(alertMs)}</span>`);
+    }
+    return lines.join("<br>");
+  }
+  function _notifPopupProps(p) {
+    return {
+      ram_id: p.application_number,
+      group_desc: p.group_desc || p.application_type,
+      category_desc: p.category_desc,
+      description: p.description,
+      progress: "In Progress — On Public Notification",
+      assessment_level: p.assessment_level,
+      d_date_rec: Date.parse(p.date_received || "") || null
+    };
+  }
+  function _makeNotifyingLayer() {
+    return makeArcgisQueryLayer({
+      label: "SCC notifying applications",
+      pane: PANE,
+      paneZIndex: PANE_Z,
+      minZoom: 10,
+      buildRequest: (bbox) => ({
+        url: CFG.SCC_DEVI_BASE + "/Geo/GetApplicationFilterResults",
+        gmOpts: {
+          method: "POST",
+          data: JSON.stringify(_deviFilterBody({
+            progress: "notification",
+            bbox,
+            includeBA: false,
+            includePlumb: false
+          })),
+          headers: { "Content-Type": "application/json" }
+        }
+      }),
+      transform: (data) => ({
+        type: "FeatureCollection",
+        features: _dedupeDeviFeatures(data)
+      }),
+      pointToLayer: (f, latlng) => L.circleMarker(latlng, {
+        pane: PANE,
+        radius: 8,
+        color: "#ffffff",
+        weight: 2,
+        opacity: 0.95,
+        fillColor: "#dc2626",
+        fillOpacity: 0.9
+      }),
+      tipClass: "dw-scc-tip",
+      tooltip: (p) => _formatNotifTooltip(p),
+      popup: (p) => _formatSccPopup(_notifPopupProps(p), "DA", true),
+      popupOpts: { maxWidth: 320, className: "dw-scc-pop-wrap" },
+      attribution: 'Applications &copy; <a href="https://developmenti.sunshinecoast.qld.gov.au/" target="_blank" rel="noreferrer">Sunshine Coast Council</a>'
+    }, gmJsonGet);
+  }
   function _sccDefaultState() {
-    return { DA: true, BA: true, PL: true, live: true, past: false };
+    return { DA: true, BA: true, PL: true, live: true, past: false, notif: true };
   }
   function _sccLoadState() {
     const state = _sccDefaultState();
@@ -5373,7 +5601,7 @@
     el.innerHTML = '<div class="dw-scc-panel-hd">SCC Applications</div>' + Object.keys(_KIND).map((kind) => {
       const m = _KIND[kind];
       return `<div class="dw-scc-row"><label><input type="checkbox" data-key="${kind}"><span class="dw-scc-dot" style="background:${m.color}"></span>${m.label}</label></div>`;
-    }).join("") + '<div class="dw-scc-row dw-scc-status"><span class="dw-scc-row-label">Status</span><label><input type="checkbox" data-key="live"> current</label><label><input type="checkbox" data-key="past"> decided</label></div><div class="dw-scc-hint">decided sets appear from zoom 16</div>';
+    }).join("") + '<div class="dw-scc-row dw-scc-status"><span class="dw-scc-row-label">Status</span><label><input type="checkbox" data-key="live"> current</label><label><input type="checkbox" data-key="past"> decided</label></div><div class="dw-scc-row dw-scc-notif-row"><label><input type="checkbox" data-key="notif"><span class="dw-scc-dot" style="background:#dc2626"></span>on public notification</label></div><div class="dw-scc-hint">decided sets appear from zoom 16</div>';
     el.querySelectorAll("input[data-key]").forEach((cb) => {
       cb.checked = !!state[cb.dataset.key];
       cb.addEventListener("change", () => onChange(cb.dataset.key, cb.checked));
@@ -5412,18 +5640,25 @@
         L.LayerGroup.prototype.onRemove.call(this, map);
       },
       _syncSubs() {
+        const want = {};
         for (const kind of Object.keys(_KIND)) {
           for (const phase of ["live", "past"]) {
-            const key = kind + "_" + phase;
-            const on = this._state[kind] && this._state[phase];
-            let sub = this._subs[key];
-            if (on && !sub) {
-              sub = this._subs[key] = _makeSubLayer(kind, phase === "live");
-            }
-            if (!sub) continue;
-            if (on && !this.hasLayer(sub)) this.addLayer(sub);
-            else if (!on && this.hasLayer(sub)) this.removeLayer(sub);
+            want[kind + "_" + phase] = !!(this._state[kind] && this._state[phase]);
           }
+        }
+        want.notif = !!this._state.notif;
+        for (const key of Object.keys(want)) {
+          const on = want[key];
+          let sub = this._subs[key];
+          if (on && !sub) {
+            sub = this._subs[key] = key === "notif" ? _makeNotifyingLayer() : _makeSubLayer(
+              key.split("_")[0],
+              key.split("_")[1] === "live"
+            );
+          }
+          if (!sub) continue;
+          if (on && !this.hasLayer(sub)) this.addLayer(sub);
+          else if (!on && this.hasLayer(sub)) this.removeLayer(sub);
         }
       }
     });
@@ -7675,6 +7910,8 @@
         ".dw-scc-row label { display: flex; align-items: center; gap: 5px; cursor: pointer; margin: 0; font-weight: normal; }",
         ".dw-scc-row input { margin: 0; }",
         ".dw-scc-status { border-top: 1px solid #eee; margin-top: 4px; padding-top: 4px; }",
+        ".dw-scc-notif-badge { color: #dc2626; font-weight: 700; font-size: 10.5px; }",
+        ".dw-scc-notif-badge { color: #dc2626; font-weight: 600; }",
         ".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
         // Deep-detail section inside the application popup (assessment
         // stages + associated parcels, auto-loaded from Development.i).
@@ -7798,6 +8035,11 @@
         _deviDetailUrl,
         _parseSccDetailHtml,
         _renderSccDetail,
+        _deviAppByIdUrl,
+        _deviFilterBody,
+        _dedupeDeviFeatures,
+        _formatNotifTooltip,
+        _notifPopupProps,
         LayerProvider,
         tileProvider,
         tokenTileProvider,

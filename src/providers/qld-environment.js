@@ -56,20 +56,31 @@ export function makeArcgisQueryLayer(opts, gmJsonGet) {
 
 			const myGen = ++this._gen;
 			const offset = (360 / (256 * Math.pow(2, z))) * 2;
-			const url = opts.queryUrl + "?f=geojson&returnGeometry=true" +
-				"&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326" +
-				"&spatialRel=esriSpatialRelIntersects&geometryPrecision=5" +
-				"&where=" + encodeURIComponent(opts.where) +
-				"&outFields=" + encodeURIComponent(opts.outFields) +
-				"&geometry=" + encodeURIComponent(bbox) +
-				"&maxAllowableOffset=" + offset +
-				// Deterministic order matters when the server truncates at
-				// maxRecordCount — e.g. newest applications survive the cut.
-				(opts.orderBy
-					? "&orderByFields=" + encodeURIComponent(opts.orderBy)
-					: "");
+			// Non-ArcGIS sources (e.g. Development.i's POST filter API)
+			// plug in via buildRequest/transform; the default is an
+			// ArcGIS REST GET returning GeoJSON directly.
+			let url, gmOpts = { timeout: timeoutMs };
+			if (opts.buildRequest) {
+				const req = opts.buildRequest(bbox, z);
+				url = req.url;
+				Object.assign(gmOpts, req.gmOpts || {});
+			} else {
+				url = opts.queryUrl + "?f=geojson&returnGeometry=true" +
+					"&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326" +
+					"&spatialRel=esriSpatialRelIntersects&geometryPrecision=5" +
+					"&where=" + encodeURIComponent(opts.where) +
+					"&outFields=" + encodeURIComponent(opts.outFields) +
+					"&geometry=" + encodeURIComponent(bbox) +
+					"&maxAllowableOffset=" + offset +
+					// Deterministic order matters when the server truncates
+					// at maxRecordCount — newest applications survive the cut.
+					(opts.orderBy
+						? "&orderByFields=" + encodeURIComponent(opts.orderBy)
+						: "");
+			}
 
-			gmJsonGet(url, { timeout: timeoutMs }, (err, geojson) => {
+			gmJsonGet(url, gmOpts, (err, raw) => {
+				const geojson = !err && opts.transform ? opts.transform(raw) : raw;
 				if (myGen !== this._gen || !this._group) return;
 				if (err || (geojson && geojson.error)) {
 					console.warn(`[CustomTiles] ${opts.label} request error`,

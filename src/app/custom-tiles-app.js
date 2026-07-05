@@ -1034,6 +1034,8 @@ export class CustomTilesApp {
 			".dw-scc-row label { display: flex; align-items: center; gap: 5px; cursor: pointer; margin: 0; font-weight: normal; }",
 			".dw-scc-row input { margin: 0; }",
 			".dw-scc-status { border-top: 1px solid #eee; margin-top: 4px; padding-top: 4px; }",
+			".dw-scc-notif-badge { color: #dc2626; font-weight: 700; font-size: 10.5px; }",
+			".dw-scc-notif-badge { color: #dc2626; font-weight: 600; }",
 			".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
 			// Deep-detail section inside the application popup (assessment
 			// stages + associated parcels, auto-loaded from Development.i).
