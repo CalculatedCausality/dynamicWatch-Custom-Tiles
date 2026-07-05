@@ -13,6 +13,7 @@ export function makeArcgisQueryLayer(opts, gmJsonGet) {
 			this._debounce = null;
 			this._lastBbox = null;
 			this._gen = 0;
+			this._byKey = new Map();
 		},
 
 		onAdd(map) {
@@ -31,6 +32,7 @@ export function makeArcgisQueryLayer(opts, gmJsonGet) {
 			this._gen++;
 			map.off("moveend zoomend", this._onViewChange, this);
 			if (this._group) { this._group.remove(); this._group = null; }
+			this._byKey.clear();
 		},
 
 		_onViewChange() {
@@ -44,6 +46,7 @@ export function makeArcgisQueryLayer(opts, gmJsonGet) {
 			const z = map.getZoom();
 			if (z < opts.minZoom) {
 				this._group.clearLayers();
+				this._byKey.clear();
 				this._lastBbox = null;
 				return;
 			}
@@ -87,7 +90,6 @@ export function makeArcgisQueryLayer(opts, gmJsonGet) {
 						err ? err.message : JSON.stringify(geojson.error));
 					return;
 				}
-				this._group.clearLayers();
 				const geoOpts = {
 					pane: opts.pane,
 					style: () => opts.style,
@@ -106,7 +108,36 @@ export function makeArcgisQueryLayer(opts, gmJsonGet) {
 					geoOpts.pointToLayer = (f, latlng) =>
 						opts.pointToLayer(f, latlng);
 				}
-				L.geoJSON(geojson, geoOpts).addTo(this._group);
+
+				if (!opts.featureKey) {
+					this._group.clearLayers();
+					L.geoJSON(geojson, geoOpts).addTo(this._group);
+					return;
+				}
+
+				// Keyed incremental diff (same pattern as geocaches/OIM):
+				// existing features keep their layer instance across
+				// refetches. Crucial for popups — opening one auto-pans
+				// the map, which fires moveend → refetch; a blind
+				// clearLayers() would destroy the anchor marker and
+				// Leaflet would snap the popup shut a second after it
+				// opened (the mobile symptom).
+				const next = new Map();
+				for (const f of (geojson && geojson.features) || []) {
+					const k = opts.featureKey(f);
+					if (k != null) next.set(String(k), f);
+				}
+				for (const [k, lyr] of this._byKey) {
+					if (next.has(k)) continue;
+					this._group.removeLayer(lyr);
+					this._byKey.delete(k);
+				}
+				for (const [k, f] of next) {
+					if (this._byKey.has(k)) continue;
+					const lyr = L.geoJSON(f, geoOpts);
+					this._byKey.set(k, lyr);
+					this._group.addLayer(lyr);
+				}
 			});
 		},
 

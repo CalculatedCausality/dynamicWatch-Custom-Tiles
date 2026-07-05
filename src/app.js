@@ -41,6 +41,7 @@ import {
 	_sccDefaultState,
 	_sccDocDownloadUrl,
 	_sccDocsSearchUrl,
+	_sccFeatureKey,
 	_sccLoadState,
 } from './providers/scc-applications.js';
 import { _escHtml, esc, _safeColor, _fmtPrice, _fmtDate } from './utils/html.js';
@@ -98,6 +99,7 @@ export function bootUserscript() {
 			_deviKindFromCategory, _histFromFilterResults, _decisionClass,
 			_histRowHtml, _renderSccPropertyHistory,
 			_deviReportUrl, _sccDocsSearchUrl, _sccDocDownloadUrl, _parseSccDocs,
+			_sccFeatureKey,
 			LayerProvider, tileProvider, tokenTileProvider,
 			arcgisExportProvider, pollingDataLayer, oimIcon,
 		};

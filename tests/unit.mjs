@@ -896,6 +896,18 @@ t("_renderSccPropertyHistory renders count header and rows", () => {
 	assert(none.includes("None found"), "empty-state message");
 });
 
+t("_sccFeatureKey stable across refetches, null for junk", () => {
+	eq(dw._sccFeatureKey({ id: 42 }), 42, "feature id wins");
+	eq(dw._sccFeatureKey({ id: "plan_scc.fid-1.2" }), "plan_scc.fid-1.2");
+	const k = dw._sccFeatureKey({
+		properties: { ram_id: "BAC26/1" },
+		geometry: { coordinates: [[152.9, -26.6]] },
+	});
+	eq(k, 'BAC26/1@[[152.9,-26.6]]', "fallback = app number + geometry");
+	eq(dw._sccFeatureKey({ properties: {} }), null, "no identity → null");
+	eq(dw._sccFeatureKey(null), null, "null-safe");
+});
+
 t("_sccDocsSearchUrl / _sccDocDownloadUrl build and validate", () => {
 	const u = dw._sccDocsSearchUrl("MCU25/0135.02");
 	assert(u.startsWith("https://publicdocs.scc.qld.gov.au/HPECMWebDrawer/Record?q="),

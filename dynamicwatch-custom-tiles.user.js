@@ -4997,6 +4997,7 @@
         this._debounce = null;
         this._lastBbox = null;
         this._gen = 0;
+        this._byKey = /* @__PURE__ */ new Map();
       },
       onAdd(map) {
         if (!map.getPane(opts.pane)) {
@@ -5016,6 +5017,7 @@
           this._group.remove();
           this._group = null;
         }
+        this._byKey.clear();
       },
       _onViewChange() {
         clearTimeout(this._debounce);
@@ -5027,6 +5029,7 @@
         const z = map.getZoom();
         if (z < opts.minZoom) {
           this._group.clearLayers();
+          this._byKey.clear();
           this._lastBbox = null;
           return;
         }
@@ -5056,7 +5059,6 @@
             );
             return;
           }
-          this._group.clearLayers();
           const geoOpts = {
             pane: opts.pane,
             style: () => opts.style,
@@ -5073,7 +5075,27 @@
           if (opts.pointToLayer) {
             geoOpts.pointToLayer = (f, latlng) => opts.pointToLayer(f, latlng);
           }
-          L.geoJSON(geojson, geoOpts).addTo(this._group);
+          if (!opts.featureKey) {
+            this._group.clearLayers();
+            L.geoJSON(geojson, geoOpts).addTo(this._group);
+            return;
+          }
+          const next = /* @__PURE__ */ new Map();
+          for (const f of geojson && geojson.features || []) {
+            const k = opts.featureKey(f);
+            if (k != null) next.set(String(k), f);
+          }
+          for (const [k, lyr] of this._byKey) {
+            if (next.has(k)) continue;
+            this._group.removeLayer(lyr);
+            this._byKey.delete(k);
+          }
+          for (const [k, f] of next) {
+            if (this._byKey.has(k)) continue;
+            const lyr = L.geoJSON(f, geoOpts);
+            this._byKey.set(k, lyr);
+            this._group.addLayer(lyr);
+          }
         });
       },
       getAttribution() {
@@ -5323,6 +5345,14 @@
       out.push(f);
     }
     return out;
+  }
+  function _sccFeatureKey(f) {
+    if (!f) return null;
+    if (f.id != null) return f.id;
+    const p = f.properties || {};
+    const num = p.ram_id || p.application_number;
+    if (!num) return null;
+    return num + "@" + JSON.stringify((f.geometry || {}).coordinates || []);
   }
   function _deviKindFromCategory(category) {
     const c = String(category || "").toLowerCase();
@@ -5664,6 +5694,7 @@
       where: "1=1",
       outFields: _APP_FIELDS,
       orderBy: "d_date_rec DESC",
+      featureKey: _sccFeatureKey,
       pointToLayer: (f, latlng) => L.circleMarker(latlng, {
         pane: PANE,
         radius: (live ? 6 : 4) * (_isTouch() ? 1.7 : 1),
@@ -5732,6 +5763,7 @@
         type: "FeatureCollection",
         features: _dedupeDeviFeatures(data)
       }),
+      featureKey: _sccFeatureKey,
       pointToLayer: (f, latlng) => L.circleMarker(latlng, {
         pane: PANE,
         radius: 8 * (_isTouch() ? 1.7 : 1),
@@ -8253,6 +8285,7 @@
         _sccDocsSearchUrl,
         _sccDocDownloadUrl,
         _parseSccDocs,
+        _sccFeatureKey,
         LayerProvider,
         tileProvider,
         tokenTileProvider,

@@ -253,6 +253,20 @@ export function _dedupeDeviFeatures(data) {
 	return out;
 }
 
+// Stable per-feature identity for the factory's incremental diff —
+// keeps a marker's layer instance alive across viewport refetches (an
+// open popup's anchor must survive the moveend refetch that its own
+// autoPan triggers). ArcGIS/GeoServer feature ids are stable; fall
+// back to application number + geometry.
+export function _sccFeatureKey(f) {
+	if (!f) return null;
+	if (f.id != null) return f.id;
+	const p = f.properties || {};
+	const num = p.ram_id || p.application_number;
+	if (!num) return null;
+	return num + "@" + JSON.stringify((f.geometry || {}).coordinates || []);
+}
+
 // Development.i's `category` field → our kind key (drives marker
 // colour dots and which FilterDirect param a deep link uses).
 export function _deviKindFromCategory(category) {
@@ -720,6 +734,7 @@ function _makeSubLayer(kind, live) {
 		where: "1=1",
 		outFields: _APP_FIELDS,
 		orderBy: "d_date_rec DESC",
+		featureKey: _sccFeatureKey,
 		pointToLayer: (f, latlng) =>
 			L.circleMarker(latlng, {
 				pane: PANE,
@@ -806,6 +821,7 @@ function _makeNotifyingLayer() {
 			type: "FeatureCollection",
 			features: _dedupeDeviFeatures(data),
 		}),
+		featureKey: _sccFeatureKey,
 		pointToLayer: (f, latlng) =>
 			L.circleMarker(latlng, {
 				pane: PANE,
