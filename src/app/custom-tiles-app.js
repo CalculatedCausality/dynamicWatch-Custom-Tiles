@@ -22,6 +22,7 @@ import {
 import {
 	FlightsLayerProvider,
 	MarineTrafficLayerProvider,
+	WazeLayerProvider,
 } from "../providers/live-data.js";
 import {
 	GarminHeatmapLayerProvider,
@@ -255,6 +256,7 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_WATER,      new WaterLayerProvider());
 			addOverlay(CFG.LAYER_FLIGHTS,    new FlightsLayerProvider());
 			addOverlay(CFG.LAYER_MARINE,     new MarineTrafficLayerProvider());
+			addOverlay(CFG.LAYER_WAZE,       new WazeLayerProvider());
 			addOverlay(CFG.LAYER_GEOCACHING, new GeocachingLayerProvider());
 			addOverlay(CFG.LAYER_MOBILE,     new MobileCoverageLayerProvider());
 			addOverlay(CFG.LAYER_SEAMARKS,   new OpenSeaMapLayerProvider());

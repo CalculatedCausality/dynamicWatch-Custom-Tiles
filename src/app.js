@@ -1,4 +1,5 @@
 import { CustomTilesApp } from './app/custom-tiles-app.js';
+import { isWazeTokenFrame, startWazeTokenBroker } from './providers/waze-token.js';
 import { CFG, DW_LAYER_GROUPS, DW_OVERLAY_GROUPS } from './config.js';
 import {
 	LayerProvider,
@@ -34,6 +35,15 @@ import {
 import { tileToBBox4326, tileToBBox3857, utfGridCellToLatLng } from './utils/tile-geometry.js';
 
 export function bootUserscript() {
+	// When this script instance is running inside the hidden
+	// embed.waze.com iframe (see waze-token.js), it exists ONLY to mint
+	// reCAPTCHA tokens in the waze.com origin — there is no dynamic.watch
+	// map here. Run the broker and stop before touching any map/DOM/L.
+	if (isWazeTokenFrame()) {
+		startWazeTokenBroker();
+		return;
+	}
+
 	// Visible version banner — answers "did Tampermonkey actually update?"
 	// on every page load without grepping for symptoms.
 	const SCRIPT_VERSION =

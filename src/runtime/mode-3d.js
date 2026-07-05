@@ -703,6 +703,7 @@ export class Mode3DController {
 					dwGeocachingPane: "#2da44e",
 					dwFlightsPane:    "#0066ff",
 					dwMarinePane:     "#00a3c9",
+					dwWazePane:       "#33ccff",
 					dwInfraPane:      "#F0A500",
 					dwTelecomPane:    "#7C3AED",
 					dwWaterPane:      "#0EA5E9",
@@ -943,6 +944,12 @@ export class Mode3DController {
 		bind("dw-shapes-point-dwMarinePane", (f) => {
 			const p = f.properties || {};
 			return _escHtml(p.label || p.name || "Vessel");
+		});
+
+		// Waze alerts — provider attaches _dwData.name (type + street).
+		bind("dw-shapes-point-dwWazePane", (f) => {
+			const p = f.properties || {};
+			return _escHtml(p.name || p.label || "Waze report");
 		});
 	}
 

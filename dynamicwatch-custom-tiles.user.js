@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.112
-// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
+// @version      7.9.114
+// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
+// @match        https://embed.waze.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -22,6 +23,7 @@
 // @connect      wayback.maptiles.arcgis.com
 // @connect      opensky-network.org
 // @connect      www.marinetraffic.com
+// @connect      www.waze.com
 // @connect      openinframap.org
 // @connect      spatial.infrastructure.gov.au
 // @connect      tiles.openseamap.org
@@ -85,6 +87,7 @@
     LAYER_WATER: "Water Infrastructure",
     LAYER_FLIGHTS: "Live Flights",
     LAYER_MARINE: "Marine Vessels",
+    LAYER_WAZE: "Waze Traffic",
     LAYER_MOBILE: "Mobile Coverage",
     LAYER_SEAMARKS: "OpenSeaMap",
     LAYER_INFRA: "Power Infrastructure",
@@ -250,6 +253,7 @@
       names: [
         CFG.LAYER_FLIGHTS,
         CFG.LAYER_MARINE,
+        CFG.LAYER_WAZE,
         CFG.LAYER_INTVL_GLOBAL,
         CFG.LAYER_GEOCACHING
       ]
@@ -1128,6 +1132,7 @@
             dwGeocachingPane: "#2da44e",
             dwFlightsPane: "#0066ff",
             dwMarinePane: "#00a3c9",
+            dwWazePane: "#33ccff",
             dwInfraPane: "#F0A500",
             dwTelecomPane: "#7C3AED",
             dwWaterPane: "#0EA5E9"
@@ -1353,6 +1358,10 @@
       bind("dw-shapes-point-dwMarinePane", (f) => {
         const p = f.properties || {};
         return _escHtml(p.label || p.name || "Vessel");
+      });
+      bind("dw-shapes-point-dwWazePane", (f) => {
+        const p = f.properties || {};
+        return _escHtml(p.name || p.label || "Waze report");
       });
     }
     _renderRoute(map, mbMap) {
@@ -3186,6 +3195,180 @@
     });
   }
 
+  // src/providers/waze-token.js
+  var WAZE_RECAPTCHA_SITE_KEY = "6Lf4WdUqAAAAAEUYUvzyLYIkO3PoFAqi8ZHGiDLW";
+  var WAZE_RECAPTCHA_ACTION = "api";
+  var SHARED_KEY = "dw_waze_token_shared";
+  var MANUAL_KEY = "dw_waze_token_manual";
+  var BROKER_REMINT_MS = 75 * 1e3;
+  var SHARED_MAX_AGE_MS = 3 * 60 * 1e3;
+  var EMBED_URL = "https://embed.waze.com/iframe?zoom=12&lat=0&lon=0";
+  var pageWin2 = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+  function isWazeTokenFrame() {
+    try {
+      return location.hostname === "embed.waze.com";
+    } catch (_) {
+      return false;
+    }
+  }
+  function mintFromPage() {
+    return new Promise((resolve) => {
+      const g = pageWin2.grecaptcha && pageWin2.grecaptcha.enterprise;
+      if (!g || typeof g.execute !== "function") {
+        resolve(null);
+        return;
+      }
+      try {
+        g.ready(() => {
+          try {
+            g.execute(
+              WAZE_RECAPTCHA_SITE_KEY,
+              { action: WAZE_RECAPTCHA_ACTION }
+            ).then((t) => resolve(t || null), () => resolve(null));
+          } catch (_) {
+            resolve(null);
+          }
+        });
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+  function publishToken(token) {
+    if (!token) return;
+    try {
+      GM_setValue(SHARED_KEY, JSON.stringify({ token, ts: Date.now() }));
+    } catch (_) {
+    }
+  }
+  function startWazeTokenBroker() {
+    if (startWazeTokenBroker._started) return;
+    startWazeTokenBroker._started = true;
+    let tries = 0;
+    const kick = () => {
+      const g = pageWin2.grecaptcha && pageWin2.grecaptcha.enterprise;
+      if (g && typeof g.execute === "function") {
+        const cycle = () => mintFromPage().then(publishToken);
+        cycle();
+        setInterval(cycle, BROKER_REMINT_MS);
+        return;
+      }
+      if (tries++ < 120) setTimeout(kick, 500);
+      else console.warn("[CustomTiles] Waze embed grecaptcha never appeared");
+    };
+    kick();
+  }
+  var _iframe = null;
+  var _directMintPromise = null;
+  var _directGrecaptcha = null;
+  function ensureBrokerFrame() {
+    if (_iframe || isWazeTokenFrame()) return;
+    if (document.getElementById("dw-waze-token-frame")) {
+      _iframe = true;
+      return;
+    }
+    try {
+      const f = document.createElement("iframe");
+      f.id = "dw-waze-token-frame";
+      f.setAttribute("aria-hidden", "true");
+      f.setAttribute("tabindex", "-1");
+      f.style.cssText = "position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;border:0;opacity:0;pointer-events:none;visibility:hidden;";
+      f.src = EMBED_URL;
+      (document.body || document.documentElement).appendChild(f);
+      _iframe = f;
+    } catch (e) {
+      console.warn("[CustomTiles] Waze token iframe failed:", e.message);
+    }
+  }
+  function readSharedToken() {
+    try {
+      const raw = GM_getValue(SHARED_KEY, "");
+      if (!raw) return null;
+      const o = JSON.parse(raw);
+      if (o && o.token && Date.now() - o.ts < SHARED_MAX_AGE_MS) {
+        return o.token;
+      }
+    } catch (_) {
+    }
+    return null;
+  }
+  function directMint() {
+    try {
+      const manual = GM_getValue(MANUAL_KEY, "");
+      if (manual) return Promise.resolve(String(manual));
+    } catch (_) {
+    }
+    if (_directGrecaptcha && _directGrecaptcha.enterprise) {
+      return _directGrecaptcha.enterprise.execute(WAZE_RECAPTCHA_SITE_KEY, { action: WAZE_RECAPTCHA_ACTION }).then((t) => t || null, () => null);
+    }
+    if (!_directMintPromise) {
+      _directMintPromise = new Promise((resolve, reject) => {
+        if (pageWin2.grecaptcha && pageWin2.grecaptcha.enterprise) {
+          resolve(pageWin2.grecaptcha);
+          return;
+        }
+        const existing = document.getElementById("dw-waze-recaptcha");
+        if (existing) {
+          existing.addEventListener(
+            "load",
+            () => resolve(pageWin2.grecaptcha),
+            { once: true }
+          );
+          return;
+        }
+        const s = document.createElement("script");
+        s.id = "dw-waze-recaptcha";
+        s.src = "https://www.google.com/recaptcha/enterprise.js?render=" + WAZE_RECAPTCHA_SITE_KEY;
+        s.async = true;
+        s.onload = () => resolve(pageWin2.grecaptcha);
+        s.onerror = () => reject(new Error("recaptcha load failed"));
+        (document.head || document.documentElement).appendChild(s);
+      }).catch(() => null);
+    }
+    return _directMintPromise.then((gr) => {
+      if (!gr || !gr.enterprise) return null;
+      _directGrecaptcha = gr;
+      return new Promise((resolve) => {
+        try {
+          gr.enterprise.ready(() => {
+            gr.enterprise.execute(
+              WAZE_RECAPTCHA_SITE_KEY,
+              { action: WAZE_RECAPTCHA_ACTION }
+            ).then((t) => resolve(t || null), () => resolve(null));
+          });
+        } catch (_) {
+          resolve(null);
+        }
+      });
+    });
+  }
+  function getWazeToken() {
+    try {
+      const manual = GM_getValue(MANUAL_KEY, "");
+      if (manual) return Promise.resolve(String(manual));
+    } catch (_) {
+    }
+    const cached = readSharedToken();
+    if (cached) return Promise.resolve(cached);
+    ensureBrokerFrame();
+    return new Promise((resolve) => {
+      let waited = 0;
+      const iv = setInterval(() => {
+        const t = readSharedToken();
+        if (t) {
+          clearInterval(iv);
+          resolve(t);
+          return;
+        }
+        waited += 500;
+        if (waited >= 15e3) {
+          clearInterval(iv);
+          directMint().then(resolve, () => resolve(null));
+        }
+      }, 500);
+    });
+  }
+
   // src/providers/live-data.js
   var FlightsLayerProvider = class extends LayerProvider {
     create() {
@@ -3256,6 +3439,170 @@
         }
       });
       return new FlightsLayer();
+    }
+  };
+  var WazeLayerProvider = class extends LayerProvider {
+    create() {
+      const GEORSS = "https://www.waze.com/live-map/api/georss";
+      function wazeEnv(lat, lon) {
+        if (lat >= 29 && lat <= 34 && lon >= 34 && lon <= 36) return "il";
+        if (lat >= 12 && lat <= 76 && lon >= -170 && lon <= -48) return "na";
+        return "row";
+      }
+      const ALERT_STYLE = {
+        POLICE: { glyph: "👮", color: "#4A89F3" },
+        ACCIDENT: { glyph: "💥", color: "#E74C3C" },
+        HAZARD: { glyph: "⚠️", color: "#F0A500" },
+        WEATHERHAZARD: { glyph: "⚠️", color: "#F0A500" },
+        ROAD_CLOSED: { glyph: "⛔", color: "#C0392B" },
+        JAM: { glyph: "🚗", color: "#E67E22" },
+        CONSTRUCTION: { glyph: "🚧", color: "#E67E22" },
+        CHIT_CHAT: { glyph: "💬", color: "#90A4AE" }
+      };
+      const DEFAULT_STYLE = { glyph: "📍", color: "#90A4AE" };
+      const JAM_COLORS = ["#7CB342", "#C0CA33", "#F0A500", "#E67E22", "#D9534F", "#7F1D1D"];
+      const agoStr = (ms) => {
+        if (!ms) return "";
+        const s = Math.max(0, (Date.now() - ms) / 1e3);
+        if (s < 90) return Math.round(s) + "s ago";
+        if (s < 5400) return Math.round(s / 60) + " min ago";
+        return (s / 3600).toFixed(1) + " h ago";
+      };
+      const titleCase = (s) => String(s || "").replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+      const alertTitle = (a) => titleCase(a.subtype || a.type) || "Report";
+      const placeStr = (o) => [o.street, o.city].filter(Boolean).join(", ");
+      const thumbsCount = (a) => {
+        if (typeof a.nThumbsUp === "number") return a.nThumbsUp;
+        if (Array.isArray(a.comments))
+          return a.comments.filter((c) => c && c.isThumbsUp).length;
+        return 0;
+      };
+      const render = (group, data) => {
+        const prev = group._dwWaze instanceof Map ? group._dwWaze : /* @__PURE__ */ new Map();
+        const next = /* @__PURE__ */ new Map();
+        const keep = (key, make, update) => {
+          if (next.has(key)) return;
+          let lyr = prev.get(key);
+          if (lyr && group.hasLayer(lyr)) {
+            update(lyr);
+            prev.delete(key);
+          } else {
+            lyr = make();
+            if (!lyr) return;
+            lyr.addTo(group);
+          }
+          next.set(key, lyr);
+        };
+        for (const a of data.alerts || []) {
+          const loc = a.location;
+          if (!a.id || !loc || loc.x == null || loc.y == null) continue;
+          const style = ALERT_STYLE[a.type] || DEFAULT_STYLE;
+          const title = alertTitle(a);
+          const meta = [placeStr(a), agoStr(a.pubMillis)].filter(Boolean).join(" · ");
+          const thumbs = thumbsCount(a);
+          const thumbStr = thumbs ? ` · 👍 ${thumbs}` : "";
+          const tip = esc`<b>${style.glyph} ${title}</b>` + (meta || thumbStr ? esc`<br><span class="dw-cad-sub">${meta}${thumbStr}</span>` : "");
+          keep("a:" + a.id, () => {
+            const icon = L.divIcon({
+              className: "dw-waze-icon",
+              html: `<div style="background:${style.color};width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,.6);">${style.glyph}</div>`,
+              iconSize: [22, 22],
+              iconAnchor: [11, 11]
+            });
+            const m = L.marker([loc.y, loc.x], {
+              icon,
+              pane: "dwWazePane",
+              interactive: true
+            }).bindTooltip(tip, { className: "dw-waze-tip", sticky: true });
+            m._dwData = {
+              color: style.color,
+              name: title + (a.street ? " — " + a.street : "")
+            };
+            return m;
+          }, (m) => m.setTooltipContent(tip));
+        }
+        for (const j of data.jams || []) {
+          if (j.id == null || !Array.isArray(j.line) || j.line.length < 2)
+            continue;
+          const pts = j.line.filter((p) => p && p.x != null && p.y != null).map((p) => [p.y, p.x]);
+          if (pts.length < 2) continue;
+          const level = Math.max(0, Math.min(5, j.level || 0));
+          const color = JAM_COLORS[level];
+          const kmh = j.speed != null ? Math.round(j.speed * 3.6) : null;
+          const spdStr = kmh != null ? kmh + " km/h" : "";
+          const delayStr = j.delay > 0 ? "+" + Math.round(j.delay / 60) + " min" : "";
+          const lenStr = j.length != null ? (j.length / 1e3).toFixed(1) + " km" : "";
+          const place = placeStr(j);
+          const meta = [spdStr, delayStr, lenStr, agoStr(j.updateMillis)].filter(Boolean).join(" · ");
+          const tip = esc`<b>🚗 Traffic${place ? " — " + place : ""}</b>` + (meta ? esc`<br><span class="dw-cad-sub">${meta}</span>` : "");
+          keep(
+            "j:" + j.id,
+            () => L.polyline(pts, {
+              pane: "dwWazePane",
+              color,
+              weight: 5,
+              opacity: 0.8,
+              interactive: true
+            }).bindTooltip(tip, { className: "dw-waze-tip", sticky: true }),
+            (pl) => {
+              pl.setLatLngs(pts);
+              pl.setStyle({ color });
+              pl.setTooltipContent(tip);
+            }
+          );
+        }
+        for (const u of data.users || []) {
+          const loc = u.location;
+          if (u.id == null || !loc || loc.x == null || loc.y == null)
+            continue;
+          const who = u.userName && u.userName !== "guest" ? u.userName : "Wazer";
+          keep(
+            "u:" + u.id,
+            () => L.circleMarker([loc.y, loc.x], {
+              pane: "dwWazePane",
+              radius: 4,
+              color: "#fff",
+              weight: 1,
+              fillColor: "#33ccff",
+              fillOpacity: 0.9,
+              interactive: true
+            }).bindTooltip(
+              esc`${who}`,
+              { className: "dw-waze-tip", sticky: true }
+            ),
+            (c) => c.setLatLng([loc.y, loc.x])
+          );
+        }
+        for (const lyr of prev.values()) {
+          if (group.hasLayer(lyr)) group.removeLayer(lyr);
+        }
+        group._dwWaze = next;
+      };
+      const WazeLayer = pollingDataLayer({
+        pane: "dwWazePane",
+        paneZIndex: 445,
+        minZoom: 9,
+        pollMs: 3e4,
+        attribution: 'Traffic © <a href="https://www.waze.com/live-map" target="_blank" rel="noreferrer">Waze</a>',
+        fetch: (map, group) => {
+          const b = map.getBounds();
+          const c = map.getCenter();
+          const url = GEORSS + "?top=" + b.getNorth().toFixed(6) + "&bottom=" + b.getSouth().toFixed(6) + "&left=" + b.getWest().toFixed(6) + "&right=" + b.getEast().toFixed(6) + "&env=" + wazeEnv(c.lat, c.lng) + "&types=alerts,traffic,users";
+          getWazeToken().then((token) => {
+            if (!token || !group._map) return;
+            gmJsonGet(url, {
+              headers: {
+                Referer: "https://www.waze.com/live-map",
+                "X-Recaptcha-Token": token
+              }
+            }, (err, data) => {
+              if (err || !data || !group._map) return;
+              render(group, data);
+            });
+          });
+        }
+      });
+      return new WazeLayer();
     }
   };
   var MarineTrafficLayerProvider = class extends LayerProvider {
@@ -6044,7 +6391,7 @@
   };
 
   // src/app/custom-tiles-app.js
-  var pageWin2 = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+  var pageWin3 = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   var { QpwsLayerProvider, NationalParksLayerProvider } = createQldEnvironmentProviders({ makeHoverIdentify, gmJsonGet });
   var CustomTilesApp = class {
     constructor() {
@@ -6100,15 +6447,15 @@
     }
     // -- Leaflet interception -----------------------------------------
     _patchControlLayers() {
-      if (typeof pageWin2.L !== "undefined" && pageWin2.L.control && pageWin2.L.tileLayer) {
+      if (typeof pageWin3.L !== "undefined" && pageWin3.L.control && pageWin3.L.tileLayer) {
         this._applyPatch();
       } else {
         try {
-          Object.defineProperty(pageWin2, "L", {
+          Object.defineProperty(pageWin3, "L", {
             configurable: true,
             enumerable: true,
             set: (val) => {
-              Object.defineProperty(pageWin2, "L", {
+              Object.defineProperty(pageWin3, "L", {
                 value: val,
                 writable: true,
                 configurable: true,
@@ -6120,7 +6467,7 @@
         } catch (e) {
           console.warn("[CustomTiles] defineProperty fallback:", e.message);
           const poll = () => {
-            if (typeof pageWin2.L !== "undefined" && pageWin2.L.control && pageWin2.L.tileLayer) {
+            if (typeof pageWin3.L !== "undefined" && pageWin3.L.control && pageWin3.L.tileLayer) {
               this._applyPatch();
             } else {
               setTimeout(poll, 16);
@@ -6156,7 +6503,7 @@
       this.injected = true;
       this._ctrl = ctrl;
       try {
-        pageWin2._dwLayerCtrl = ctrl;
+        pageWin3._dwLayerCtrl = ctrl;
       } catch (_) {
       }
       const addBase = (name, provider) => {
@@ -6202,6 +6549,7 @@
         addOverlay(CFG.LAYER_WATER, new WaterLayerProvider());
         addOverlay(CFG.LAYER_FLIGHTS, new FlightsLayerProvider());
         addOverlay(CFG.LAYER_MARINE, new MarineTrafficLayerProvider());
+        addOverlay(CFG.LAYER_WAZE, new WazeLayerProvider());
         addOverlay(CFG.LAYER_GEOCACHING, new GeocachingLayerProvider());
         addOverlay(CFG.LAYER_MOBILE, new MobileCoverageLayerProvider());
         addOverlay(CFG.LAYER_SEAMARKS, new OpenSeaMapLayerProvider());
@@ -6913,6 +7261,10 @@
 
   // src/app.js
   function bootUserscript() {
+    if (isWazeTokenFrame()) {
+      startWazeTokenBroker();
+      return;
+    }
     const SCRIPT_VERSION = typeof GM_info !== "undefined" && GM_info.script?.version || "?";
     console.info(
       `%c[CustomTiles] v${SCRIPT_VERSION} loaded`,

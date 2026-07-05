@@ -81,6 +81,33 @@ Caught two showstoppers the unit/shape/smoke tests missed: a `MAX_TILES`
 cap that rendered nothing at normal zoom, and the cold-tile 204 warming
 requirement. Both were invisible to isolated helper/endpoint tests.
 
+### `verify-waze.mjs` — Waze Traffic layer (token broker + render)
+
+```bash
+npm run e2e:waze            # headless — guards broker/minting code
+npm run e2e:waze:headed     # headed  — proves georss acceptance + full render
+```
+
+Two phases, because two independent things can break. **Phase 1** (no
+auth) loads `https://embed.waze.com/iframe` — the one Waze surface that
+allows framing (no X-Frame-Options; www.waze.com is SAMEORIGIN) and
+carries the same reCAPTCHA site key. It asserts the userscript's token
+broker mints a correct-origin token and publishes it to GM storage, then
+validates that token against `/live-map/api/georss` via `node:https`
+(which — unlike browser fetch — can set the Referer real Tampermonkey
+sends). **Phase 2** (needs auth) seeds that real token as the manual
+override, enables the Waze overlay on a plan, and asserts alerts (markers),
+jams (polylines), and wazers (circles) render into `dwWazePane` with sane
+tooltips.
+
+IMPORTANT — reCAPTCHA scores automated browsers low, so **headless gets a
+token georss 403s** (expected, not a bug). Headless therefore gates only
+the broker/minting code (green when that's correct) and skips the render
+phase; **headed** gets a real-scored token, so georss returns 200 and the
+full render is exercised (a passing run shows ~90+ alerts, ~90+ jams,
+~40 wazers). Use headed to actually prove the feature; headless as the CI
+regression guard.
+
 ### `verify-stamen-3d.mjs` / `verify-heatmaps-3d.mjs` — GM blob bridge
 
 ```bash

@@ -24,7 +24,7 @@ Current modules:
 - `src/providers/heatmaps.js` — Strava and Garmin heatmap providers.
 - `src/providers/intvl-global.js` — INTVL Global Map MVT renderer and hover identify.
 - `src/providers/light-pollution.js` — Light Pollution WMS overlay.
-- `src/providers/live-data.js` — polling live overlays for OpenSky flights and MarineTraffic vessels.
+- `src/providers/live-data.js` — polling live overlays for OpenSky flights, MarineTraffic vessels, and Waze traffic (alerts, jams, wazers).
 - `src/providers/raster-providers.js` — low-coupling raster/base/overlay providers such as Google, Apple, QLD Globe/Topo/Relief, Mobile Coverage, OpenSeaMap, and QLD Labels.
 - `src/providers/openinframap.js` — OpenInfraMap Power, Telecoms, and Water vector-tile providers.
 - `src/providers/qld-cadastre.js` — QLD Cadastre provider plus OnTheHouse sales/address helpers.

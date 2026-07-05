@@ -72,6 +72,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 |---|---|
 | **Live Flights** | Aircraft positions from OpenSky Network, refreshed every 10s |
 | **Marine Vessels** | Ship positions from MarineTraffic, refreshed every 20s |
+| **Waze Traffic** | Waze live-map reports — police, crashes, hazards, closures — plus jams coloured by severity and active wazers, refreshed every 30s |
 | **INTVL Global Map** | The INTVL run-territory game's public global map; hover for territory size, owner colour, and exact recording time decoded from the activity's cuid |
 | **Geocaches** | Geocaches from geocaching.com via the public tile API (no login required); shows Groundspeak's real per-type icons (traditional/mystery/earthcache/…), clickable through to each cache's page; click also fetches difficulty/terrain/owner/favourites |
 
@@ -156,6 +157,7 @@ Quick-reference table — what you need to log in to for each layer to render.
 | Light Pollution | No | lightpollutionmap.info WMS | |
 | Live Flights | No | OpenSky Network anonymous API | Rate-limited; can return 429 |
 | Marine Vessels | No | MarineTraffic anonymous endpoint | Cloudflare-protected; can drop out |
+| Waze Traffic | No | Waze live-map georss (reCAPTCHA-gated) | Token minted in a hidden `embed.waze.com` iframe; activates at z≥9. Manual override: `GM_setValue("dw_waze_token_manual", "<token>")` |
 | INTVL Global Map | No | Public Mapbox Vector Tile CDN | |
 | Geocaches | No | Groundspeak's public tile-info + map.details endpoints | No login. UTFGrid drives placement; lazy map.details fetch enriches on click. |
 

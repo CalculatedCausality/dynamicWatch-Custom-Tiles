@@ -2,6 +2,7 @@ import { LayerProvider } from "../layers/provider-factories.js";
 import { pollingDataLayer } from "../layers/polling-data-layer.js";
 import { gmJsonGet } from "../utils/http.js";
 import { _escHtml, esc } from "../utils/html.js";
+import { getWazeToken } from "./waze-token.js";
 
 export class FlightsLayerProvider extends LayerProvider {
 	create() {
@@ -87,6 +88,196 @@ export class FlightsLayerProvider extends LayerProvider {
 			},
 		});
 		return new FlightsLayer();
+	}
+}
+
+export class WazeLayerProvider extends LayerProvider {
+	create() {
+		const GEORSS = "https://www.waze.com/live-map/api/georss";
+
+		// Waze shards the world across three server environments; the
+		// wrong env returns an empty result set rather than an error.
+		function wazeEnv(lat, lon) {
+			if (lat >= 29 && lat <= 34 && lon >= 34 && lon <= 36) return "il";
+			if (lat >= 12 && lat <= 76 && lon >= -170 && lon <= -48) return "na";
+			return "row";
+		}
+
+		const ALERT_STYLE = {
+			POLICE:        { glyph: "\u{1F46E}", color: "#4A89F3" },
+			ACCIDENT:      { glyph: "\u{1F4A5}", color: "#E74C3C" },
+			HAZARD:        { glyph: "⚠️", color: "#F0A500" },
+			WEATHERHAZARD: { glyph: "⚠️", color: "#F0A500" },
+			ROAD_CLOSED:   { glyph: "⛔", color: "#C0392B" },
+			JAM:           { glyph: "\u{1F697}", color: "#E67E22" },
+			CONSTRUCTION:  { glyph: "\u{1F6A7}", color: "#E67E22" },
+			CHIT_CHAT:     { glyph: "\u{1F4AC}", color: "#90A4AE" },
+		};
+		const DEFAULT_STYLE = { glyph: "\u{1F4CD}", color: "#90A4AE" };
+		// Jam severity is 0-5 (5 = standstill); index by clamped level.
+		const JAM_COLORS =
+			["#7CB342", "#C0CA33", "#F0A500", "#E67E22", "#D9534F", "#7F1D1D"];
+
+		const agoStr = (ms) => {
+			if (!ms) return "";
+			const s = Math.max(0, (Date.now() - ms) / 1000);
+			if (s < 90) return Math.round(s) + "s ago";
+			if (s < 5400) return Math.round(s / 60) + " min ago";
+			return (s / 3600).toFixed(1) + " h ago";
+		};
+		const titleCase = (s) => String(s || "").replace(/_/g, " ")
+			.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+		// Prefer the (more specific) subtype, e.g. "Police With Mobile
+		// Camera", falling back to the coarse type.
+		const alertTitle = (a) => titleCase(a.subtype || a.type) || "Report";
+		const placeStr = (o) =>
+			[o.street, o.city].filter(Boolean).join(", ");
+		// Count community thumbs-up on an alert's comment thread.
+		const thumbsCount = (a) => {
+			if (typeof a.nThumbsUp === "number") return a.nThumbsUp;
+			if (Array.isArray(a.comments))
+				return a.comments.filter((c) => c && c.isThumbsUp).length;
+			return 0;
+		};
+
+		const render = (group, data) => {
+			// Delta update keyed by stable id, same pattern as flights:
+			// alerts are static and jams only mutate speed/level, so
+			// 30s polls mostly reuse existing DOM.
+			const prev = group._dwWaze instanceof Map
+				? group._dwWaze : new Map();
+			const next = new Map();
+			const keep = (key, make, update) => {
+				if (next.has(key)) return;
+				let lyr = prev.get(key);
+				if (lyr && group.hasLayer(lyr)) {
+					update(lyr);
+					prev.delete(key);
+				} else {
+					lyr = make();
+					if (!lyr) return;
+					lyr.addTo(group);
+				}
+				next.set(key, lyr);
+			};
+
+			for (const a of data.alerts || []) {
+				const loc = a.location;
+				if (!a.id || !loc || loc.x == null || loc.y == null) continue;
+				const style = ALERT_STYLE[a.type] || DEFAULT_STYLE;
+				const title = alertTitle(a);
+				const meta = [placeStr(a), agoStr(a.pubMillis)]
+					.filter(Boolean).join(" · ");
+				const thumbs = thumbsCount(a);
+				const thumbStr = thumbs ? ` · \u{1F44D} ${thumbs}` : "";
+				const tip = esc`<b>${style.glyph} ${title}</b>` +
+					(meta || thumbStr
+						? esc`<br><span class="dw-cad-sub">${meta}${thumbStr}</span>`
+						: "");
+				keep("a:" + a.id, () => {
+					const icon = L.divIcon({
+						className: "dw-waze-icon",
+						html: `<div style="background:${style.color};width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,.6);">${style.glyph}</div>`,
+						iconSize: [22, 22], iconAnchor: [11, 11],
+					});
+					const m = L.marker([loc.y, loc.x], {
+						icon, pane: "dwWazePane", interactive: true,
+					}).bindTooltip(tip, { className: "dw-waze-tip", sticky: true });
+					m._dwData = {
+						color: style.color,
+						name: title + (a.street ? " — " + a.street : ""),
+					};
+					return m;
+				}, (m) => m.setTooltipContent(tip));
+			}
+
+			for (const j of data.jams || []) {
+				if (j.id == null || !Array.isArray(j.line) || j.line.length < 2)
+					continue;
+				const pts = j.line
+					.filter((p) => p && p.x != null && p.y != null)
+					.map((p) => [p.y, p.x]);
+				if (pts.length < 2) continue;
+				const level = Math.max(0, Math.min(5, j.level || 0));
+				const color = JAM_COLORS[level];
+				// `speed` is m/s; `delay` (when present) is seconds lost.
+				const kmh = j.speed != null ? Math.round(j.speed * 3.6) : null;
+				const spdStr = kmh != null ? kmh + " km/h" : "";
+				const delayStr = j.delay > 0
+					? "+" + Math.round(j.delay / 60) + " min" : "";
+				const lenStr = j.length != null
+					? (j.length / 1000).toFixed(1) + " km" : "";
+				const place = placeStr(j);
+				const meta = [spdStr, delayStr, lenStr, agoStr(j.updateMillis)]
+					.filter(Boolean).join(" · ");
+				const tip = esc`<b>🚗 Traffic${place ? " — " + place : ""}</b>` +
+					(meta ? esc`<br><span class="dw-cad-sub">${meta}</span>` : "");
+				keep("j:" + j.id, () =>
+					L.polyline(pts, {
+						pane: "dwWazePane", color, weight: 5, opacity: 0.8,
+						interactive: true,
+					}).bindTooltip(tip, { className: "dw-waze-tip", sticky: true }),
+				(pl) => {
+					pl.setLatLngs(pts);
+					pl.setStyle({ color });
+					pl.setTooltipContent(tip);
+				});
+			}
+
+			for (const u of data.users || []) {
+				const loc = u.location;
+				if (u.id == null || !loc || loc.x == null || loc.y == null)
+					continue;
+				const who = (u.userName && u.userName !== "guest")
+					? u.userName : "Wazer";
+				keep("u:" + u.id, () =>
+					L.circleMarker([loc.y, loc.x], {
+						pane: "dwWazePane", radius: 4,
+						color: "#fff", weight: 1,
+						fillColor: "#33ccff", fillOpacity: 0.9,
+						interactive: true,
+					}).bindTooltip(esc`${who}`,
+						{ className: "dw-waze-tip", sticky: true }),
+				(c) => c.setLatLng([loc.y, loc.x]));
+			}
+
+			for (const lyr of prev.values()) {
+				if (group.hasLayer(lyr)) group.removeLayer(lyr);
+			}
+			group._dwWaze = next;
+		};
+
+		const WazeLayer = pollingDataLayer({
+			pane: "dwWazePane", paneZIndex: 445,
+			minZoom: 9, pollMs: 30000,
+			attribution: 'Traffic © <a href="https://www.waze.com/live-map" target="_blank" rel="noreferrer">Waze</a>',
+			fetch: (map, group) => {
+				const b = map.getBounds();
+				const c = map.getCenter();
+				const url = GEORSS +
+					"?top=" + b.getNorth().toFixed(6) +
+					"&bottom=" + b.getSouth().toFixed(6) +
+					"&left=" + b.getWest().toFixed(6) +
+					"&right=" + b.getEast().toFixed(6) +
+					"&env=" + wazeEnv(c.lat, c.lng) +
+					"&types=alerts,traffic,users";
+				// Waze answers 403 without a valid reCAPTCHA token, so
+				// mint one first and bail quietly if unavailable.
+				getWazeToken().then((token) => {
+					if (!token || !group._map) return;
+					gmJsonGet(url, {
+						headers: {
+							Referer: "https://www.waze.com/live-map",
+							"X-Recaptcha-Token": token,
+						},
+					}, (err, data) => {
+						if (err || !data || !group._map) return;
+						render(group, data);
+					});
+				});
+			},
+		});
+		return new WazeLayer();
 	}
 }
 

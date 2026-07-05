@@ -71,6 +71,7 @@ export const CFG = {
 	LAYER_WATER: "Water Infrastructure",
 	LAYER_FLIGHTS: "Live Flights",
 	LAYER_MARINE: "Marine Vessels",
+	LAYER_WAZE: "Waze Traffic",
 	LAYER_MOBILE: "Mobile Coverage",
 	LAYER_SEAMARKS: "OpenSeaMap",
 	LAYER_INFRA: "Power Infrastructure",
@@ -272,7 +273,7 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Live data",
-		names:  [CFG.LAYER_FLIGHTS, CFG.LAYER_MARINE,
+		names:  [CFG.LAYER_FLIGHTS, CFG.LAYER_MARINE, CFG.LAYER_WAZE,
 		         CFG.LAYER_INTVL_GLOBAL, CFG.LAYER_GEOCACHING],
 	},
 	{
