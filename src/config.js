@@ -84,6 +84,7 @@ export const CFG = {
 	LAYER_TOPO:    "QLD Topo",
 	LAYER_INTVL_GLOBAL: "INTVL Global Map",
 	LAYER_GEOCACHING: "Geocaches",
+	LAYER_SCC_APPS: "SCC Applications",
 	MODE_3D_STATE_KEY: "dw_mode_3d_on",
 	OVERLAY_STATE_KEY: "dw_active_overlays",
 
@@ -189,6 +190,21 @@ export const CFG = {
 	// optional "Sales" lookup on the cadastre tooltip.
 	OTH_BASE: "https://www.onthehouse.com.au",
 
+	// Sunshine Coast Council development/building/plumbing applications
+	// (the data behind Development.i). Point sublayers, queried as
+	// GeoJSON per viewport rather than rendered via /export — the
+	// server-side icons carry no attributes, the vector features do.
+	//   0/1 = Development apps (in progress / decided)
+	//   2/3 = Building apps    (in progress / decided)
+	//   4/5 = Plumbing apps    (in progress / decided)
+	SCC_APPS_SERVICE:
+		"https://geopublic.scc.qld.gov.au/arcgis/rest/services/" +
+		"PlanningCadastre/Applications_SCRC/MapServer",
+	// Development.i site — FilterDirect renders the map-search page and
+	// applies the querystring `filters` client-side (DANumber= /
+	// BANumber= / PlumbNumber= inside the encoded value).
+	SCC_DEVI_BASE: "https://developmenti.sunshinecoast.qld.gov.au",
+
 	// QPWS estate: protected-area polygons + tracks/trails of all kinds.
 	// Layer IDs in the source service:
 	//   10 = Protected areas and forests   5 = Walking track
@@ -261,7 +277,7 @@ export const DW_LAYER_GROUPS = [
 export const DW_OVERLAY_GROUPS = [
 	{
 		header: "Property",
-		names:  [CFG.LAYER_CADASTRE, CFG.LAYER_QPWS, CFG.LAYER_RELIEF],
+		names:  [CFG.LAYER_CADASTRE, CFG.LAYER_SCC_APPS, CFG.LAYER_QPWS, CFG.LAYER_RELIEF],
 	},
 	{
 		header: "Infrastructure",

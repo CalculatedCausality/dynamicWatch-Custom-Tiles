@@ -28,6 +28,8 @@ const HELPERS = [
 	"_cadVal", "_escHtml", "esc", "_safeColor", "_fmtPrice", "_fmtDate",
 	"_slugify", "_othStreetTypeSlug", "_othCanonicalUrlFromLocation",
 	"_formatCadastreTooltip", "_formatAddressLine",
+	// SCC applications (Development.i) formatters
+	"_deviAppUrl", "_fmtSccDate", "_formatSccTooltip", "_formatSccPopup",
 	// Layer-provider factories
 	"LayerProvider", "tileProvider", "tokenTileProvider",
 	"arcgisExportProvider", "pollingDataLayer", "oimIcon",

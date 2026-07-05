@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.117
-// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
+// @version      7.9.118
+// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
 // @match        https://embed.waze.com/*
@@ -13,6 +13,7 @@
 // @connect      qldglobe.information.qld.gov.au
 // @connect      spatial-img.information.qld.gov.au
 // @connect      spatial-gis.information.qld.gov.au
+// @connect      geopublic.scc.qld.gov.au
 // @connect      connecttile.garmin.com
 // @connect      strava.com
 // @connect      content-a.strava.com
@@ -100,6 +101,7 @@
     LAYER_TOPO: "QLD Topo",
     LAYER_INTVL_GLOBAL: "INTVL Global Map",
     LAYER_GEOCACHING: "Geocaches",
+    LAYER_SCC_APPS: "SCC Applications",
     MODE_3D_STATE_KEY: "dw_mode_3d_on",
     OVERLAY_STATE_KEY: "dw_active_overlays",
     // Mapbox GL JS — loaded dynamically when 3D Mode is first toggled
@@ -185,6 +187,18 @@
     // OnTheHouse (Cotality) base URL — used by fetchOthSales for the
     // optional "Sales" lookup on the cadastre tooltip.
     OTH_BASE: "https://www.onthehouse.com.au",
+    // Sunshine Coast Council development/building/plumbing applications
+    // (the data behind Development.i). Point sublayers, queried as
+    // GeoJSON per viewport rather than rendered via /export — the
+    // server-side icons carry no attributes, the vector features do.
+    //   0/1 = Development apps (in progress / decided)
+    //   2/3 = Building apps    (in progress / decided)
+    //   4/5 = Plumbing apps    (in progress / decided)
+    SCC_APPS_SERVICE: "https://geopublic.scc.qld.gov.au/arcgis/rest/services/PlanningCadastre/Applications_SCRC/MapServer",
+    // Development.i site — FilterDirect renders the map-search page and
+    // applies the querystring `filters` client-side (DANumber= /
+    // BANumber= / PlumbNumber= inside the encoded value).
+    SCC_DEVI_BASE: "https://developmenti.sunshinecoast.qld.gov.au",
     // QPWS estate: protected-area polygons + tracks/trails of all kinds.
     // Layer IDs in the source service:
     //   10 = Protected areas and forests   5 = Walking track
@@ -238,7 +252,7 @@
   var DW_OVERLAY_GROUPS = [
     {
       header: "Property",
-      names: [CFG.LAYER_CADASTRE, CFG.LAYER_QPWS, CFG.LAYER_RELIEF]
+      names: [CFG.LAYER_CADASTRE, CFG.LAYER_SCC_APPS, CFG.LAYER_QPWS, CFG.LAYER_RELIEF]
     },
     {
       header: "Infrastructure",
@@ -4957,6 +4971,286 @@
     }
   };
 
+  // src/providers/qld-environment.js
+  function makeArcgisQueryLayer(opts, gmJsonGet2) {
+    const debounceMs = opts.debounceMs || 400;
+    const timeoutMs = opts.timeoutMs || 3e4;
+    const padBounds = opts.padBounds || 0;
+    const Layer = L.Layer.extend({
+      initialize() {
+        this._group = null;
+        this._debounce = null;
+        this._lastBbox = null;
+        this._gen = 0;
+      },
+      onAdd(map) {
+        if (!map.getPane(opts.pane)) {
+          map.createPane(opts.pane);
+          map.getPane(opts.pane).style.zIndex = String(opts.paneZIndex);
+        }
+        this._group = L.layerGroup().addTo(map);
+        this._fetch();
+        map.on("moveend zoomend", this._onViewChange, this);
+      },
+      onRemove(map) {
+        clearTimeout(this._debounce);
+        this._debounce = null;
+        this._gen++;
+        map.off("moveend zoomend", this._onViewChange, this);
+        if (this._group) {
+          this._group.remove();
+          this._group = null;
+        }
+      },
+      _onViewChange() {
+        clearTimeout(this._debounce);
+        this._debounce = setTimeout(() => this._fetch(), debounceMs);
+      },
+      _fetch() {
+        const map = this._map;
+        if (!map || !this._group) return;
+        const z = map.getZoom();
+        if (z < opts.minZoom) {
+          this._group.clearLayers();
+          this._lastBbox = null;
+          return;
+        }
+        const b = padBounds ? map.getBounds().pad(padBounds) : map.getBounds();
+        const bbox = `${b.getWest().toFixed(4)},${b.getSouth().toFixed(4)},${b.getEast().toFixed(4)},${b.getNorth().toFixed(4)}`;
+        if (bbox === this._lastBbox) return;
+        this._lastBbox = bbox;
+        const myGen = ++this._gen;
+        const offset = 360 / (256 * Math.pow(2, z)) * 2;
+        const url = opts.queryUrl + "?f=geojson&returnGeometry=true&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326&spatialRel=esriSpatialRelIntersects&geometryPrecision=5&where=" + encodeURIComponent(opts.where) + "&outFields=" + encodeURIComponent(opts.outFields) + "&geometry=" + encodeURIComponent(bbox) + "&maxAllowableOffset=" + offset + // Deterministic order matters when the server truncates at
+        // maxRecordCount — e.g. newest applications survive the cut.
+        (opts.orderBy ? "&orderByFields=" + encodeURIComponent(opts.orderBy) : "");
+        gmJsonGet2(url, { timeout: timeoutMs }, (err, geojson) => {
+          if (myGen !== this._gen || !this._group) return;
+          if (err || geojson && geojson.error) {
+            console.warn(
+              `[CustomTiles] ${opts.label} request error`,
+              err ? err.message : JSON.stringify(geojson.error)
+            );
+            return;
+          }
+          this._group.clearLayers();
+          const geoOpts = {
+            pane: opts.pane,
+            style: () => opts.style,
+            onEachFeature: (f, lyr) => {
+              const tip = opts.tooltip && opts.tooltip(f.properties || {});
+              if (tip) lyr.bindTooltip(tip, {
+                className: opts.tipClass || "dw-park-tip",
+                sticky: true
+              });
+              const pop = opts.popup && opts.popup(f.properties || {});
+              if (pop) lyr.bindPopup(pop, opts.popupOpts || {});
+            }
+          };
+          if (opts.pointToLayer) {
+            geoOpts.pointToLayer = (f, latlng) => opts.pointToLayer(f, latlng);
+          }
+          L.geoJSON(geojson, geoOpts).addTo(this._group);
+        });
+      },
+      getAttribution() {
+        return opts.attribution;
+      }
+    });
+    return new Layer();
+  }
+  function createQldEnvironmentProviders({ makeHoverIdentify: makeHoverIdentify2, gmJsonGet: gmJsonGet2 }) {
+    const installQpwsHover = makeHoverIdentify2({
+      baseUrl: CFG.QLD_QPWS_SERVICE,
+      layers: "all:10",
+      tolerance: 5,
+      minZoom: CFG.QLD_QPWS_HOVER_MIN_ZOOM,
+      tipClass: "dw-qpws-tip",
+      formatTooltip: (a) => {
+        const name = a.NAME || a.name || a.PARK_NAME || a.park_name || "";
+        const type = a.FEAT_TYPE || a.feat_type || a.MANAGE_TYPE || a.manage_type || "";
+        const lines = [];
+        if (name) lines.push(esc`<b>${name}</b>`);
+        if (type) lines.push(_escHtml(type));
+        return lines.join("<br>") || "Protected area";
+      }
+    });
+    const QpwsLayerProvider2 = arcgisExportProvider({
+      baseUrl: CFG.QLD_QPWS_SERVICE,
+      showLayers: CFG.QLD_QPWS_LAYER_IDS,
+      pane: "dwQpwsPane",
+      paneZIndex: 396,
+      opacity: 0.85,
+      minZoom: 9,
+      maxZoom: 25,
+      attribution: 'QPWS &copy; <a href="https://parks.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (DETSI)</a>',
+      onAdd: (layer, map) => installQpwsHover(layer, map),
+      onRemove: (layer) => {
+        if (layer._dwHoverOff) {
+          layer._dwHoverOff();
+          layer._dwHoverOff = null;
+        }
+      }
+    });
+    class NationalParksLayerProvider2 extends LayerProvider {
+      create() {
+        return makeArcgisQueryLayer({
+          label: "National Parks",
+          pane: "dwNationalParksPane",
+          paneZIndex: 397,
+          minZoom: 8,
+          queryUrl: CFG.QLD_QPWS_SERVICE + "/10/query",
+          where: "esttype IN ('NP','NS','NY','NA')",
+          outFields: "estatename,esttype",
+          style: {
+            color: "#166534",
+            weight: 1,
+            opacity: 0.9,
+            fillColor: "#22c55e",
+            fillOpacity: 0.22
+          },
+          tipClass: "dw-park-tip",
+          tooltip: (p) => {
+            const name = p.estatename || p.ESTATENAME || p.NAME || "National Park";
+            const type = p.esttype || p.ESTTYPE || "";
+            return esc`<b>${name}</b>` + (type ? `<br>${_escHtml(type)}` : "");
+          },
+          attribution: 'QPWS &copy; <a href="https://parks.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (DETSI)</a>'
+        }, gmJsonGet2);
+      }
+    }
+    return { QpwsLayerProvider: QpwsLayerProvider2, NationalParksLayerProvider: NationalParksLayerProvider2 };
+  }
+
+  // src/providers/scc-applications.js
+  var PANE = "dwSccAppsPane";
+  var PANE_Z = 398;
+  var _SUBLAYERS = [
+    { id: 0, kind: "DA", live: true },
+    { id: 2, kind: "BA", live: true },
+    { id: 4, kind: "PL", live: true },
+    { id: 1, kind: "DA", live: false },
+    { id: 3, kind: "BA", live: false },
+    { id: 5, kind: "PL", live: false }
+  ];
+  var _KIND = {
+    DA: { label: "Development", color: "#8b5cf6", param: "DANumber" },
+    BA: { label: "Building", color: "#f59e0b", param: "BANumber" },
+    PL: { label: "Plumbing", color: "#0ea5e9", param: "PlumbNumber" }
+  };
+  var _APP_FIELDS = "ram_id,group_desc,category_desc,description,decision,progress,assessment_level,d_date_rec,d_decision_made";
+  function _fmtSccDate(ms) {
+    const n = Number(ms);
+    if (!isFinite(n) || n <= 0) return "";
+    const d = new Date(n);
+    const months = [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec"
+    ];
+    return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
+  }
+  var _clip = (s, n) => {
+    const t = String(s || "").trim().replace(/\s+/g, " ");
+    return t.length > n ? t.slice(0, n - 1) + "…" : t;
+  };
+  function _deviAppUrl(kind, ramId) {
+    const meta = _KIND[kind];
+    const id = String(ramId || "").trim();
+    if (!meta || !id || !/^[A-Za-z0-9/\-. ]+$/.test(id)) return "";
+    return CFG.SCC_DEVI_BASE + "/Home/FilterDirect?filters=" + encodeURIComponent(meta.param + "=" + id);
+  }
+  function _formatSccTooltip(p, kind, live) {
+    const meta = _KIND[kind];
+    const lines = [];
+    const status = live ? p.progress || "In Progress" : p.decision || "Decided";
+    lines.push(
+      esc`<b>${p.ram_id || "Application"}</b> · ${meta.label} — ${status}`
+    );
+    const cat = String(p.category_desc || "").trim();
+    if (cat) lines.push(_escHtml(cat));
+    const desc = _clip(p.description, 110);
+    if (desc) lines.push(esc`<span class="dw-scc-sub">${desc}</span>`);
+    const when = live ? p.d_date_rec ? "Lodged " + _fmtSccDate(p.d_date_rec) : "" : p.d_decision_made ? "Decided " + _fmtSccDate(p.d_decision_made) : "";
+    if (when) lines.push(esc`<span class="dw-scc-sub">${when}</span>`);
+    return lines.join("<br>");
+  }
+  function _formatSccPopup(p, kind, live) {
+    const meta = _KIND[kind];
+    const rows = [];
+    rows.push(
+      esc`<div class="dw-scc-pop-hd"><b>${p.ram_id || "Application"}</b>` + esc` <span class="dw-scc-sub">${meta.label} application</span></div>`
+    );
+    const cat = String(p.category_desc || "").trim();
+    const grp = String(p.group_desc || "").trim();
+    if (cat || grp) {
+      rows.push(esc`<div>${cat || grp}` + (cat && grp && grp !== cat ? esc` <span class="dw-scc-sub">(${grp})</span>` : "") + "</div>");
+    }
+    const desc = _clip(p.description, 300);
+    if (desc) rows.push(esc`<div class="dw-scc-pop-desc">${desc}</div>`);
+    const bits = [];
+    if (p.d_date_rec) bits.push("Lodged " + _fmtSccDate(p.d_date_rec));
+    if (!live && p.d_decision_made)
+      bits.push("Decided " + _fmtSccDate(p.d_decision_made));
+    const status = live ? p.progress || "In Progress" : p.decision || "";
+    if (status) bits.push(status);
+    if (bits.length)
+      rows.push(esc`<div class="dw-scc-sub">${bits.join(" · ")}</div>`);
+    const lvl = String(p.assessment_level || "").trim();
+    if (lvl && lvl.toLowerCase() !== "other")
+      rows.push(esc`<div class="dw-scc-sub">Assessment: ${lvl}</div>`);
+    const url = _deviAppUrl(kind, p.ram_id);
+    if (url) {
+      rows.push(
+        `<a class="dw-scc-link" href="${_escHtml(url)}" target="_blank" rel="noreferrer">Open in Development.i ↗</a>`
+      );
+    }
+    return `<div class="dw-scc-pop">${rows.join("")}</div>`;
+  }
+  function _makeSubLayer(sub) {
+    const meta = _KIND[sub.kind];
+    return makeArcgisQueryLayer({
+      label: `SCC ${meta.label} (${sub.live ? "in progress" : "decided"})`,
+      pane: PANE,
+      paneZIndex: PANE_Z,
+      // In-progress sets are small council-wide (~600–3500 features);
+      // decided sets run to 190k, so those wait for street-level zoom.
+      minZoom: sub.live ? 13 : 16,
+      queryUrl: `${CFG.SCC_APPS_SERVICE}/${sub.id}/query`,
+      where: "1=1",
+      outFields: _APP_FIELDS,
+      orderBy: "d_date_rec DESC",
+      pointToLayer: (f, latlng) => L.circleMarker(latlng, {
+        pane: PANE,
+        radius: sub.live ? 6 : 4,
+        color: sub.live ? "#ffffff" : meta.color,
+        weight: sub.live ? 1.5 : 1,
+        opacity: sub.live ? 0.9 : 0.5,
+        fillColor: meta.color,
+        fillOpacity: sub.live ? 0.85 : 0.35
+      }),
+      tipClass: "dw-scc-tip",
+      tooltip: (p) => _formatSccTooltip(p, sub.kind, sub.live),
+      popup: (p) => _formatSccPopup(p, sub.kind, sub.live),
+      popupOpts: { maxWidth: 320, className: "dw-scc-pop-wrap" },
+      attribution: 'Applications &copy; <a href="https://developmenti.sunshinecoast.qld.gov.au/" target="_blank" rel="noreferrer">Sunshine Coast Council</a>'
+    }, gmJsonGet);
+  }
+  var SccApplicationsLayerProvider = class extends LayerProvider {
+    create() {
+      return L.layerGroup(_SUBLAYERS.map(_makeSubLayer));
+    }
+  };
+
   // src/providers/geocaching.js
   var GeocachingLayerProvider = class extends LayerProvider {
     create() {
@@ -6083,149 +6377,6 @@
     }
   };
 
-  // src/providers/qld-environment.js
-  function makeArcgisQueryLayer(opts, gmJsonGet2) {
-    const debounceMs = opts.debounceMs || 400;
-    const timeoutMs = opts.timeoutMs || 3e4;
-    const padBounds = opts.padBounds || 0;
-    const Layer = L.Layer.extend({
-      initialize() {
-        this._group = null;
-        this._debounce = null;
-        this._lastBbox = null;
-        this._gen = 0;
-      },
-      onAdd(map) {
-        if (!map.getPane(opts.pane)) {
-          map.createPane(opts.pane);
-          map.getPane(opts.pane).style.zIndex = String(opts.paneZIndex);
-        }
-        this._group = L.layerGroup().addTo(map);
-        this._fetch();
-        map.on("moveend zoomend", this._onViewChange, this);
-      },
-      onRemove(map) {
-        clearTimeout(this._debounce);
-        this._debounce = null;
-        this._gen++;
-        map.off("moveend zoomend", this._onViewChange, this);
-        if (this._group) {
-          this._group.remove();
-          this._group = null;
-        }
-      },
-      _onViewChange() {
-        clearTimeout(this._debounce);
-        this._debounce = setTimeout(() => this._fetch(), debounceMs);
-      },
-      _fetch() {
-        const map = this._map;
-        if (!map || !this._group) return;
-        const z = map.getZoom();
-        if (z < opts.minZoom) {
-          this._group.clearLayers();
-          this._lastBbox = null;
-          return;
-        }
-        const b = padBounds ? map.getBounds().pad(padBounds) : map.getBounds();
-        const bbox = `${b.getWest().toFixed(4)},${b.getSouth().toFixed(4)},${b.getEast().toFixed(4)},${b.getNorth().toFixed(4)}`;
-        if (bbox === this._lastBbox) return;
-        this._lastBbox = bbox;
-        const myGen = ++this._gen;
-        const offset = 360 / (256 * Math.pow(2, z)) * 2;
-        const url = opts.queryUrl + "?f=geojson&returnGeometry=true&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326&spatialRel=esriSpatialRelIntersects&geometryPrecision=5&where=" + encodeURIComponent(opts.where) + "&outFields=" + encodeURIComponent(opts.outFields) + "&geometry=" + encodeURIComponent(bbox) + "&maxAllowableOffset=" + offset;
-        gmJsonGet2(url, { timeout: timeoutMs }, (err, geojson) => {
-          if (myGen !== this._gen || !this._group) return;
-          if (err || geojson && geojson.error) {
-            console.warn(
-              `[CustomTiles] ${opts.label} request error`,
-              err ? err.message : JSON.stringify(geojson.error)
-            );
-            return;
-          }
-          this._group.clearLayers();
-          L.geoJSON(geojson, {
-            pane: opts.pane,
-            style: () => opts.style,
-            onEachFeature: (f, lyr) => {
-              const tip = opts.tooltip && opts.tooltip(f.properties || {});
-              if (tip) lyr.bindTooltip(tip, {
-                className: opts.tipClass || "dw-park-tip",
-                sticky: true
-              });
-            }
-          }).addTo(this._group);
-        });
-      },
-      getAttribution() {
-        return opts.attribution;
-      }
-    });
-    return new Layer();
-  }
-  function createQldEnvironmentProviders({ makeHoverIdentify: makeHoverIdentify2, gmJsonGet: gmJsonGet2 }) {
-    const installQpwsHover = makeHoverIdentify2({
-      baseUrl: CFG.QLD_QPWS_SERVICE,
-      layers: "all:10",
-      tolerance: 5,
-      minZoom: CFG.QLD_QPWS_HOVER_MIN_ZOOM,
-      tipClass: "dw-qpws-tip",
-      formatTooltip: (a) => {
-        const name = a.NAME || a.name || a.PARK_NAME || a.park_name || "";
-        const type = a.FEAT_TYPE || a.feat_type || a.MANAGE_TYPE || a.manage_type || "";
-        const lines = [];
-        if (name) lines.push(esc`<b>${name}</b>`);
-        if (type) lines.push(_escHtml(type));
-        return lines.join("<br>") || "Protected area";
-      }
-    });
-    const QpwsLayerProvider2 = arcgisExportProvider({
-      baseUrl: CFG.QLD_QPWS_SERVICE,
-      showLayers: CFG.QLD_QPWS_LAYER_IDS,
-      pane: "dwQpwsPane",
-      paneZIndex: 396,
-      opacity: 0.85,
-      minZoom: 9,
-      maxZoom: 25,
-      attribution: 'QPWS &copy; <a href="https://parks.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (DETSI)</a>',
-      onAdd: (layer, map) => installQpwsHover(layer, map),
-      onRemove: (layer) => {
-        if (layer._dwHoverOff) {
-          layer._dwHoverOff();
-          layer._dwHoverOff = null;
-        }
-      }
-    });
-    class NationalParksLayerProvider2 extends LayerProvider {
-      create() {
-        return makeArcgisQueryLayer({
-          label: "National Parks",
-          pane: "dwNationalParksPane",
-          paneZIndex: 397,
-          minZoom: 8,
-          queryUrl: CFG.QLD_QPWS_SERVICE + "/10/query",
-          where: "esttype IN ('NP','NS','NY','NA')",
-          outFields: "estatename,esttype",
-          style: {
-            color: "#166534",
-            weight: 1,
-            opacity: 0.9,
-            fillColor: "#22c55e",
-            fillOpacity: 0.22
-          },
-          tipClass: "dw-park-tip",
-          tooltip: (p) => {
-            const name = p.estatename || p.ESTATENAME || p.NAME || "National Park";
-            const type = p.esttype || p.ESTTYPE || "";
-            return esc`<b>${name}</b>` + (type ? `<br>${_escHtml(type)}` : "");
-          },
-          attribution: 'QPWS &copy; <a href="https://parks.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (DETSI)</a>'
-        }, gmJsonGet2);
-      }
-    }
-    return { QpwsLayerProvider: QpwsLayerProvider2, NationalParksLayerProvider: NationalParksLayerProvider2 };
-  }
-
   // src/tokens.js
   var TokenManagerBase = class {
     constructor(opts) {
@@ -6673,6 +6824,7 @@
         addOverlay(CFG.LAYER_TELECOM, new TelecomsLayerProvider());
         addOverlay(CFG.LAYER_LIGHTPOL, new LightPollutionLayerProvider());
         addOverlay(CFG.LAYER_CADASTRE, new QldCadastreLayerProvider());
+        addOverlay(CFG.LAYER_SCC_APPS, new SccApplicationsLayerProvider());
         addOverlay(CFG.LAYER_QPWS, new QpwsLayerProvider());
         addOverlay(CFG.LAYER_RELIEF, new QldReliefLayerProvider());
         addOverlay(
@@ -7317,6 +7469,17 @@
         ".dw-marine-icon { background: none !important; border: none !important; }",
         ".dw-marine-cluster { background: none !important; border: none !important; overflow: visible !important; cursor: pointer; }",
         ".dw-marine-tip { font-size: 11px; line-height: 1.4; }",
+        // SCC applications (Development.i) — hover tooltip + click
+        // popup with the full record and a Development.i deep link.
+        ".dw-scc-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; max-width: 260px; white-space: normal; }",
+        ".dw-scc-tip b { font-weight: 700; }",
+        ".dw-scc-sub { color: #6b7280; font-size: 10.5px; }",
+        ".dw-scc-pop { font-size: 12.5px; line-height: 1.5; color: #1f2937; min-width: 200px; }",
+        ".dw-scc-pop-hd { margin-bottom: 2px; }",
+        ".dw-scc-pop-hd b { font-weight: 700; }",
+        ".dw-scc-pop-desc { margin: 4px 0; }",
+        ".dw-scc-pop .dw-scc-sub { display: block; margin-top: 2px; }",
+        ".dw-scc-link { display: inline-block; margin-top: 6px; font-weight: 600; }",
         ".dw-cad-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
         ".dw-cad-tip b { font-weight: 700; }",
         ".dw-cad-tip .dw-cad-sub { color: #6b7280; }",
@@ -7421,6 +7584,10 @@
         _othCanonicalUrlFromLocation,
         _formatCadastreTooltip,
         _formatAddressLine,
+        _deviAppUrl,
+        _fmtSccDate,
+        _formatSccTooltip,
+        _formatSccPopup,
         LayerProvider,
         tileProvider,
         tokenTileProvider,

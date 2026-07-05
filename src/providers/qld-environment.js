@@ -62,7 +62,12 @@ export function makeArcgisQueryLayer(opts, gmJsonGet) {
 				"&where=" + encodeURIComponent(opts.where) +
 				"&outFields=" + encodeURIComponent(opts.outFields) +
 				"&geometry=" + encodeURIComponent(bbox) +
-				"&maxAllowableOffset=" + offset;
+				"&maxAllowableOffset=" + offset +
+				// Deterministic order matters when the server truncates at
+				// maxRecordCount — e.g. newest applications survive the cut.
+				(opts.orderBy
+					? "&orderByFields=" + encodeURIComponent(opts.orderBy)
+					: "");
 
 			gmJsonGet(url, { timeout: timeoutMs }, (err, geojson) => {
 				if (myGen !== this._gen || !this._group) return;
@@ -72,7 +77,7 @@ export function makeArcgisQueryLayer(opts, gmJsonGet) {
 					return;
 				}
 				this._group.clearLayers();
-				L.geoJSON(geojson, {
+				const geoOpts = {
 					pane: opts.pane,
 					style: () => opts.style,
 					onEachFeature: (f, lyr) => {
@@ -80,8 +85,17 @@ export function makeArcgisQueryLayer(opts, gmJsonGet) {
 						if (tip) lyr.bindTooltip(tip, {
 							className: opts.tipClass || "dw-park-tip", sticky: true,
 						});
+						const pop = opts.popup && opts.popup(f.properties || {});
+						if (pop) lyr.bindPopup(pop, opts.popupOpts || {});
 					},
-				}).addTo(this._group);
+				};
+				// Point/MultiPoint sublayers (e.g. SCC applications) render
+				// as circle markers instead of the default icon marker.
+				if (opts.pointToLayer) {
+					geoOpts.pointToLayer = (f, latlng) =>
+						opts.pointToLayer(f, latlng);
+				}
+				L.geoJSON(geojson, geoOpts).addTo(this._group);
 			});
 		},
 

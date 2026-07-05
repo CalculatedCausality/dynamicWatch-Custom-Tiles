@@ -39,6 +39,7 @@ import {
 	fetchOthSales,
 } from "../providers/qld-cadastre.js";
 import { IntvlGlobalTilesLayerProvider } from "../providers/intvl-global.js";
+import { SccApplicationsLayerProvider } from "../providers/scc-applications.js";
 import { GeocachingLayerProvider } from "../providers/geocaching.js";
 import {
 	PowerInfraLayerProvider,
@@ -264,6 +265,7 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_TELECOM,    new TelecomsLayerProvider());
 			addOverlay(CFG.LAYER_LIGHTPOL,   new LightPollutionLayerProvider());
 			addOverlay(CFG.LAYER_CADASTRE,   new QldCadastreLayerProvider());
+			addOverlay(CFG.LAYER_SCC_APPS,   new SccApplicationsLayerProvider());
 			addOverlay(CFG.LAYER_QPWS,       new QpwsLayerProvider());
 			addOverlay(CFG.LAYER_RELIEF,     new QldReliefLayerProvider());
 			addOverlay(CFG.LAYER_NATIONAL_PARKS,
@@ -1011,6 +1013,17 @@ export class CustomTilesApp {
 			".dw-marine-icon { background: none !important; border: none !important; }",
 			".dw-marine-cluster { background: none !important; border: none !important; overflow: visible !important; cursor: pointer; }",
 			".dw-marine-tip { font-size: 11px; line-height: 1.4; }",
+			// SCC applications (Development.i) — hover tooltip + click
+			// popup with the full record and a Development.i deep link.
+			".dw-scc-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; max-width: 260px; white-space: normal; }",
+			".dw-scc-tip b { font-weight: 700; }",
+			".dw-scc-sub { color: #6b7280; font-size: 10.5px; }",
+			".dw-scc-pop { font-size: 12.5px; line-height: 1.5; color: #1f2937; min-width: 200px; }",
+			".dw-scc-pop-hd { margin-bottom: 2px; }",
+			".dw-scc-pop-hd b { font-weight: 700; }",
+			".dw-scc-pop-desc { margin: 4px 0; }",
+			".dw-scc-pop .dw-scc-sub { display: block; margin-top: 2px; }",
+			".dw-scc-link { display: inline-block; margin-top: 6px; font-weight: 600; }",
 			".dw-cad-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
 			".dw-cad-tip b { font-weight: 700; }",
 			".dw-cad-tip .dw-cad-sub { color: #6b7280; }",

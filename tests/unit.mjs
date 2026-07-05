@@ -599,6 +599,71 @@ t("LayerProvider base throws if .create() not overridden", () => {
 	assert(threw, "base LayerProvider.create() should throw");
 });
 
+// ---- SCC applications (Development.i) formatters ----
+
+t("_fmtSccDate formats epoch ms and rejects junk", () => {
+	// 1145455200000 = 2006-04-19T14:00Z = 2006-04-20 00:00 AEST
+	assert(/2006/.test(dw._fmtSccDate(1145455200000)), "year rendered");
+	eq(dw._fmtSccDate(null), "");
+	eq(dw._fmtSccDate("nope"), "");
+	eq(dw._fmtSccDate(-5), "");
+});
+
+t("_deviAppUrl builds encoded FilterDirect deep link per kind", () => {
+	const url = dw._deviAppUrl("DA", "MCU24/0123");
+	eq(url,
+		"https://developmenti.sunshinecoast.qld.gov.au/Home/FilterDirect" +
+		"?filters=DANumber%3DMCU24%2F0123");
+	assert(dw._deviAppUrl("BA", "BAC26/1").includes("BANumber%3D"), "BA param");
+	assert(dw._deviAppUrl("PL", "PC06/1304").includes("PlumbNumber%3D"), "PL param");
+});
+
+t("_deviAppUrl rejects unsafe / unknown input", () => {
+	eq(dw._deviAppUrl("DA", 'X" onmouseover="alert(1)'), "", "attr breakout");
+	eq(dw._deviAppUrl("DA", "<script>"), "", "html chars");
+	eq(dw._deviAppUrl("ZZ", "MCU24/0123"), "", "unknown kind");
+	eq(dw._deviAppUrl("DA", ""), "", "empty id");
+});
+
+t("_formatSccTooltip escapes external strings and clips description", () => {
+	const html = dw._formatSccTooltip({
+		ram_id: "BAC26/0042",
+		category_desc: "Dwelling <New>",
+		description: "x".repeat(300),
+		progress: "In Progress",
+		d_date_rec: 1750000000000,
+	}, "BA", true);
+	assert(html.includes("BAC26/0042"), "ram id");
+	assert(html.includes("Dwelling &lt;New&gt;"), "category escaped");
+	assert(!html.includes("<New>"), "no raw tag");
+	assert(html.includes("…"), "long description clipped");
+	assert(html.includes("Lodged "), "lodged date line");
+});
+
+t("_formatSccPopup carries decision info and Development.i link", () => {
+	const html = dw._formatSccPopup({
+		ram_id: "MCU24/0123",
+		group_desc: "Material Change of Use",
+		category_desc: "Multi-unit residential",
+		description: "12 unit apartment building",
+		decision: "Approved",
+		d_date_rec: 1700000000000,
+		d_decision_made: 1710000000000,
+	}, "DA", false);
+	assert(html.includes("Approved"), "decision shown");
+	assert(html.includes("Decided "), "decision date shown");
+	assert(html.includes("FilterDirect?filters=DANumber%3DMCU24%2F0123"),
+		"deep link present");
+	assert(html.includes('rel="noreferrer"'), "link is noreferrer");
+});
+
+t("SCC Applications overlay is registered and grouped", () => {
+	eq(dw.CFG.LAYER_SCC_APPS, "SCC Applications");
+	const names = new Set(dw.DW_OVERLAY_GROUPS.flatMap((g) => g.names));
+	assert(names.has(dw.CFG.LAYER_SCC_APPS),
+		"SCC Applications missing from overlay groups");
+});
+
 t("advertised QLD Relief and National Parks overlays are grouped", () => {
 	const names = new Set(dw.DW_OVERLAY_GROUPS.flatMap((g) => g.names));
 	eq(dw.CFG.LAYER_RELIEF, "QLD Relief");

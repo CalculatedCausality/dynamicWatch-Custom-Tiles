@@ -18,6 +18,12 @@ import {
 	_slugify,
 } from './providers/qld-cadastre.js';
 import { oimIcon } from './providers/openinframap.js';
+import {
+	_deviAppUrl,
+	_fmtSccDate,
+	_formatSccPopup,
+	_formatSccTooltip,
+} from './providers/scc-applications.js';
 import { _escHtml, esc, _safeColor, _fmtPrice, _fmtDate } from './utils/html.js';
 import { hexAlpha, pointInRing, intvlActivityTime, intvlAgo, intvlArea } from './utils/intvl.js';
 import {
@@ -65,6 +71,7 @@ export function bootUserscript() {
 			_cadVal, _escHtml, esc, _safeColor, _fmtPrice, _fmtDate,
 			_slugify, _othStreetTypeSlug, _othCanonicalUrlFromLocation,
 			_formatCadastreTooltip, _formatAddressLine,
+			_deviAppUrl, _fmtSccDate, _formatSccTooltip, _formatSccPopup,
 			LayerProvider, tileProvider, tokenTileProvider,
 			arcgisExportProvider, pollingDataLayer, oimIcon,
 		};
