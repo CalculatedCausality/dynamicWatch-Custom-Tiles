@@ -5146,6 +5146,13 @@
     PL: { liveId: 4, pastId: 5, label: "Plumbing", color: "#0ea5e9", param: "PlumbNumber" }
   };
   var _APP_FIELDS = "ram_id,group_desc,category_desc,description,decision,progress,assessment_level,d_date_rec,d_decision_made";
+  var _touchCached = null;
+  function _isTouch() {
+    if (_touchCached === null) {
+      _touchCached = !!(typeof L !== "undefined" && L.Browser && L.Browser.mobile) || !!(typeof window !== "undefined" && window.matchMedia && window.matchMedia("(hover: none)").matches);
+    }
+    return _touchCached;
+  }
   function _fmtSccDate(ms) {
     const n = Number(ms);
     if (!isFinite(n) || n <= 0) return "";
@@ -5367,7 +5374,7 @@
   }
   function _renderSccPropertyHistory(res) {
     if (!res || !res.hist.length) {
-      return res && res.prop.address ? esc`<b>SCC applications</b><br><span class="dw-scc-sub">None on record for ${res.prop.address}.</span>` + '<br><span class="dw-scc-sub">Development.i only lists applications lodged since ~2007 — older approvals sit in council archives.</span>' : "";
+      return res && res.prop.address ? '<b>SCC applications</b><br><span class="dw-scc-sub">None found.</span>' : "";
     }
     const rows = res.hist.map((h) => _histRowHtml(h, "")).join("");
     return esc`<b>SCC applications (${res.hist.length})</b>` + `<div class="dw-scc-stages">${rows}</div>`;
@@ -5582,9 +5589,9 @@
       orderBy: "d_date_rec DESC",
       pointToLayer: (f, latlng) => L.circleMarker(latlng, {
         pane: PANE,
-        radius: live ? 6 : 4,
+        radius: (live ? 6 : 4) * (_isTouch() ? 1.7 : 1),
         color: live ? "#ffffff" : meta.color,
-        weight: live ? 1.5 : 1,
+        weight: (live ? 1.5 : 1) * (_isTouch() ? 1.5 : 1),
         opacity: live ? 0.9 : 0.5,
         fillColor: meta.color,
         fillOpacity: live ? 0.85 : 0.35
@@ -5644,9 +5651,9 @@
       }),
       pointToLayer: (f, latlng) => L.circleMarker(latlng, {
         pane: PANE,
-        radius: 8,
+        radius: 8 * (_isTouch() ? 1.7 : 1),
         color: "#ffffff",
-        weight: 2,
+        weight: 2 * (_isTouch() ? 1.5 : 1),
         opacity: 0.95,
         fillColor: "#dc2626",
         fillOpacity: 0.9

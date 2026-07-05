@@ -893,7 +893,7 @@ t("_renderSccPropertyHistory renders count header and rows", () => {
 	const none = dw._renderSccPropertyHistory({
 		prop: { landNo: 1, address: "X St" }, hist: [],
 	});
-	assert(none.includes("None on record"), "empty-state message");
+	assert(none.includes("None found"), "empty-state message");
 });
 
 t("_renderSccDetail shows officer/status facts and property history", () => {
