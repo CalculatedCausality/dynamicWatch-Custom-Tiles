@@ -139,6 +139,12 @@ export class WazeLayerProvider extends LayerProvider {
 				return a.comments.filter((c) => c && c.isThumbsUp).length;
 			return 0;
 		};
+		// Trim + cap free-text so a giant council road-closure notice
+		// doesn't blow the tooltip out.
+		const clip = (s, n) => {
+			const t = String(s || "").trim().replace(/\s+/g, " ");
+			return t.length > n ? t.slice(0, n - 1) + "…" : t;
+		};
 
 		const render = (group, data) => {
 			// Delta update keyed by stable id, same pattern as flights:
@@ -170,10 +176,18 @@ export class WazeLayerProvider extends LayerProvider {
 					.filter(Boolean).join(" · ");
 				const thumbs = thumbsCount(a);
 				const thumbStr = thumbs ? ` · \u{1F44D} ${thumbs}` : "";
+				// Reporter's free-text note (e.g. "Pothole Detected",
+				// "Disabled Car Ahead", closure schedules).
+				const desc = clip(a.reportDescription, 160);
+				const descStr = desc ? esc`<br><i>${desc}</i>` : "";
+				// Attribution — usually an official feed (Waymo, HAAS,
+				// council road-works), occasionally a community handle.
+				const by = clip(a.reportBy || a.provider, 48);
+				const byStr = by ? esc`<br><span class="dw-cad-sub">via ${by}</span>` : "";
+				const metaStr = (meta || thumbStr)
+					? esc`<br><span class="dw-cad-sub">${meta}${thumbStr}</span>` : "";
 				const tip = esc`<b>${style.glyph} ${title}</b>` +
-					(meta || thumbStr
-						? esc`<br><span class="dw-cad-sub">${meta}${thumbStr}</span>`
-						: "");
+					descStr + metaStr + byStr;
 				keep("a:" + a.id, () => {
 					const icon = L.divIcon({
 						className: "dw-waze-icon",
@@ -208,10 +222,25 @@ export class WazeLayerProvider extends LayerProvider {
 				const lenStr = j.length != null
 					? (j.length / 1000).toFixed(1) + " km" : "";
 				const place = placeStr(j);
+				// endNode names the cross-street the jam clears at.
+				const endTo = clip(j.endNode, 40);
+				const head = "Traffic" +
+					(place ? " — " + place : "") +
+					(endTo ? " → " + endTo : "");
 				const meta = [spdStr, delayStr, lenStr, agoStr(j.updateMillis)]
 					.filter(Boolean).join(" · ");
-				const tip = esc`<b>🚗 Traffic${place ? " — " + place : ""}</b>` +
-					(meta ? esc`<br><span class="dw-cad-sub">${meta}</span>` : "");
+				// Waze often attributes a jam to the alert that caused it
+				// (crash / hazard / construction) — name it if present.
+				const ca = j.causeAlert;
+				const cause = ca
+					? clip(alertTitle(ca) +
+						(ca.reportDescription ? " — " + ca.reportDescription : ""), 140)
+					: "";
+				const causeStr = cause
+					? esc`<br><span class="dw-cad-sub">Cause: ${cause}</span>` : "";
+				const tip = esc`<b>\u{1F697} ${head}</b>` +
+					(meta ? esc`<br><span class="dw-cad-sub">${meta}</span>` : "") +
+					causeStr;
 				keep("j:" + j.id, () =>
 					L.polyline(pts, {
 						pane: "dwWazePane", color, weight: 5, opacity: 0.8,
@@ -226,19 +255,30 @@ export class WazeLayerProvider extends LayerProvider {
 
 			for (const u of data.users || []) {
 				const loc = u.location;
-				if (u.id == null || !loc || loc.x == null || loc.y == null)
+				if (u.id == null || loc == null || loc.x == null || loc.y == null)
 					continue;
-				const who = (u.userName && u.userName !== "guest")
-					? u.userName : "Wazer";
+				// The public georss anonymises wazers: userName is "guest"
+				// for everyone but you/your friends, and there's no heading
+				// or destination. Surface what's actually there — name when
+				// present, speed when the region includes it, and the live
+				// coordinates (which is the one thing that always updates).
+				const named = u.userName && u.userName !== "guest"
+					? u.userName : "";
+				const title = named || "Active Waze driver";
+				const spd = u.speed != null && u.speed > 0
+					? Math.round(u.speed * 3.6) + " km/h" : "";
+				const coords = loc.y.toFixed(5) + ", " + loc.x.toFixed(5);
+				const meta = [spd, coords].filter(Boolean).join(" · ");
+				const tip = esc`<b>\u{1F697} ${title}</b><br>` +
+					esc`<span class="dw-cad-sub">${meta}</span>`;
 				keep("u:" + u.id, () =>
 					L.circleMarker([loc.y, loc.x], {
 						pane: "dwWazePane", radius: 4,
 						color: "#fff", weight: 1,
 						fillColor: "#33ccff", fillOpacity: 0.9,
 						interactive: true,
-					}).bindTooltip(esc`${who}`,
-						{ className: "dw-waze-tip", sticky: true }),
-				(c) => c.setLatLng([loc.y, loc.x]));
+					}).bindTooltip(tip, { className: "dw-waze-tip", sticky: true }),
+				(c) => { c.setLatLng([loc.y, loc.x]); c.setTooltipContent(tip); });
 			}
 
 			for (const lyr of prev.values()) {

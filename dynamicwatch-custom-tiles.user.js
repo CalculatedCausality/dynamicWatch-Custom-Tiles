@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.114
+// @version      7.9.116
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -3477,6 +3477,10 @@
           return a.comments.filter((c) => c && c.isThumbsUp).length;
         return 0;
       };
+      const clip = (s, n) => {
+        const t = String(s || "").trim().replace(/\s+/g, " ");
+        return t.length > n ? t.slice(0, n - 1) + "…" : t;
+      };
       const render = (group, data) => {
         const prev = group._dwWaze instanceof Map ? group._dwWaze : /* @__PURE__ */ new Map();
         const next = /* @__PURE__ */ new Map();
@@ -3501,7 +3505,12 @@
           const meta = [placeStr(a), agoStr(a.pubMillis)].filter(Boolean).join(" · ");
           const thumbs = thumbsCount(a);
           const thumbStr = thumbs ? ` · 👍 ${thumbs}` : "";
-          const tip = esc`<b>${style.glyph} ${title}</b>` + (meta || thumbStr ? esc`<br><span class="dw-cad-sub">${meta}${thumbStr}</span>` : "");
+          const desc = clip(a.reportDescription, 160);
+          const descStr = desc ? esc`<br><i>${desc}</i>` : "";
+          const by = clip(a.reportBy || a.provider, 48);
+          const byStr = by ? esc`<br><span class="dw-cad-sub">via ${by}</span>` : "";
+          const metaStr = meta || thumbStr ? esc`<br><span class="dw-cad-sub">${meta}${thumbStr}</span>` : "";
+          const tip = esc`<b>${style.glyph} ${title}</b>` + descStr + metaStr + byStr;
           keep("a:" + a.id, () => {
             const icon = L.divIcon({
               className: "dw-waze-icon",
@@ -3533,8 +3542,13 @@
           const delayStr = j.delay > 0 ? "+" + Math.round(j.delay / 60) + " min" : "";
           const lenStr = j.length != null ? (j.length / 1e3).toFixed(1) + " km" : "";
           const place = placeStr(j);
+          const endTo = clip(j.endNode, 40);
+          const head = "Traffic" + (place ? " — " + place : "") + (endTo ? " → " + endTo : "");
           const meta = [spdStr, delayStr, lenStr, agoStr(j.updateMillis)].filter(Boolean).join(" · ");
-          const tip = esc`<b>🚗 Traffic${place ? " — " + place : ""}</b>` + (meta ? esc`<br><span class="dw-cad-sub">${meta}</span>` : "");
+          const ca = j.causeAlert;
+          const cause = ca ? clip(alertTitle(ca) + (ca.reportDescription ? " — " + ca.reportDescription : ""), 140) : "";
+          const causeStr = cause ? esc`<br><span class="dw-cad-sub">Cause: ${cause}</span>` : "";
+          const tip = esc`<b>\u{1F697} ${head}</b>` + (meta ? esc`<br><span class="dw-cad-sub">${meta}</span>` : "") + causeStr;
           keep(
             "j:" + j.id,
             () => L.polyline(pts, {
@@ -3553,9 +3567,14 @@
         }
         for (const u of data.users || []) {
           const loc = u.location;
-          if (u.id == null || !loc || loc.x == null || loc.y == null)
+          if (u.id == null || loc == null || loc.x == null || loc.y == null)
             continue;
-          const who = u.userName && u.userName !== "guest" ? u.userName : "Wazer";
+          const named = u.userName && u.userName !== "guest" ? u.userName : "";
+          const title = named || "Active Waze driver";
+          const spd = u.speed != null && u.speed > 0 ? Math.round(u.speed * 3.6) + " km/h" : "";
+          const coords = loc.y.toFixed(5) + ", " + loc.x.toFixed(5);
+          const meta = [spd, coords].filter(Boolean).join(" · ");
+          const tip = esc`<b>\u{1F697} ${title}</b><br>` + esc`<span class="dw-cad-sub">${meta}</span>`;
           keep(
             "u:" + u.id,
             () => L.circleMarker([loc.y, loc.x], {
@@ -3566,11 +3585,11 @@
               fillColor: "#33ccff",
               fillOpacity: 0.9,
               interactive: true
-            }).bindTooltip(
-              esc`${who}`,
-              { className: "dw-waze-tip", sticky: true }
-            ),
-            (c) => c.setLatLng([loc.y, loc.x])
+            }).bindTooltip(tip, { className: "dw-waze-tip", sticky: true }),
+            (c) => {
+              c.setLatLng([loc.y, loc.x]);
+              c.setTooltipContent(tip);
+            }
           );
         }
         for (const lyr of prev.values()) {
