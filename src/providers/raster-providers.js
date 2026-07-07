@@ -1,5 +1,6 @@
 import { CFG } from "../config.js";
 import {
+	LayerProvider,
 	tileProvider,
 	arcgisExportProvider,
 	tokenTileProvider,
@@ -34,6 +35,29 @@ export const QldLabelsLayerProvider = tileProvider(CFG.QLD_LABELS_TILE, {
 	pane: "dwLabelsPane",
 	attribution: "&copy; State of Queensland (Department of Resources)",
 });
+
+// Esri's reference pair for World Imagery: transportation (roads +
+// road names) under boundaries-and-places (suburb/POI labels). One
+// layerGroup so the labels sync treats it as a single unit; the two
+// tile layers reuse the roads/labels panes so they stack correctly
+// under markers and match the QLD pair's z-order.
+export class EsriReferenceLayerProvider extends LayerProvider {
+	create() {
+		const common = {
+			tileSize: 256, maxZoom: 25, crossOrigin: true,
+			attribution: "Labels &copy; Esri, HERE, Garmin, OpenStreetMap contributors",
+		};
+		// Native data depth probed per service (blank 872-byte tiles
+		// past these): transportation renders to z18, places to z17.
+		// Past that Leaflet overscales rather than going blank.
+		return L.layerGroup([
+			L.tileLayer(CFG.ESRI_TRANSPORT_TILE,
+				Object.assign({ pane: "dwRoadsPane", maxNativeZoom: 18 }, common)),
+			L.tileLayer(CFG.ESRI_PLACES_TILE,
+				Object.assign({ pane: "dwLabelsPane", maxNativeZoom: 17 }, common)),
+		]);
+	}
+}
 
 export const MobileCoverageLayerProvider = arcgisExportProvider({
 	baseUrl: CFG.ACCC_MOBILE_COVERAGE_SERVICE,

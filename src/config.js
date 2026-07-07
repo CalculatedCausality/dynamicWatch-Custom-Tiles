@@ -33,6 +33,16 @@ export const CFG = {
 
 	LAYER_LABELS: "QLD Labels",
 	LAYER_ROADS: "QLD Roads",
+	// Esri's reference overlays — the label/road tile pair designed to
+	// sit on World Imagery. Auto-synced onto the Wayback base the same
+	// way QLD Labels/Roads pair with the QLD bases. Keyless XYZ.
+	LAYER_ESRI_REF: "Esri Labels & Roads",
+	ESRI_PLACES_TILE:
+		"https://server.arcgisonline.com/ArcGIS/rest/services/Reference/" +
+		"World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+	ESRI_TRANSPORT_TILE:
+		"https://server.arcgisonline.com/ArcGIS/rest/services/Reference/" +
+		"World_Transportation/MapServer/tile/{z}/{y}/{x}",
 	LAYER_STRAVA: "Strava Heatmap",
 	LAYER_GARMIN: "Garmin Heatmap",
 

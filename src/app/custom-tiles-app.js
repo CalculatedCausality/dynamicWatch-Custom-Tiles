@@ -4,6 +4,7 @@ import { Mode3DButton, Mode3DController } from "../runtime/mode-3d.js";
 import { LayerManagerUI } from "../ui/layer-manager-ui.js";
 import {
 	AppleMapsLayerProvider,
+	EsriReferenceLayerProvider,
 	GoogleHybridLayerProvider,
 	MobileCoverageLayerProvider,
 	OpenSeaMapLayerProvider,
@@ -295,6 +296,8 @@ export class CustomTilesApp {
 				this.qldToken,
 			).create();
 			this.layers[CFG.LAYER_LABELS] = new QldLabelsLayerProvider().create();
+			this.layers[CFG.LAYER_ESRI_REF] =
+				new EsriReferenceLayerProvider().create();
 
 			map.on("baselayerchange", () => {
 				this._syncLabelsLayer(map);
@@ -379,6 +382,14 @@ export class CustomTilesApp {
 			} else {
 				if (map.hasLayer(lyr)) map.removeLayer(lyr);
 			}
+		}
+		// Wayback serves Esri World Imagery — pair it with Esri's own
+		// reference tiles (roads + labels), mirroring the QLD pairing.
+		const esriRef = this.layers[CFG.LAYER_ESRI_REF];
+		if (esriRef) {
+			const isWayback = map.hasLayer(this.layers[CFG.LAYER_WAYBACK]);
+			if (isWayback && !map.hasLayer(esriRef)) map.addLayer(esriRef);
+			else if (!isWayback && map.hasLayer(esriRef)) map.removeLayer(esriRef);
 		}
 	}
 

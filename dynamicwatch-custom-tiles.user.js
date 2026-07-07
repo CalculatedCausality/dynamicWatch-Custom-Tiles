@@ -70,6 +70,12 @@
     STADIA_SPOOF_ORIGIN: "http://localhost",
     LAYER_LABELS: "QLD Labels",
     LAYER_ROADS: "QLD Roads",
+    // Esri's reference overlays — the label/road tile pair designed to
+    // sit on World Imagery. Auto-synced onto the Wayback base the same
+    // way QLD Labels/Roads pair with the QLD bases. Keyless XYZ.
+    LAYER_ESRI_REF: "Esri Labels & Roads",
+    ESRI_PLACES_TILE: "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+    ESRI_TRANSPORT_TILE: "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
     LAYER_STRAVA: "Strava Heatmap",
     LAYER_GARMIN: "Garmin Heatmap",
     QLD_ORIGIN: "https://qldglobe.information.qld.gov.au",
@@ -2640,6 +2646,26 @@
     pane: "dwLabelsPane",
     attribution: "&copy; State of Queensland (Department of Resources)"
   });
+  var EsriReferenceLayerProvider = class extends LayerProvider {
+    create() {
+      const common = {
+        tileSize: 256,
+        maxZoom: 25,
+        crossOrigin: true,
+        attribution: "Labels &copy; Esri, HERE, Garmin, OpenStreetMap contributors"
+      };
+      return L.layerGroup([
+        L.tileLayer(
+          CFG.ESRI_TRANSPORT_TILE,
+          Object.assign({ pane: "dwRoadsPane", maxNativeZoom: 18 }, common)
+        ),
+        L.tileLayer(
+          CFG.ESRI_PLACES_TILE,
+          Object.assign({ pane: "dwLabelsPane", maxNativeZoom: 17 }, common)
+        )
+      ]);
+    }
+  };
   var MobileCoverageLayerProvider = arcgisExportProvider({
     baseUrl: CFG.ACCC_MOBILE_COVERAGE_SERVICE,
     showLayers: "2",
@@ -7477,6 +7503,7 @@
           this.qldToken
         ).create();
         this.layers[CFG.LAYER_LABELS] = new QldLabelsLayerProvider().create();
+        this.layers[CFG.LAYER_ESRI_REF] = new EsriReferenceLayerProvider().create();
         map.on("baselayerchange", () => {
           this._syncLabelsLayer(map);
           this._syncHistCompass(map);
@@ -7539,6 +7566,12 @@
         } else {
           if (map.hasLayer(lyr)) map.removeLayer(lyr);
         }
+      }
+      const esriRef = this.layers[CFG.LAYER_ESRI_REF];
+      if (esriRef) {
+        const isWayback = map.hasLayer(this.layers[CFG.LAYER_WAYBACK]);
+        if (isWayback && !map.hasLayer(esriRef)) map.addLayer(esriRef);
+        else if (!isWayback && map.hasLayer(esriRef)) map.removeLayer(esriRef);
       }
     }
     _syncHistCompass(map) {
