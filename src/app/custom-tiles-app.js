@@ -15,6 +15,7 @@ import {
 	buildAppleTileUrl,
 } from "../providers/raster-providers.js";
 import { StamenTerrainLayerProvider } from "../providers/stamen-terrain.js";
+import { VexcelLayerProvider } from "../providers/vexcel.js";
 import { WaybackLayerProvider } from "../providers/wayback.js";
 import {
 	QldHistoricalLayerProvider,
@@ -234,6 +235,7 @@ export class CustomTilesApp {
 			addBase(CFG.LAYER_APPLE, new AppleMapsLayerProvider(this.appleToken));
 			addBase(CFG.LAYER_STAMEN_TERRAIN, new StamenTerrainLayerProvider());
 
+			addBase(CFG.LAYER_VEXCEL, new VexcelLayerProvider());
 			const wayLyr = addBase(CFG.LAYER_WAYBACK, new WaybackLayerProvider());
 			this.waybackHistControl = this._makeHistoryBar({
 				layer: wayLyr, event: "histchange",

@@ -38,6 +38,8 @@ const HELPERS = [
 	"_histRowHtml", "_renderSccPropertyHistory",
 	"_deviReportUrl", "_sccDocsSearchUrl", "_sccDocDownloadUrl", "_parseSccDocs",
 	"_sccFeatureKey",
+	// Vexcel aerial token helpers
+	"_vexcelParseToken", "_vexcelTokenExp", "_vexcelTokenValid", "_vexcelTileTpl",
 	// Layer-provider factories
 	"LayerProvider", "tileProvider", "tokenTileProvider",
 	"arcgisExportProvider", "pollingDataLayer", "oimIcon",
@@ -101,6 +103,7 @@ export function loadHelpers() {
 		console,
 		setTimeout, clearTimeout, setInterval, clearInterval,
 		TextDecoder, URLSearchParams,
+		atob, btoa,
 		Date, Math, JSON, Object, Array, Set, Map, Number, String, Boolean, Symbol,
 		Promise, Error, RegExp,
 		isFinite, isNaN, parseInt, parseFloat,

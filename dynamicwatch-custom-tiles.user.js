@@ -2,7 +2,7 @@
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
 // @version      7.9.118
-// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
+// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
 // @match        https://embed.waze.com/*
@@ -70,6 +70,14 @@
     STADIA_SPOOF_ORIGIN: "http://localhost",
     LAYER_LABELS: "QLD Labels",
     LAYER_ROADS: "QLD Roads",
+    // Vexcel high-res aerial (ANZ program, "urban" ortho mosaic) via
+    // their WMTS. Needs a user-supplied JWT (expires ~daily) — pasted
+    // once per day via prompt, stored in GM. CORS is open so tiles are
+    // plain <img> loads in 2D and direct raster sources in 3D.
+    LAYER_VEXCEL: "Vexcel Aerial",
+    VEXCEL_WMTS_BASE: "https://api.vexcelgroup.com/v2/ortho/wmts",
+    VEXCEL_TOKEN_KEY: "dw_vexcel_token",
+    VEXCEL_VIEWER_URL: "https://anz-viewer.vexcelgroup.com",
     // Esri's reference overlays — the label/road tile pair designed to
     // sit on World Imagery. Auto-synced onto the Wayback base the same
     // way QLD Labels/Roads pair with the QLD bases. Keyless XYZ.
@@ -256,7 +264,8 @@
         CFG.LAYER_GOOGLE,
         CFG.LAYER_APPLE,
         CFG.LAYER_STAMEN_TERRAIN,
-        CFG.LAYER_WAYBACK
+        CFG.LAYER_WAYBACK,
+        CFG.LAYER_VEXCEL
       ]
     },
     {
@@ -2757,6 +2766,81 @@
           }
         }
       ));
+      return layer;
+    }
+  };
+
+  // src/providers/vexcel.js
+  function _vexcelParseToken(raw) {
+    const s = String(raw || "").trim();
+    const m = s.match(/token=([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/) || s.match(/^([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/);
+    return m ? m[1] : "";
+  }
+  function _vexcelTokenExp(token) {
+    try {
+      const b64 = String(token).split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+      const payload = JSON.parse(atob(b64));
+      return (Number(payload.exp) || 0) * 1e3;
+    } catch (_) {
+      return 0;
+    }
+  }
+  function _vexcelTokenValid(token) {
+    return !!token && _vexcelTokenExp(token) > Date.now() + 60 * 1e3;
+  }
+  function _vexcelTileTpl(token) {
+    return CFG.VEXCEL_WMTS_BASE + "?service=wmts&request=getTile&layer=urban&Style=RGB&TileMatrixSet=urban&TileMatrix={z}&TileRow={y}&TileCol={x}&format=image/jpeg&token=" + encodeURIComponent(token);
+  }
+  function _getStoredToken() {
+    try {
+      return GM_getValue(CFG.VEXCEL_TOKEN_KEY, "") || "";
+    } catch (_) {
+      return "";
+    }
+  }
+  function _storeToken(t) {
+    try {
+      GM_setValue(CFG.VEXCEL_TOKEN_KEY, t);
+    } catch (_) {
+    }
+  }
+  function _promptForToken() {
+    const raw = window.prompt(
+      "Vexcel Aerial needs a fresh token (they expire daily).\n\n1. Log in at " + CFG.VEXCEL_VIEWER_URL + "\n2. DevTools → Network → copy any api.vexcelgroup.com request URL\n3. Paste it here (the whole URL is fine):",
+      ""
+    );
+    if (raw == null) return "";
+    const tok = _vexcelParseToken(raw);
+    if (tok) _storeToken(tok);
+    return tok;
+  }
+  var VexcelLayerProvider = class extends LayerProvider {
+    create() {
+      const stored = _getStoredToken();
+      const layer = L.tileLayer(
+        _vexcelTokenValid(stored) ? _vexcelTileTpl(stored) : BLANK_TILE,
+        {
+          tileSize: 256,
+          maxNativeZoom: 21,
+          maxZoom: 25,
+          crossOrigin: true,
+          // Urban program tiles 404 outside flown areas — render
+          // those as blank rather than broken-image icons.
+          errorTileUrl: BLANK_TILE,
+          attribution: '&copy; <a href="https://www.vexcelgroup.com/" target="_blank" rel="noreferrer">Vexcel Imaging</a>'
+        }
+      );
+      layer.on("add", () => {
+        let tok = _getStoredToken();
+        if (!_vexcelTokenValid(tok)) tok = _promptForToken();
+        if (!_vexcelTokenValid(tok)) return;
+        const tpl = _vexcelTileTpl(tok);
+        if (layer._url !== tpl) layer.setUrl(tpl);
+      });
+      layer._dwMb3DGetUrl = () => {
+        const tok = _getStoredToken();
+        return _vexcelTokenValid(tok) ? _vexcelTileTpl(tok) : "";
+      };
       return layer;
     }
   };
@@ -7439,6 +7523,7 @@
         addBase(CFG.LAYER_GOOGLE, new GoogleHybridLayerProvider());
         addBase(CFG.LAYER_APPLE, new AppleMapsLayerProvider(this.appleToken));
         addBase(CFG.LAYER_STAMEN_TERRAIN, new StamenTerrainLayerProvider());
+        addBase(CFG.LAYER_VEXCEL, new VexcelLayerProvider());
         const wayLyr = addBase(CFG.LAYER_WAYBACK, new WaybackLayerProvider());
         this.waybackHistControl = this._makeHistoryBar({
           layer: wayLyr,
@@ -8319,6 +8404,10 @@
         _sccDocDownloadUrl,
         _parseSccDocs,
         _sccFeatureKey,
+        _vexcelParseToken,
+        _vexcelTokenExp,
+        _vexcelTokenValid,
+        _vexcelTileTpl,
         LayerProvider,
         tileProvider,
         tokenTileProvider,

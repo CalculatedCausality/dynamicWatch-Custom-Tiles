@@ -1046,6 +1046,46 @@ t("advertised QLD Relief and National Parks overlays are grouped", () => {
 	assert(names.has(dw.CFG.LAYER_NATIONAL_PARKS), "National Parks missing from overlay groups");
 });
 
+// ---- Vexcel aerial token helpers ----
+
+// Forge a JWT-shaped token with a chosen exp (signature is irrelevant —
+// helpers only decode the payload).
+function fakeJwt(expSecs) {
+	const b64u = (o) => Buffer.from(JSON.stringify(o)).toString("base64")
+		.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+	return `${b64u({ alg: "HS256" })}.${b64u({ sub: "x", exp: expSecs })}.sig`;
+}
+
+t("_vexcelParseToken accepts bare JWT, URL, curl blob; rejects junk", () => {
+	const jwt = fakeJwt(9999999999);
+	eq(dw._vexcelParseToken(jwt), jwt, "bare token");
+	eq(dw._vexcelParseToken(
+		`https://api.vexcelgroup.com/v2/x?session=abc&token=${jwt}`), jwt, "URL");
+	eq(dw._vexcelParseToken(`curl 'https://api/x?token=${jwt}' -H 'A: b'`), jwt,
+		"pasted curl command");
+	eq(dw._vexcelParseToken("not a token"), "", "junk rejected");
+	eq(dw._vexcelParseToken(""), "", "empty rejected");
+});
+
+t("_vexcelTokenExp / _vexcelTokenValid decode expiry", () => {
+	const future = Math.floor(Date.now() / 1000) + 3600;
+	const past = Math.floor(Date.now() / 1000) - 3600;
+	eq(dw._vexcelTokenExp(fakeJwt(future)), future * 1000, "exp decoded to ms");
+	assert(dw._vexcelTokenValid(fakeJwt(future)), "future token valid");
+	assert(!dw._vexcelTokenValid(fakeJwt(past)), "expired token invalid");
+	assert(!dw._vexcelTokenValid("garbage"), "undecodable invalid");
+	assert(!dw._vexcelTokenValid(""), "empty invalid");
+});
+
+t("_vexcelTileTpl builds the WMTS getTile template", () => {
+	const tpl = dw._vexcelTileTpl("TOK.EN+1");
+	assert(tpl.startsWith("https://api.vexcelgroup.com/v2/ortho/wmts?"), "base");
+	assert(tpl.includes("TileMatrix={z}&TileRow={y}&TileCol={x}"),
+		"leaflet placeholders in WMTS params");
+	assert(tpl.includes("layer=urban") && tpl.includes("TileMatrixSet=urban"));
+	assert(tpl.includes("token=TOK.EN%2B1"), "token URL-encoded");
+});
+
 // -- Summary -----------------------------------------------------------
 
 console.log("");

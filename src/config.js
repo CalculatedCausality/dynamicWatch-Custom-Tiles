@@ -33,6 +33,14 @@ export const CFG = {
 
 	LAYER_LABELS: "QLD Labels",
 	LAYER_ROADS: "QLD Roads",
+	// Vexcel high-res aerial (ANZ program, "urban" ortho mosaic) via
+	// their WMTS. Needs a user-supplied JWT (expires ~daily) — pasted
+	// once per day via prompt, stored in GM. CORS is open so tiles are
+	// plain <img> loads in 2D and direct raster sources in 3D.
+	LAYER_VEXCEL: "Vexcel Aerial",
+	VEXCEL_WMTS_BASE: "https://api.vexcelgroup.com/v2/ortho/wmts",
+	VEXCEL_TOKEN_KEY: "dw_vexcel_token",
+	VEXCEL_VIEWER_URL: "https://anz-viewer.vexcelgroup.com",
 	// Esri's reference overlays — the label/road tile pair designed to
 	// sit on World Imagery. Auto-synced onto the Wayback base the same
 	// way QLD Labels/Roads pair with the QLD bases. Keyless XYZ.
@@ -281,6 +289,7 @@ export const DW_LAYER_GROUPS = [
 			CFG.LAYER_APPLE,
 			CFG.LAYER_STAMEN_TERRAIN,
 			CFG.LAYER_WAYBACK,
+			CFG.LAYER_VEXCEL,
 		],
 	},
 	{
