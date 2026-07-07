@@ -1094,37 +1094,42 @@ t("_vexcelCollectionYear pulls the capture year from collection ids", () => {
 	eq(dw._vexcelCollectionYear("weird-id"), "weird-id", "fallback to raw id");
 });
 
-t("_vexcelParseObliques builds direction + capture model", () => {
-	const feat = (dir, coll, name) => ({
-		properties: { "product-type": dir, collection: coll, "image-name": name },
+t("_vexcelParseObliques builds direction + capture model with layers", () => {
+	const feat = (dir, coll, name, layer) => ({
+		properties: { "product-type": dir, collection: coll, "image-name": name, "source-layer": layer },
 	});
 	const model = dw._vexcelParseObliques({ features: [
-		feat("oblique-east", "au-qld-sunshinecoast-2019", "img-e-2019"),
-		feat("oblique-east", "au-qld-sunshinecoast-2019", "img-e-2019-dup"),
-		feat("oblique-north", "au-qld-sunshinecoast-2019", "img-n-2019"),
-		feat("nadir", "au-qld-sunshinecoast-2025", "img-nadir-2025"),
-		feat("oblique-west", "", "no-collection-dropped"),
+		feat("oblique-east", "au-qld-sunshinecoast-2019", "img-e-2019", "urban"),
+		feat("oblique-east", "au-qld-sunshinecoast-2019", "img-e-2019-dup", "urban"),
+		feat("oblique-north", "au-nsw-widearea-2021", "img-n-2021", "wide-area"),
+		feat("nadir", "au-qld-sunshinecoast-2025", "img-nadir-2025", "urban"),
+		feat("oblique-west", "", "no-collection-dropped", "urban"),
 	] });
 	// directions in canonical N/E/S/W/Top order, only those present
 	deepEq(model.directions.map((d) => d.key),
 		["oblique-north", "oblique-east", "nadir"]);
-	// first image per cell wins (dup ignored)
-	eq(model.images["oblique-east@au-qld-sunshinecoast-2019"], "img-e-2019");
+	// first image per cell wins (dup ignored), carrying its source layer
+	deepEq(model.images["oblique-east@au-qld-sunshinecoast-2019"],
+		{ name: "img-e-2019", layer: "urban" });
+	deepEq(model.images["oblique-north@au-nsw-widearea-2021"],
+		{ name: "img-n-2021", layer: "wide-area" });
 	// captures sorted year-desc
-	deepEq(model.captures.map((c) => c.year), ["2025", "2019"]);
+	deepEq(model.captures.map((c) => c.year), ["2025", "2021", "2019"]);
 });
 
-t("_vexcelObliqueExtractUrl builds a token-scoped extract URL", () => {
+t("_vexcelObliqueExtractUrl builds a token-scoped, layer-aware URL", () => {
 	const future = Math.floor(Date.now() / 1000) + 3600;
 	const jwt = fakeJwt(future);
-	const url = dw._vexcelObliqueExtractUrl("img~name", -26.607, 153.006, jwt);
+	const url = dw._vexcelObliqueExtractUrl("img~name", "wide-area", -26.607, 153.006, jwt);
 	assert(url.startsWith("https://api.vexcelgroup.com/v2/oriented/extract?"), "base");
 	assert(url.includes(encodeURIComponent("POINT(153.006 -26.607)")), "wkt point");
 	assert(url.includes("image-name=img~name"), "image name");
-	assert(url.includes("layer=urban"), "layer");
-	eq(dw._vexcelObliqueExtractUrl("img", 0, 0, "expired"), "",
+	assert(url.includes("layer=wide-area"), "per-image source layer");
+	assert(dw._vexcelObliqueExtractUrl("img", "", 0, 0, jwt).includes("layer=urban"),
+		"defaults layer to urban");
+	eq(dw._vexcelObliqueExtractUrl("img", "urban", 0, 0, "expired"), "",
 		"invalid token → empty");
-	eq(dw._vexcelObliqueExtractUrl("", 0, 0, jwt), "", "missing image → empty");
+	eq(dw._vexcelObliqueExtractUrl("", "urban", 0, 0, jwt), "", "missing image → empty");
 });
 
 // -- Summary -----------------------------------------------------------

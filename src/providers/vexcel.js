@@ -78,10 +78,10 @@ export function _vexcelCollectionYear(collection) {
 }
 
 // oriented/query FeatureCollection → { directions, captures, images }.
-// images is keyed "<product-type>@<collection>" → first (best) image
-// name; captures is the sorted-desc distinct collection list; the same
-// point yields many candidate photos per cell, we keep the first (the
-// API returns them best-first).
+// images is keyed "<product-type>@<collection>" → { name, layer } for
+// the first (best) photo in that cell; captures is the distinct
+// collection list newest-first. Each image carries its own source
+// layer (urban / wide-area) so extract targets the right program.
 export function _vexcelParseObliques(data) {
 	const images = {};
 	const captureSet = new Map(); // collection → year
@@ -93,7 +93,9 @@ export function _vexcelParseObliques(data) {
 		const name = p["image-name"];
 		if (!dir || !coll || !name) continue;
 		const key = dir + "@" + coll;
-		if (!(key in images)) images[key] = name;
+		if (!(key in images)) {
+			images[key] = { name, layer: p["source-layer"] || p.layer || "urban" };
+		}
 		captureSet.set(coll, _vexcelCollectionYear(coll));
 		dirSet.add(dir);
 	}
@@ -104,13 +106,13 @@ export function _vexcelParseObliques(data) {
 	return { images, captures, directions };
 }
 
-export function _vexcelObliqueExtractUrl(imageName, lat, lng, token) {
+export function _vexcelObliqueExtractUrl(imageName, layer, lat, lng, token) {
 	if (!imageName || !_vexcelTokenValid(token)) return "";
 	const wkt = `POINT(${Number(lng)} ${Number(lat)})`;
 	return (
 		CFG.VEXCEL_API_BASE + "/v2/oriented/extract?" +
 		"wkt=" + encodeURIComponent(wkt) +
-		"&srid=4326&layer=urban" +
+		"&srid=4326&layer=" + encodeURIComponent(layer || "urban") +
 		"&image-name=" + encodeURIComponent(imageName) +
 		"&token=" + encodeURIComponent(token)
 	);
@@ -141,6 +143,8 @@ function _promptForToken() {
 
 // Fetch every oblique/nadir capture available at a point (token-only,
 // not rate-limited — this is the metadata query, not the image pull).
+// Queries both programs (wide-area + urban) so rural/edge points that
+// only have wide-area coverage still resolve.
 export function fetchVexcelObliques(lat, lng, cb) {
 	const token = _getStoredToken();
 	if (!_vexcelTokenValid(token)) { cb(null); return; }
@@ -152,8 +156,8 @@ export function fetchVexcelObliques(lat, lng, cb) {
 			data: JSON.stringify({
 				wkt: `POINT(${Number(lng)} ${Number(lat)})`,
 				srid: "4326",
-				layer: "urban",
-				include: "collection,capture-date,product-type,image-name",
+				layer: "wide-area,urban",
+				include: "collection,capture-date,product-type,image-name,source-layer",
 			}),
 			headers: { "Content-Type": "application/json" },
 		},
@@ -170,99 +174,96 @@ function _dirLabel(key) {
 	return d ? d.label : key;
 }
 
-/* -- Vexcel imagery control (docked, layer-attached) ------------------
- * A persistent control shown whenever the Vexcel base is active — the
- * counterpart to the QLD Historical compass. It carries:
- *   • direction buttons  N / E / S / W / Top  (the 3D oblique angles;
- *     "Top" is the dated nadir straight-down, i.e. dated 2D)
- *   • a capture-DATE SLIDER (older ⇢ newer) that scrubs the years
- *     Vexcel has flown the current map centre
- * The flat ortho basemap is locked to current-best on this tier, so the
- * date + angle selection drives an image panel (extract is a heavy,
- * rate-limited stitch — one pull per settled view). It re-queries the
- * available captures at map centre whenever the view settles.
+/* -- Vexcel imagery compass (docked, layer-attached) ------------------
+ * A passive button compass shown whenever the Vexcel base is active —
+ * the counterpart to the QLD Historical compass. A compass rose of
+ * direction buttons (N top, E right, S bottom, W left, ⊙ centre =
+ * straight-down nadir) plus a capture-DATE SLIDER (older ⇢ newer).
+ *
+ * It does NOT auto-fetch on pan — that caused a "No imagery" flicker
+ * whenever the map centre drifted over an uncovered gap. Instead it
+ * just sits there; clicking a direction queries the captures at the
+ * current centre on demand and loads that stitched oblique into an
+ * expanding panel (extract is a heavy, rate-limited stitch). The flat
+ * ortho basemap stays current-best (a tier lock); date + angle drive
+ * the panel — "⊙" is the closest thing to dated 2D (nadir).
  */
 let _vexCtl = null;
 
-export function createVexcelControl(map) {
+export function createVexcelControl() {
 	if (_vexCtl) return _vexCtl;
 	const el = document.createElement("div");
 	el.className = "dw-vex-ctl";
 	el.innerHTML =
-		'<div class="dw-vex-bar">' +
-		'<span class="dw-vex-caption">Vexcel</span>' +
-		'<div class="dw-vex-dirs"></div>' +
-		'<input type="range" class="dw-vex-slider" min="0" max="0" value="0" disabled>' +
-		'<span class="dw-vex-year">—</span>' +
-		'<button type="button" class="dw-vex-fold" title="Hide/show image">▾</button>' +
+		'<div class="dw-vex-rose">' +
+		'<button type="button" class="dw-vex-dir dw-vex-n" data-dir="oblique-north" title="Look from the north">N</button>' +
+		'<button type="button" class="dw-vex-dir dw-vex-w" data-dir="oblique-west" title="Look from the west">W</button>' +
+		'<button type="button" class="dw-vex-dir dw-vex-c" data-dir="nadir" title="Straight down (dated)">⊙</button>' +
+		'<button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button>' +
+		'<button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button>' +
 		"</div>" +
-		'<div class="dw-vex-stage"><div class="dw-vex-msg">Move the map — captures load for the centre.</div>' +
-		'<img class="dw-vex-img" alt="Vexcel view" style="display:none"></div>';
+		'<div class="dw-vex-date">' +
+		'<input type="range" class="dw-vex-slider" min="0" max="0" value="0" disabled>' +
+		'<span class="dw-vex-year">Vexcel</span>' +
+		"</div>" +
+		'<div class="dw-vex-stage" style="display:none">' +
+		'<button type="button" class="dw-vex-close" title="Close image">×</button>' +
+		'<div class="dw-vex-msg"></div>' +
+		'<img class="dw-vex-img" alt="Vexcel oblique view" style="display:none"></div>';
 	L.DomEvent.disableClickPropagation(el);
 	L.DomEvent.disableScrollPropagation(el);
 
 	const ctl = {
 		el, _map: null,
-		lat: 0, lng: 0,
+		lat: 0, lng: 0, atKey: "",
 		model: null,
 		dir: "oblique-north",
 		capIdx: 0,       // index into model.captures (0 = newest)
 		gen: 0,
 		imgObjUrl: "",
-		folded: false,
 	};
-	const dirsEl   = el.querySelector(".dw-vex-dirs");
-	const slider   = el.querySelector(".dw-vex-slider");
-	const yearEl   = el.querySelector(".dw-vex-year");
-	const stageEl  = el.querySelector(".dw-vex-stage");
-	const imgEl    = el.querySelector(".dw-vex-img");
-	const msgEl    = el.querySelector(".dw-vex-msg");
-	const foldBtn  = el.querySelector(".dw-vex-fold");
+	const slider  = el.querySelector(".dw-vex-slider");
+	const yearEl  = el.querySelector(".dw-vex-year");
+	const stageEl = el.querySelector(".dw-vex-stage");
+	const imgEl   = el.querySelector(".dw-vex-img");
+	const msgEl   = el.querySelector(".dw-vex-msg");
+	const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
 
 	const revoke = () => {
 		if (ctl.imgObjUrl) { try { URL.revokeObjectURL(ctl.imgObjUrl); } catch (_) {} ctl.imgObjUrl = ""; }
 	};
 	const setMsg = (t) => {
+		stageEl.style.display = "";
 		msgEl.textContent = t;
 		msgEl.style.display = t ? "" : "none";
 		imgEl.style.display = t ? "none" : "";
 	};
+	const markActiveDir = () => dirBtns.forEach((b) =>
+		b.classList.toggle("dw-vex-dir--on", b.dataset.dir === ctl.dir));
 
-	// Render the direction buttons + slider from the current model.
-	const renderControls = () => {
-		dirsEl.innerHTML = "";
-		const dirs = (ctl.model && ctl.model.directions) || VEXCEL_DIRECTIONS;
-		for (const d of dirs) {
-			const b = document.createElement("button");
-			b.type = "button";
-			b.className = "dw-vex-dir" + (d.key === ctl.dir ? " dw-vex-dir--on" : "");
-			b.textContent = d.label;
-			b.title = { N: "North", E: "East", S: "South", W: "West", Top: "Straight down (dated)" }[d.label] || d.label;
-			b.addEventListener("click", () => { ctl.dir = d.key; renderControls(); load(); });
-			dirsEl.appendChild(b);
-		}
+	const renderSlider = () => {
 		const caps = (ctl.model && ctl.model.captures) || [];
-		// Slider oldest→newest (left→right); captures[] is newest-first.
 		slider.max = String(Math.max(0, caps.length - 1));
 		slider.value = String(Math.max(0, caps.length - 1 - ctl.capIdx));
 		slider.disabled = caps.length <= 1;
-		yearEl.textContent = caps.length ? caps[ctl.capIdx].year : "—";
+		yearEl.textContent = caps.length ? caps[ctl.capIdx].year : "Vexcel";
 	};
 
+	// Pull the currently-selected oblique into the panel.
 	const load = () => {
 		if (!ctl.model) return;
 		const cap = ctl.model.captures[ctl.capIdx];
-		const name = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
-		if (!name) { setMsg("No " + _dirLabel(ctl.dir) + " capture for " + (cap ? cap.year : "this year") + "."); return; }
-		const url = _vexcelObliqueExtractUrl(name, ctl.lat, ctl.lng, _getStoredToken());
-		if (!url) { setMsg("Token expired — reselect the Vexcel base to refresh."); return; }
+		const img = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
+		if (!img) { setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.year : "this year") + " here."); return; }
+		const url = _vexcelObliqueExtractUrl(img.name, img.layer, ctl.lat, ctl.lng, _getStoredToken());
+		if (!url) { setMsg("Vexcel token expired — reselect the base to refresh it."); return; }
 		const gen = ++ctl.gen;
 		setMsg("Loading " + _dirLabel(ctl.dir) + " · " + cap.year + "… (large image)");
 		gmGet(url, { responseType: "blob", timeout: 90000 }, (err, r) => {
 			if (gen !== ctl.gen) return;
 			if (err || !r || r.status < 200 || r.status >= 300) {
 				setMsg(r && r.status === 429
-					? "Vexcel is rate-limiting image pulls — wait a moment, then nudge a control."
+					? "Vexcel is rate-limiting image pulls — wait a moment and click again."
 					: "Couldn't load this view.");
 				return;
 			}
@@ -273,63 +274,68 @@ export function createVexcelControl(map) {
 		});
 	};
 
-	// Re-query available captures at the current map centre (cheap,
-	// un-throttled), then auto-load the selected view once per settle.
-	let refreshDebounce = null;
-	const refresh = () => {
+	// Ensure we have the capture model for the CURRENT map centre, then
+	// run `then`. Queries on demand (only when a control is used), so a
+	// bare pan never triggers a fetch or a "no imagery" message.
+	const withModel = (then) => {
 		if (!ctl._map) return;
-		const c = ctl._map.getCenter();
-		ctl.lat = c.lat; ctl.lng = c.lng;
-		const gen = ++ctl.gen;
 		if (!_vexcelTokenValid(_getStoredToken())) {
-			ctl.model = null; renderControls();
 			setMsg("Paste a Vexcel token (reselect the base) to load imagery.");
 			return;
 		}
-		setMsg("Finding captures for this location…");
+		const c = ctl._map.getCenter();
+		const key = c.lat.toFixed(5) + "," + c.lng.toFixed(5);
+		if (ctl.model && ctl.atKey === key) { then(); return; }
+		ctl.lat = c.lat; ctl.lng = c.lng; ctl.atKey = key;
+		const gen = ++ctl.gen;
+		setMsg("Finding captures for the map centre…");
 		fetchVexcelObliques(ctl.lat, ctl.lng, (model) => {
 			if (gen !== ctl.gen) return;
-			if (!model) { ctl.model = null; renderControls(); setMsg("No Vexcel imagery at this location."); return; }
+			if (!model) {
+				ctl.model = null; renderSlider();
+				setMsg("No Vexcel oblique here — recentre over a flown area.");
+				return;
+			}
 			ctl.model = model;
 			if (!model.directions.some((d) => d.key === ctl.dir)) ctl.dir = model.directions[0].key;
 			if (ctl.capIdx >= model.captures.length) ctl.capIdx = 0;
-			renderControls();
-			if (!ctl.folded) load();
+			markActiveDir(); renderSlider();
+			then();
 		});
 	};
-	const scheduleRefresh = () => {
-		clearTimeout(refreshDebounce);
-		refreshDebounce = setTimeout(refresh, 700);
-	};
 
+	dirBtns.forEach((b) => b.addEventListener("click", () => {
+		ctl.dir = b.dataset.dir;
+		markActiveDir();
+		withModel(load);
+	}));
 	slider.addEventListener("input", () => {
 		const caps = (ctl.model && ctl.model.captures) || [];
 		if (!caps.length) return;
-		// slider left→right = oldest→newest; captures newest-first.
 		ctl.capIdx = Math.max(0, caps.length - 1 - Number(slider.value));
 		yearEl.textContent = caps[ctl.capIdx].year;
 	});
-	slider.addEventListener("change", () => { if (!ctl.folded) load(); });
-	foldBtn.addEventListener("click", () => {
-		ctl.folded = !ctl.folded;
-		stageEl.style.display = ctl.folded ? "none" : "";
-		foldBtn.textContent = ctl.folded ? "▸" : "▾";
-		if (!ctl.folded && ctl.model) load();
+	slider.addEventListener("change", () => { if (ctl.model) load(); });
+	el.querySelector(".dw-vex-close").addEventListener("click", () => {
+		stageEl.style.display = "none";
+		ctl.gen++;
+		revoke();
 	});
+	// A pan invalidates the cached model so the next click re-queries
+	// the new centre — but nothing fetches until the user asks.
+	const onMove = () => { ctl.atKey = ""; };
 
 	ctl.addTo = (m) => {
 		if (ctl._map) return ctl;
 		ctl._map = m;
 		m.getContainer().appendChild(el);
-		m.on("moveend", scheduleRefresh);
-		renderControls();
-		refresh();
+		m.on("moveend", onMove);
+		markActiveDir(); renderSlider();
 		return ctl;
 	};
 	ctl.remove = () => {
 		if (!ctl._map) return ctl;
-		ctl._map.off("moveend", scheduleRefresh);
-		clearTimeout(refreshDebounce);
+		ctl._map.off("moveend", onMove);
 		ctl.gen++;
 		revoke();
 		if (el.parentNode) el.parentNode.removeChild(el);
@@ -373,9 +379,9 @@ export class VexcelLayerProvider extends LayerProvider {
 				const tpl = _vexcelTileTpl(tok);
 				if (layer._url !== tpl) layer.setUrl(tpl);
 			}
-			// Show the docked imagery control (date slider + N/E/S/W/Top).
+			// Show the docked imagery compass (N/E/S/W/⊙ + date slider).
 			const map = e && e.target && e.target._map;
-			if (map) createVexcelControl(map).addTo(map);
+			if (map) createVexcelControl().addTo(map);
 		});
 		layer.on("remove", () => {
 			if (_vexCtl) _vexCtl.remove();

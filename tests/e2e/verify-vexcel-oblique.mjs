@@ -78,30 +78,26 @@ const set = await page.evaluate(() => {
 });
 if (!set.ok) { console.error("Vexcel base missing"); await browser.close(); process.exit(1); }
 
-// Control should dock on its own and populate direction buttons + a
-// capture slider from the map centre.
+// The compass docks on its own (passive — no auto-fetch on pan).
 const hasCtl = await page.waitForSelector(".dw-vex-ctl", { timeout: 10_000 }).then(() => true).catch(() => false);
-console.log(`docked control present: ${hasCtl}`);
+console.log(`docked compass present: ${hasCtl}`);
 
-// Wait for the image to paint (auto-loads for the settled centre). The
-// oblique is a ~25 MB JPEG, so decode can take a while after the 200.
+// Click a direction — that's what triggers the on-demand query + pull.
+await page.evaluate(() => {
+	const east = document.querySelector('.dw-vex-ctl .dw-vex-dir[data-dir="oblique-east"]');
+	if (east) east.click();
+});
+
+// Wait for the image to paint. ~25 MB JPEG, so decode is slow.
 await page.waitForFunction(() => {
 	const img = document.querySelector(".dw-vex-ctl .dw-vex-img");
 	return img && img.style.display !== "none" && img.complete && img.naturalWidth > 0;
 }, { timeout: 45_000 }).catch(() => {});
 
-// Exercise a direction button + the date slider (the layer controls).
-await page.evaluate(() => {
-	const dirs = [...document.querySelectorAll(".dw-vex-ctl .dw-vex-dir")];
-	const east = dirs.find((b) => b.textContent === "E");
-	if (east) east.click();
-});
-await page.waitForTimeout(1500);
-
 const viewer = await page.evaluate(() => {
 	const el = document.querySelector(".dw-vex-ctl");
 	if (!el) return { present: false };
-	const dirs = [...el.querySelectorAll(".dw-vex-dir")].map((b) => b.textContent);
+	const dirs = [...el.querySelectorAll(".dw-vex-dir")].map((b) => b.dataset.dir);
 	const slider = el.querySelector(".dw-vex-slider");
 	const captureCount = slider ? Number(slider.max) + 1 : 0;
 	const img = el.querySelector(".dw-vex-img");
@@ -133,7 +129,7 @@ console.log(`  screenshot: ${shot}`);
 // PASS if the docked control appeared with N/E/S/W + a multi-year date
 // slider, and the extract path fired (image painted, or the documented
 // rate-limit — both prove correct wiring; 429 is a server throttle).
-const modelOk = viewer.present && viewer.dirs.length >= 4 && viewer.dates.length >= 2;
+const modelOk = viewer.present && viewer.dirs.filter((d) => /oblique|nadir/.test(d)).length >= 4 && viewer.dates.length >= 2;
 const imageOk = viewer.imgShown || extractOk || extract429;
 const ok = queryOk && modelOk && imageOk;
 console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel control ${ok ? "works (docked N/E/S/W + date slider)" : "did not fully verify"}`);
