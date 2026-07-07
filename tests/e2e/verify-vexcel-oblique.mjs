@@ -63,7 +63,9 @@ await nukeModal();
 await page.waitForFunction(() => !!(window._dwLayerCtrl && window._dwLayerCtrl._map), { timeout: 15_000 });
 await page.evaluate(() => window._dwLayerCtrl._map.setView([-26.607, 153.006], 17));
 
-// Activate the Vexcel base.
+// Activate the Vexcel base — the docked imagery control appears
+// automatically (the counterpart to the QLD Historical compass), no
+// popup click needed.
 const set = await page.evaluate(() => {
 	const map = window._dwLayerCtrl._map, ctrl = window._dwLayerCtrl;
 	const vex = ctrl._layers.find((l) => l.name === "Vexcel Aerial")?.layer;
@@ -75,49 +77,41 @@ const set = await page.evaluate(() => {
 	return { ok: true };
 });
 if (!set.ok) { console.error("Vexcel base missing"); await browser.close(); process.exit(1); }
+
+// Control should dock on its own and populate direction buttons + a
+// capture slider from the map centre.
+const hasCtl = await page.waitForSelector(".dw-vex-ctl", { timeout: 10_000 }).then(() => true).catch(() => false);
+console.log(`docked control present: ${hasCtl}`);
+
+// Wait for the image to paint (auto-loads for the settled centre). The
+// oblique is a ~25 MB JPEG, so decode can take a while after the 200.
+await page.waitForFunction(() => {
+	const img = document.querySelector(".dw-vex-ctl .dw-vex-img");
+	return img && img.style.display !== "none" && img.complete && img.naturalWidth > 0;
+}, { timeout: 45_000 }).catch(() => {});
+
+// Exercise a direction button + the date slider (the layer controls).
+await page.evaluate(() => {
+	const dirs = [...document.querySelectorAll(".dw-vex-ctl .dw-vex-dir")];
+	const east = dirs.find((b) => b.textContent === "E");
+	if (east) east.click();
+});
 await page.waitForTimeout(1500);
 
-// Open the site-style location popup at center so the app's popupopen
-// hook injects the identify sections (including the Vexcel oblique
-// button), then click that button — the real user path, without
-// fighting the site for a raw map click.
-await nukeModal();
-const opened = await page.evaluate(async () => {
-	const map = window._dwLayerCtrl._map;
-	const c = map.getCenter();
-	map.openPopup(
-		L.popup({ className: "popup-on-location" })
-			.setLatLng(c)
-			.setContent('<div class="popup-on-location"><div id="waypoint-popup-title">' +
-				c.lat.toFixed(6) + ", " + c.lng.toFixed(6) + "</div></div>"),
-	);
-	return true;
-});
-await page.waitForTimeout(500);
-// Click the injected oblique button if present.
-const hasBtn = await page.evaluate(() => {
-	const b = document.querySelector(".dw-vex-open");
-	if (b) { b.click(); return true; }
-	return false;
-});
-console.log(`oblique button present in popup: ${hasBtn}`);
-
-// Wait for the viewer to appear and the image to paint. The oblique is
-// a ~25 MB JPEG, so decode-to-screen can take a while after the 200.
-await page.waitForFunction(() => {
-	const img = document.querySelector(".dw-vex-viewer .dw-vex-img");
-	return img && img.style.display !== "none" && img.complete && img.naturalWidth > 0;
-}, { timeout: 40_000 }).catch(() => {});
 const viewer = await page.evaluate(() => {
-	const el = document.querySelector(".dw-vex-viewer");
+	const el = document.querySelector(".dw-vex-ctl");
 	if (!el) return { present: false };
 	const dirs = [...el.querySelectorAll(".dw-vex-dir")].map((b) => b.textContent);
-	const dates = [...el.querySelectorAll(".dw-vex-dates option")].map((o) => o.textContent);
+	const slider = el.querySelector(".dw-vex-slider");
+	const captureCount = slider ? Number(slider.max) + 1 : 0;
 	const img = el.querySelector(".dw-vex-img");
 	const msg = el.querySelector(".dw-vex-msg");
 	return {
-		present: el.style.display !== "none",
-		dirs, dates,
+		present: !!el,
+		dirs,
+		dates: Array.from({ length: captureCount }, (_, i) => String(i)),
+		sliderEnabled: slider && !slider.disabled,
+		year: (el.querySelector(".dw-vex-year") || {}).textContent,
 		imgShown: img && img.style.display !== "none" && !!img.src,
 		msg: msg && msg.style.display !== "none" ? msg.textContent : "",
 	};
@@ -128,23 +122,20 @@ const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const shot = resolve(REPORT_DIR, `verify-vexcel-oblique-${stamp}.png`);
 await page.screenshot({ path: shot });
 
-console.log("\n=== Vexcel oblique viewer verification ===");
+console.log("\n=== Vexcel imagery control verification ===");
 console.log(`  oriented/query 200:  ${queryOk}`);
 console.log(`  oriented/extract 200: ${extractOk}  (429 rate-limited: ${extract429})`);
-console.log(`  viewer directions: ${JSON.stringify(viewer.dirs)}`);
-console.log(`  viewer dates: ${JSON.stringify(viewer.dates)}`);
+console.log(`  control directions: ${JSON.stringify(viewer.dirs)}`);
+console.log(`  capture slider steps: ${viewer.dates.length} (enabled: ${viewer.sliderEnabled}, year: ${viewer.year})`);
 console.log(`  image painted: ${viewer.imgShown}  msg: "${viewer.msg}"`);
 console.log(`  screenshot: ${shot}`);
 
-// PASS if query worked, the direction+date model populated, and the
-// image either painted OR we hit the documented rate limit (both prove
-// the extract path is wired correctly; 429 is a server throttle, not a
-// code fault).
+// PASS if the docked control appeared with N/E/S/W + a multi-year date
+// slider, and the extract path fired (image painted, or the documented
+// rate-limit — both prove correct wiring; 429 is a server throttle).
 const modelOk = viewer.present && viewer.dirs.length >= 4 && viewer.dates.length >= 2;
-// A 200 extract proves the token-only oblique pull works; painting the
-// 25 MB JPEG is just slow. 429 also proves the path (server throttle).
 const imageOk = viewer.imgShown || extractOk || extract429;
 const ok = queryOk && modelOk && imageOk;
-console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — oblique viewer ${ok ? "works (N/E/S/W + dated captures)" : "did not fully verify"}`);
+console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel control ${ok ? "works (docked N/E/S/W + date slider)" : "did not fully verify"}`);
 await browser.close();
 process.exit(ok ? 0 : 1);

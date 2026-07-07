@@ -165,52 +165,62 @@ export function fetchVexcelObliques(lat, lng, cb) {
 	);
 }
 
-/* -- Oblique viewer overlay -------------------------------------------
- * A floating panel (like the SCC submenu) opened by clicking the map
- * while the Vexcel base is active. Shows N/E/S/W/Top direction buttons
- * and a capture-year dropdown; picking a cell pulls that stitched
- * oblique via extract and shows it. One viewer instance, reused.
- */
-let _vexView = null;
+function _dirLabel(key) {
+	const d = VEXCEL_DIRECTIONS.find((x) => x.key === key);
+	return d ? d.label : key;
+}
 
-function _vexObliqueViewer(map) {
-	if (_vexView) return _vexView;
+/* -- Vexcel imagery control (docked, layer-attached) ------------------
+ * A persistent control shown whenever the Vexcel base is active — the
+ * counterpart to the QLD Historical compass. It carries:
+ *   • direction buttons  N / E / S / W / Top  (the 3D oblique angles;
+ *     "Top" is the dated nadir straight-down, i.e. dated 2D)
+ *   • a capture-DATE SLIDER (older ⇢ newer) that scrubs the years
+ *     Vexcel has flown the current map centre
+ * The flat ortho basemap is locked to current-best on this tier, so the
+ * date + angle selection drives an image panel (extract is a heavy,
+ * rate-limited stitch — one pull per settled view). It re-queries the
+ * available captures at map centre whenever the view settles.
+ */
+let _vexCtl = null;
+
+export function createVexcelControl(map) {
+	if (_vexCtl) return _vexCtl;
 	const el = document.createElement("div");
-	el.className = "dw-vex-viewer";
-	el.style.display = "none";
+	el.className = "dw-vex-ctl";
 	el.innerHTML =
-		'<div class="dw-vex-hd">' +
-		'<span class="dw-vex-title">Vexcel oblique</span>' +
-		'<button type="button" class="dw-vex-close" aria-label="Close">×</button>' +
-		"</div>" +
-		'<div class="dw-vex-controls">' +
+		'<div class="dw-vex-bar">' +
+		'<span class="dw-vex-caption">Vexcel</span>' +
 		'<div class="dw-vex-dirs"></div>' +
-		'<select class="dw-vex-dates"></select>' +
+		'<input type="range" class="dw-vex-slider" min="0" max="0" value="0" disabled>' +
+		'<span class="dw-vex-year">—</span>' +
+		'<button type="button" class="dw-vex-fold" title="Hide/show image">▾</button>' +
 		"</div>" +
-		'<div class="dw-vex-stage"><div class="dw-vex-msg">Click the map to load an oblique.</div>' +
-		'<img class="dw-vex-img" alt="Vexcel oblique view" style="display:none">' +
-		"</div>";
+		'<div class="dw-vex-stage"><div class="dw-vex-msg">Move the map — captures load for the centre.</div>' +
+		'<img class="dw-vex-img" alt="Vexcel view" style="display:none"></div>';
 	L.DomEvent.disableClickPropagation(el);
 	L.DomEvent.disableScrollPropagation(el);
-	map.getContainer().appendChild(el);
 
-	const view = {
-		el,
+	const ctl = {
+		el, _map: null,
 		lat: 0, lng: 0,
 		model: null,
 		dir: "oblique-north",
-		collection: "",
+		capIdx: 0,       // index into model.captures (0 = newest)
 		gen: 0,
 		imgObjUrl: "",
+		folded: false,
 	};
-
-	const dirsEl  = el.querySelector(".dw-vex-dirs");
-	const datesEl = el.querySelector(".dw-vex-dates");
-	const imgEl   = el.querySelector(".dw-vex-img");
-	const msgEl   = el.querySelector(".dw-vex-msg");
+	const dirsEl   = el.querySelector(".dw-vex-dirs");
+	const slider   = el.querySelector(".dw-vex-slider");
+	const yearEl   = el.querySelector(".dw-vex-year");
+	const stageEl  = el.querySelector(".dw-vex-stage");
+	const imgEl    = el.querySelector(".dw-vex-img");
+	const msgEl    = el.querySelector(".dw-vex-msg");
+	const foldBtn  = el.querySelector(".dw-vex-fold");
 
 	const revoke = () => {
-		if (view.imgObjUrl) { try { URL.revokeObjectURL(view.imgObjUrl); } catch (_) {} view.imgObjUrl = ""; }
+		if (ctl.imgObjUrl) { try { URL.revokeObjectURL(ctl.imgObjUrl); } catch (_) {} ctl.imgObjUrl = ""; }
 	};
 	const setMsg = (t) => {
 		msgEl.textContent = t;
@@ -218,103 +228,119 @@ function _vexObliqueViewer(map) {
 		imgEl.style.display = t ? "none" : "";
 	};
 
+	// Render the direction buttons + slider from the current model.
+	const renderControls = () => {
+		dirsEl.innerHTML = "";
+		const dirs = (ctl.model && ctl.model.directions) || VEXCEL_DIRECTIONS;
+		for (const d of dirs) {
+			const b = document.createElement("button");
+			b.type = "button";
+			b.className = "dw-vex-dir" + (d.key === ctl.dir ? " dw-vex-dir--on" : "");
+			b.textContent = d.label;
+			b.title = { N: "North", E: "East", S: "South", W: "West", Top: "Straight down (dated)" }[d.label] || d.label;
+			b.addEventListener("click", () => { ctl.dir = d.key; renderControls(); load(); });
+			dirsEl.appendChild(b);
+		}
+		const caps = (ctl.model && ctl.model.captures) || [];
+		// Slider oldest→newest (left→right); captures[] is newest-first.
+		slider.max = String(Math.max(0, caps.length - 1));
+		slider.value = String(Math.max(0, caps.length - 1 - ctl.capIdx));
+		slider.disabled = caps.length <= 1;
+		yearEl.textContent = caps.length ? caps[ctl.capIdx].year : "—";
+	};
+
 	const load = () => {
-		const name = view.model &&
-			view.model.images[view.dir + "@" + view.collection];
-		if (!name) { setMsg("No " + _dirLabel(view.dir) + " image for this capture."); return; }
-		const token = _getStoredToken();
-		const url = _vexcelObliqueExtractUrl(name, view.lat, view.lng, token);
+		if (!ctl.model) return;
+		const cap = ctl.model.captures[ctl.capIdx];
+		const name = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
+		if (!name) { setMsg("No " + _dirLabel(ctl.dir) + " capture for " + (cap ? cap.year : "this year") + "."); return; }
+		const url = _vexcelObliqueExtractUrl(name, ctl.lat, ctl.lng, _getStoredToken());
 		if (!url) { setMsg("Token expired — reselect the Vexcel base to refresh."); return; }
-		const gen = ++view.gen;
-		setMsg("Loading oblique… (large image, may take a moment)");
-		// extract can 429 (heavy stitch) — GM fetch as a blob so we can
-		// surface a friendly rate-limit message instead of a broken img.
+		const gen = ++ctl.gen;
+		setMsg("Loading " + _dirLabel(ctl.dir) + " · " + cap.year + "… (large image)");
 		gmGet(url, { responseType: "blob", timeout: 90000 }, (err, r) => {
-			if (gen !== view.gen) return; // superseded by a newer pick
+			if (gen !== ctl.gen) return;
 			if (err || !r || r.status < 200 || r.status >= 300) {
 				setMsg(r && r.status === 429
-					? "Vexcel is rate-limiting oblique pulls — wait a moment and retry."
-					: "Couldn't load this oblique.");
+					? "Vexcel is rate-limiting image pulls — wait a moment, then nudge a control."
+					: "Couldn't load this view.");
 				return;
 			}
 			revoke();
-			view.imgObjUrl = URL.createObjectURL(r.response);
-			imgEl.onload = () => { if (gen === view.gen) setMsg(""); };
-			imgEl.src = view.imgObjUrl;
+			ctl.imgObjUrl = URL.createObjectURL(r.response);
+			imgEl.onload = () => { if (gen === ctl.gen) setMsg(""); };
+			imgEl.src = ctl.imgObjUrl;
 		});
 	};
 
-	const renderControls = () => {
-		dirsEl.innerHTML = "";
-		for (const d of view.model.directions) {
-			const b = document.createElement("button");
-			b.type = "button";
-			b.className = "dw-vex-dir" + (d.key === view.dir ? " dw-vex-dir--on" : "");
-			b.textContent = d.label;
-			b.addEventListener("click", () => {
-				view.dir = d.key;
-				renderControls();
-				load();
-			});
-			dirsEl.appendChild(b);
+	// Re-query available captures at the current map centre (cheap,
+	// un-throttled), then auto-load the selected view once per settle.
+	let refreshDebounce = null;
+	const refresh = () => {
+		if (!ctl._map) return;
+		const c = ctl._map.getCenter();
+		ctl.lat = c.lat; ctl.lng = c.lng;
+		const gen = ++ctl.gen;
+		if (!_vexcelTokenValid(_getStoredToken())) {
+			ctl.model = null; renderControls();
+			setMsg("Paste a Vexcel token (reselect the base) to load imagery.");
+			return;
 		}
-		datesEl.innerHTML = "";
-		for (const c of view.model.captures) {
-			const o = document.createElement("option");
-			o.value = c.collection;
-			o.textContent = c.year;
-			if (c.collection === view.collection) o.selected = true;
-			datesEl.appendChild(o);
-		}
-	};
-
-	datesEl.addEventListener("change", () => {
-		view.collection = datesEl.value;
-		load();
-	});
-	el.querySelector(".dw-vex-close").addEventListener("click", () => {
-		el.style.display = "none";
-		view.gen++;
-		revoke();
-	});
-
-	view.open = (lat, lng) => {
-		view.lat = lat; view.lng = lng;
-		el.style.display = "";
-		setMsg("Finding captures…");
-		dirsEl.innerHTML = ""; datesEl.innerHTML = "";
-		const gen = ++view.gen;
-		fetchVexcelObliques(lat, lng, (model) => {
-			if (gen !== view.gen) return;
-			if (!model) { setMsg("No Vexcel oblique imagery here."); return; }
-			view.model = model;
-			// Keep the current direction if still available, else first.
-			if (!model.directions.some((d) => d.key === view.dir)) {
-				view.dir = model.directions[0].key;
-			}
-			view.collection = model.captures[0].collection;
+		setMsg("Finding captures for this location…");
+		fetchVexcelObliques(ctl.lat, ctl.lng, (model) => {
+			if (gen !== ctl.gen) return;
+			if (!model) { ctl.model = null; renderControls(); setMsg("No Vexcel imagery at this location."); return; }
+			ctl.model = model;
+			if (!model.directions.some((d) => d.key === ctl.dir)) ctl.dir = model.directions[0].key;
+			if (ctl.capIdx >= model.captures.length) ctl.capIdx = 0;
 			renderControls();
-			load();
+			if (!ctl.folded) load();
 		});
 	};
-	_vexView = view;
-	return view;
+	const scheduleRefresh = () => {
+		clearTimeout(refreshDebounce);
+		refreshDebounce = setTimeout(refresh, 700);
+	};
+
+	slider.addEventListener("input", () => {
+		const caps = (ctl.model && ctl.model.captures) || [];
+		if (!caps.length) return;
+		// slider left→right = oldest→newest; captures newest-first.
+		ctl.capIdx = Math.max(0, caps.length - 1 - Number(slider.value));
+		yearEl.textContent = caps[ctl.capIdx].year;
+	});
+	slider.addEventListener("change", () => { if (!ctl.folded) load(); });
+	foldBtn.addEventListener("click", () => {
+		ctl.folded = !ctl.folded;
+		stageEl.style.display = ctl.folded ? "none" : "";
+		foldBtn.textContent = ctl.folded ? "▸" : "▾";
+		if (!ctl.folded && ctl.model) load();
+	});
+
+	ctl.addTo = (m) => {
+		if (ctl._map) return ctl;
+		ctl._map = m;
+		m.getContainer().appendChild(el);
+		m.on("moveend", scheduleRefresh);
+		renderControls();
+		refresh();
+		return ctl;
+	};
+	ctl.remove = () => {
+		if (!ctl._map) return ctl;
+		ctl._map.off("moveend", scheduleRefresh);
+		clearTimeout(refreshDebounce);
+		ctl.gen++;
+		revoke();
+		if (el.parentNode) el.parentNode.removeChild(el);
+		ctl._map = null;
+		return ctl;
+	};
+	_vexCtl = ctl;
+	return ctl;
 }
 
-function _dirLabel(key) {
-	const d = VEXCEL_DIRECTIONS.find((x) => x.key === key);
-	return d ? d.label : key;
-}
-
-// Entry point for the location popup's "Oblique views" button — opens
-// the floating viewer at the clicked point. (We don't hook map clicks
-// directly: that would fight the site's waypoint-drop.)
-export function openVexcelObliques(map, lat, lng) {
-	_vexObliqueViewer(map).open(lat, lng);
-}
-
-// True when a fresh-enough token exists to bother offering the oblique
-// button in the popup.
+// True when a fresh-enough token exists.
 export function vexcelHasToken() {
 	return _vexcelTokenValid(_getStoredToken());
 }
@@ -340,12 +366,19 @@ export class VexcelLayerProvider extends LayerProvider {
 		// Token check happens when the base is SELECTED, not at boot —
 		// a page-load prompt would be obnoxious and the token may well
 		// have rotated since the last session.
-		layer.on("add", () => {
+		layer.on("add", (e) => {
 			let tok = _getStoredToken();
 			if (!_vexcelTokenValid(tok)) tok = _promptForToken();
-			if (!_vexcelTokenValid(tok)) return; // stays blank until re-add
-			const tpl = _vexcelTileTpl(tok);
-			if (layer._url !== tpl) layer.setUrl(tpl);
+			if (_vexcelTokenValid(tok)) {
+				const tpl = _vexcelTileTpl(tok);
+				if (layer._url !== tpl) layer.setUrl(tpl);
+			}
+			// Show the docked imagery control (date slider + N/E/S/W/Top).
+			const map = e && e.target && e.target._map;
+			if (map) createVexcelControl(map).addTo(map);
+		});
+		layer.on("remove", () => {
+			if (_vexCtl) _vexCtl.remove();
 		});
 		// 3D sync re-evaluates per sync, so a token pasted mid-session
 		// flows into the Mapbox raster source without a mode toggle.
