@@ -38,8 +38,9 @@ const HELPERS = [
 	"_histRowHtml", "_renderSccPropertyHistory",
 	"_deviReportUrl", "_sccDocsSearchUrl", "_sccDocDownloadUrl", "_parseSccDocs",
 	"_sccFeatureKey",
-	// Vexcel aerial token helpers
+	// Vexcel aerial token + oblique helpers
 	"_vexcelParseToken", "_vexcelTokenExp", "_vexcelTokenValid", "_vexcelTileTpl",
+	"_vexcelCollectionYear", "_vexcelParseObliques", "_vexcelObliqueExtractUrl",
 	// Layer-provider factories
 	"LayerProvider", "tileProvider", "tokenTileProvider",
 	"arcgisExportProvider", "pollingDataLayer", "oimIcon",

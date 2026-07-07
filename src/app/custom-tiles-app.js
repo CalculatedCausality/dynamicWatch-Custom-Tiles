@@ -15,7 +15,11 @@ import {
 	buildAppleTileUrl,
 } from "../providers/raster-providers.js";
 import { StamenTerrainLayerProvider } from "../providers/stamen-terrain.js";
-import { VexcelLayerProvider } from "../providers/vexcel.js";
+import {
+	VexcelLayerProvider,
+	openVexcelObliques,
+	vexcelHasToken,
+} from "../providers/vexcel.js";
 import { WaybackLayerProvider } from "../providers/wayback.js";
 import {
 	QldHistoricalLayerProvider,
@@ -722,6 +726,24 @@ export class CustomTilesApp {
 			});
 		}
 
+		// VEXCEL OBLIQUES — when the Vexcel base is active and a token
+		// exists, offer a button that opens directional (N/E/S/W) views
+		// with per-capture date selection. The ortho basemap is locked
+		// to current-best on this tier, but the obliques carry every
+		// year — so this is where "look from each direction" and "scrub
+		// dates" actually live.
+		const vex = this.layers[CFG.LAYER_VEXCEL];
+		if (vex && map.hasLayer(vex) && vexcelHasToken()) {
+			const sec = section("dw-popup-ident-vex",
+				'<button type="button" class="dw-cad-link dw-vex-open">' +
+				"Oblique views (N/E/S/W · by date) ↗</button>");
+			if (sec) {
+				const btn = sec.querySelector(".dw-vex-open");
+				if (btn) btn.addEventListener("click", () =>
+					openVexcelObliques(map, lat, lng));
+			}
+		}
+
 		// QPWS — touch only; on desktop QPWS keeps its hover tooltip.
 		const qpws = this.layers[CFG.LAYER_QPWS];
 		if (noHover && qpws && map.hasLayer(qpws) &&
@@ -1079,6 +1101,22 @@ export class CustomTilesApp {
 			".dw-scc-row input { margin: 0; }",
 			".dw-scc-status { border-top: 1px solid #eee; margin-top: 4px; padding-top: 4px; }",
 			".dw-scc-notif-badge { color: #dc2626; font-weight: 700; font-size: 10.5px; }",
+			// Vexcel oblique viewer — floating panel with N/E/S/W buttons,
+			// a capture-year dropdown, and the stitched oblique image.
+			".dw-vex-viewer { position: absolute; top: 12px; right: 12px; z-index: 1200; width: min(46vw, 560px); background: rgba(20,20,22,0.94); border-radius: 8px; box-shadow: 0 4px 18px rgba(0,0,0,0.5); color: #f3f4f6; font-family: sans-serif; overflow: hidden; }",
+			".dw-vex-hd { display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; border-bottom: 1px solid rgba(255,255,255,0.12); }",
+			".dw-vex-title { font-size: 12px; font-weight: 700; letter-spacing: 0.03em; }",
+			".dw-vex-close { background: none; border: none; color: #bbb; font-size: 18px; line-height: 1; cursor: pointer; padding: 0 2px; }",
+			".dw-vex-close:hover { color: #fff; }",
+			".dw-vex-controls { display: flex; align-items: center; gap: 8px; padding: 7px 10px; }",
+			".dw-vex-dirs { display: flex; gap: 4px; }",
+			".dw-vex-dir { min-width: 30px; padding: 4px 8px; font-size: 12px; font-weight: 600; background: rgba(255,255,255,0.1); color: #e5e7eb; border: 1px solid transparent; border-radius: 5px; cursor: pointer; }",
+			".dw-vex-dir:hover { background: rgba(255,255,255,0.2); }",
+			".dw-vex-dir--on { background: #2563eb; color: #fff; }",
+			".dw-vex-dates { margin-left: auto; padding: 4px 6px; font-size: 12px; background: #1f2937; color: #e5e7eb; border: 1px solid rgba(255,255,255,0.15); border-radius: 5px; cursor: pointer; }",
+			".dw-vex-stage { position: relative; min-height: 200px; max-height: 60vh; display: flex; align-items: center; justify-content: center; background: #000; }",
+			".dw-vex-img { max-width: 100%; max-height: 60vh; display: block; }",
+			".dw-vex-msg { padding: 24px 16px; font-size: 12.5px; color: #cbd5e1; text-align: center; }",
 			".dw-scc-notif-badge { color: #dc2626; font-weight: 600; }",
 			".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
 			// Deep-detail section inside the application popup (assessment

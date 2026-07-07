@@ -1086,6 +1086,47 @@ t("_vexcelTileTpl builds the WMTS getTile template", () => {
 	assert(tpl.includes("token=TOK.EN%2B1"), "token URL-encoded");
 });
 
+// ---- Vexcel obliques (directional + dated views) ----
+
+t("_vexcelCollectionYear pulls the capture year from collection ids", () => {
+	eq(dw._vexcelCollectionYear("au-qld-sunshinecoast-2019"), "2019");
+	eq(dw._vexcelCollectionYear("au-qld-sunshinecoastr2-2021"), "2021", "trailing year wins over the r2");
+	eq(dw._vexcelCollectionYear("weird-id"), "weird-id", "fallback to raw id");
+});
+
+t("_vexcelParseObliques builds direction + capture model", () => {
+	const feat = (dir, coll, name) => ({
+		properties: { "product-type": dir, collection: coll, "image-name": name },
+	});
+	const model = dw._vexcelParseObliques({ features: [
+		feat("oblique-east", "au-qld-sunshinecoast-2019", "img-e-2019"),
+		feat("oblique-east", "au-qld-sunshinecoast-2019", "img-e-2019-dup"),
+		feat("oblique-north", "au-qld-sunshinecoast-2019", "img-n-2019"),
+		feat("nadir", "au-qld-sunshinecoast-2025", "img-nadir-2025"),
+		feat("oblique-west", "", "no-collection-dropped"),
+	] });
+	// directions in canonical N/E/S/W/Top order, only those present
+	deepEq(model.directions.map((d) => d.key),
+		["oblique-north", "oblique-east", "nadir"]);
+	// first image per cell wins (dup ignored)
+	eq(model.images["oblique-east@au-qld-sunshinecoast-2019"], "img-e-2019");
+	// captures sorted year-desc
+	deepEq(model.captures.map((c) => c.year), ["2025", "2019"]);
+});
+
+t("_vexcelObliqueExtractUrl builds a token-scoped extract URL", () => {
+	const future = Math.floor(Date.now() / 1000) + 3600;
+	const jwt = fakeJwt(future);
+	const url = dw._vexcelObliqueExtractUrl("img~name", -26.607, 153.006, jwt);
+	assert(url.startsWith("https://api.vexcelgroup.com/v2/oriented/extract?"), "base");
+	assert(url.includes(encodeURIComponent("POINT(153.006 -26.607)")), "wkt point");
+	assert(url.includes("image-name=img~name"), "image name");
+	assert(url.includes("layer=urban"), "layer");
+	eq(dw._vexcelObliqueExtractUrl("img", 0, 0, "expired"), "",
+		"invalid token → empty");
+	eq(dw._vexcelObliqueExtractUrl("", 0, 0, jwt), "", "missing image → empty");
+});
+
 // -- Summary -----------------------------------------------------------
 
 console.log("");

@@ -38,6 +38,7 @@ export const CFG = {
 	// once per day via prompt, stored in GM. CORS is open so tiles are
 	// plain <img> loads in 2D and direct raster sources in 3D.
 	LAYER_VEXCEL: "Vexcel Aerial",
+	VEXCEL_API_BASE: "https://api.vexcelgroup.com",
 	VEXCEL_WMTS_BASE: "https://api.vexcelgroup.com/v2/ortho/wmts",
 	VEXCEL_TOKEN_KEY: "dw_vexcel_token",
 	VEXCEL_VIEWER_URL: "https://anz-viewer.vexcelgroup.com",

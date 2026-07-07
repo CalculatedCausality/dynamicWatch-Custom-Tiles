@@ -19,6 +19,9 @@ import {
 } from './providers/qld-cadastre.js';
 import { oimIcon } from './providers/openinframap.js';
 import {
+	_vexcelCollectionYear,
+	_vexcelObliqueExtractUrl,
+	_vexcelParseObliques,
 	_vexcelParseToken,
 	_vexcelTileTpl,
 	_vexcelTokenExp,
@@ -107,6 +110,7 @@ export function bootUserscript() {
 			_deviReportUrl, _sccDocsSearchUrl, _sccDocDownloadUrl, _parseSccDocs,
 			_sccFeatureKey,
 			_vexcelParseToken, _vexcelTokenExp, _vexcelTokenValid, _vexcelTileTpl,
+			_vexcelCollectionYear, _vexcelParseObliques, _vexcelObliqueExtractUrl,
 			LayerProvider, tileProvider, tokenTileProvider,
 			arcgisExportProvider, pollingDataLayer, oimIcon,
 		};

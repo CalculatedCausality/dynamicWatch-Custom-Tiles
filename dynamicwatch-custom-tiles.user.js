@@ -75,6 +75,7 @@
     // once per day via prompt, stored in GM. CORS is open so tiles are
     // plain <img> loads in 2D and direct raster sources in 3D.
     LAYER_VEXCEL: "Vexcel Aerial",
+    VEXCEL_API_BASE: "https://api.vexcelgroup.com",
     VEXCEL_WMTS_BASE: "https://api.vexcelgroup.com/v2/ortho/wmts",
     VEXCEL_TOKEN_KEY: "dw_vexcel_token",
     VEXCEL_VIEWER_URL: "https://anz-viewer.vexcelgroup.com",
@@ -2791,6 +2792,41 @@
   function _vexcelTileTpl(token) {
     return CFG.VEXCEL_WMTS_BASE + "?service=wmts&request=getTile&layer=urban&Style=RGB&TileMatrixSet=urban&TileMatrix={z}&TileRow={y}&TileCol={x}&format=image/jpeg&token=" + encodeURIComponent(token);
   }
+  var VEXCEL_DIRECTIONS = [
+    { key: "oblique-north", label: "N" },
+    { key: "oblique-east", label: "E" },
+    { key: "oblique-south", label: "S" },
+    { key: "oblique-west", label: "W" },
+    { key: "nadir", label: "Top" }
+  ];
+  function _vexcelCollectionYear(collection) {
+    const m = String(collection || "").match(/(\d{4})(?!.*\d{4})/);
+    return m ? m[1] : String(collection || "");
+  }
+  function _vexcelParseObliques(data) {
+    const images = {};
+    const captureSet = /* @__PURE__ */ new Map();
+    const dirSet = /* @__PURE__ */ new Set();
+    for (const f of data && Array.isArray(data.features) ? data.features : []) {
+      const p = f.properties || {};
+      const dir = p["product-type"];
+      const coll = p.collection;
+      const name = p["image-name"];
+      if (!dir || !coll || !name) continue;
+      const key = dir + "@" + coll;
+      if (!(key in images)) images[key] = name;
+      captureSet.set(coll, _vexcelCollectionYear(coll));
+      dirSet.add(dir);
+    }
+    const captures = [...captureSet.entries()].map(([collection, year]) => ({ collection, year })).sort((a, b) => b.year.localeCompare(a.year));
+    const directions = VEXCEL_DIRECTIONS.filter((d) => dirSet.has(d.key));
+    return { images, captures, directions };
+  }
+  function _vexcelObliqueExtractUrl(imageName, lat, lng, token) {
+    if (!imageName || !_vexcelTokenValid(token)) return "";
+    const wkt = `POINT(${Number(lng)} ${Number(lat)})`;
+    return CFG.VEXCEL_API_BASE + "/v2/oriented/extract?wkt=" + encodeURIComponent(wkt) + "&srid=4326&layer=urban&image-name=" + encodeURIComponent(imageName) + "&token=" + encodeURIComponent(token);
+  }
   function _getStoredToken() {
     try {
       return GM_getValue(CFG.VEXCEL_TOKEN_KEY, "") || "";
@@ -2813,6 +2849,168 @@
     const tok = _vexcelParseToken(raw);
     if (tok) _storeToken(tok);
     return tok;
+  }
+  function fetchVexcelObliques(lat, lng, cb) {
+    const token = _getStoredToken();
+    if (!_vexcelTokenValid(token)) {
+      cb(null);
+      return;
+    }
+    gmJsonGet(
+      CFG.VEXCEL_API_BASE + "/v2/oriented/query?token=" + encodeURIComponent(token),
+      {
+        method: "POST",
+        data: JSON.stringify({
+          wkt: `POINT(${Number(lng)} ${Number(lat)})`,
+          srid: "4326",
+          layer: "urban",
+          include: "collection,capture-date,product-type,image-name"
+        }),
+        headers: { "Content-Type": "application/json" }
+      },
+      (err, data) => {
+        if (err || !data) {
+          cb(null);
+          return;
+        }
+        const parsed = _vexcelParseObliques(data);
+        cb(parsed.directions.length ? parsed : null);
+      }
+    );
+  }
+  var _vexView = null;
+  function _vexObliqueViewer(map) {
+    if (_vexView) return _vexView;
+    const el = document.createElement("div");
+    el.className = "dw-vex-viewer";
+    el.style.display = "none";
+    el.innerHTML = '<div class="dw-vex-hd"><span class="dw-vex-title">Vexcel oblique</span><button type="button" class="dw-vex-close" aria-label="Close">×</button></div><div class="dw-vex-controls"><div class="dw-vex-dirs"></div><select class="dw-vex-dates"></select></div><div class="dw-vex-stage"><div class="dw-vex-msg">Click the map to load an oblique.</div><img class="dw-vex-img" alt="Vexcel oblique view" style="display:none"></div>';
+    L.DomEvent.disableClickPropagation(el);
+    L.DomEvent.disableScrollPropagation(el);
+    map.getContainer().appendChild(el);
+    const view = {
+      el,
+      lat: 0,
+      lng: 0,
+      model: null,
+      dir: "oblique-north",
+      collection: "",
+      gen: 0,
+      imgObjUrl: ""
+    };
+    const dirsEl = el.querySelector(".dw-vex-dirs");
+    const datesEl = el.querySelector(".dw-vex-dates");
+    const imgEl = el.querySelector(".dw-vex-img");
+    const msgEl = el.querySelector(".dw-vex-msg");
+    const revoke = () => {
+      if (view.imgObjUrl) {
+        try {
+          URL.revokeObjectURL(view.imgObjUrl);
+        } catch (_) {
+        }
+        view.imgObjUrl = "";
+      }
+    };
+    const setMsg = (t) => {
+      msgEl.textContent = t;
+      msgEl.style.display = t ? "" : "none";
+      imgEl.style.display = t ? "none" : "";
+    };
+    const load = () => {
+      const name = view.model && view.model.images[view.dir + "@" + view.collection];
+      if (!name) {
+        setMsg("No " + _dirLabel(view.dir) + " image for this capture.");
+        return;
+      }
+      const token = _getStoredToken();
+      const url = _vexcelObliqueExtractUrl(name, view.lat, view.lng, token);
+      if (!url) {
+        setMsg("Token expired — reselect the Vexcel base to refresh.");
+        return;
+      }
+      const gen = ++view.gen;
+      setMsg("Loading oblique… (large image, may take a moment)");
+      gmGet(url, { responseType: "blob", timeout: 9e4 }, (err, r) => {
+        if (gen !== view.gen) return;
+        if (err || !r || r.status < 200 || r.status >= 300) {
+          setMsg(r && r.status === 429 ? "Vexcel is rate-limiting oblique pulls — wait a moment and retry." : "Couldn't load this oblique.");
+          return;
+        }
+        revoke();
+        view.imgObjUrl = URL.createObjectURL(r.response);
+        imgEl.onload = () => {
+          if (gen === view.gen) setMsg("");
+        };
+        imgEl.src = view.imgObjUrl;
+      });
+    };
+    const renderControls = () => {
+      dirsEl.innerHTML = "";
+      for (const d of view.model.directions) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "dw-vex-dir" + (d.key === view.dir ? " dw-vex-dir--on" : "");
+        b.textContent = d.label;
+        b.addEventListener("click", () => {
+          view.dir = d.key;
+          renderControls();
+          load();
+        });
+        dirsEl.appendChild(b);
+      }
+      datesEl.innerHTML = "";
+      for (const c of view.model.captures) {
+        const o = document.createElement("option");
+        o.value = c.collection;
+        o.textContent = c.year;
+        if (c.collection === view.collection) o.selected = true;
+        datesEl.appendChild(o);
+      }
+    };
+    datesEl.addEventListener("change", () => {
+      view.collection = datesEl.value;
+      load();
+    });
+    el.querySelector(".dw-vex-close").addEventListener("click", () => {
+      el.style.display = "none";
+      view.gen++;
+      revoke();
+    });
+    view.open = (lat, lng) => {
+      view.lat = lat;
+      view.lng = lng;
+      el.style.display = "";
+      setMsg("Finding captures…");
+      dirsEl.innerHTML = "";
+      datesEl.innerHTML = "";
+      const gen = ++view.gen;
+      fetchVexcelObliques(lat, lng, (model) => {
+        if (gen !== view.gen) return;
+        if (!model) {
+          setMsg("No Vexcel oblique imagery here.");
+          return;
+        }
+        view.model = model;
+        if (!model.directions.some((d) => d.key === view.dir)) {
+          view.dir = model.directions[0].key;
+        }
+        view.collection = model.captures[0].collection;
+        renderControls();
+        load();
+      });
+    };
+    _vexView = view;
+    return view;
+  }
+  function _dirLabel(key) {
+    const d = VEXCEL_DIRECTIONS.find((x) => x.key === key);
+    return d ? d.label : key;
+  }
+  function openVexcelObliques(map, lat, lng) {
+    _vexObliqueViewer(map).open(lat, lng);
+  }
+  function vexcelHasToken() {
+    return _vexcelTokenValid(_getStoredToken());
   }
   var VexcelLayerProvider = class extends LayerProvider {
     create() {
@@ -7922,6 +8120,17 @@
           if (html) section("dw-popup-ident-scc", html);
         });
       }
+      const vex = this.layers[CFG.LAYER_VEXCEL];
+      if (vex && map.hasLayer(vex) && vexcelHasToken()) {
+        const sec = section(
+          "dw-popup-ident-vex",
+          '<button type="button" class="dw-cad-link dw-vex-open">Oblique views (N/E/S/W · by date) ↗</button>'
+        );
+        if (sec) {
+          const btn = sec.querySelector(".dw-vex-open");
+          if (btn) btn.addEventListener("click", () => openVexcelObliques(map, lat, lng));
+        }
+      }
       const qpws = this.layers[CFG.LAYER_QPWS];
       if (noHover && qpws && map.hasLayer(qpws) && map.getZoom() >= CFG.QLD_QPWS_HOVER_MIN_ZOOM) {
         arcgisIdentify(map, latlng, {
@@ -8257,6 +8466,22 @@
         ".dw-scc-row input { margin: 0; }",
         ".dw-scc-status { border-top: 1px solid #eee; margin-top: 4px; padding-top: 4px; }",
         ".dw-scc-notif-badge { color: #dc2626; font-weight: 700; font-size: 10.5px; }",
+        // Vexcel oblique viewer — floating panel with N/E/S/W buttons,
+        // a capture-year dropdown, and the stitched oblique image.
+        ".dw-vex-viewer { position: absolute; top: 12px; right: 12px; z-index: 1200; width: min(46vw, 560px); background: rgba(20,20,22,0.94); border-radius: 8px; box-shadow: 0 4px 18px rgba(0,0,0,0.5); color: #f3f4f6; font-family: sans-serif; overflow: hidden; }",
+        ".dw-vex-hd { display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; border-bottom: 1px solid rgba(255,255,255,0.12); }",
+        ".dw-vex-title { font-size: 12px; font-weight: 700; letter-spacing: 0.03em; }",
+        ".dw-vex-close { background: none; border: none; color: #bbb; font-size: 18px; line-height: 1; cursor: pointer; padding: 0 2px; }",
+        ".dw-vex-close:hover { color: #fff; }",
+        ".dw-vex-controls { display: flex; align-items: center; gap: 8px; padding: 7px 10px; }",
+        ".dw-vex-dirs { display: flex; gap: 4px; }",
+        ".dw-vex-dir { min-width: 30px; padding: 4px 8px; font-size: 12px; font-weight: 600; background: rgba(255,255,255,0.1); color: #e5e7eb; border: 1px solid transparent; border-radius: 5px; cursor: pointer; }",
+        ".dw-vex-dir:hover { background: rgba(255,255,255,0.2); }",
+        ".dw-vex-dir--on { background: #2563eb; color: #fff; }",
+        ".dw-vex-dates { margin-left: auto; padding: 4px 6px; font-size: 12px; background: #1f2937; color: #e5e7eb; border: 1px solid rgba(255,255,255,0.15); border-radius: 5px; cursor: pointer; }",
+        ".dw-vex-stage { position: relative; min-height: 200px; max-height: 60vh; display: flex; align-items: center; justify-content: center; background: #000; }",
+        ".dw-vex-img { max-width: 100%; max-height: 60vh; display: block; }",
+        ".dw-vex-msg { padding: 24px 16px; font-size: 12.5px; color: #cbd5e1; text-align: center; }",
         ".dw-scc-notif-badge { color: #dc2626; font-weight: 600; }",
         ".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
         // Deep-detail section inside the application popup (assessment
@@ -8408,6 +8633,9 @@
         _vexcelTokenExp,
         _vexcelTokenValid,
         _vexcelTileTpl,
+        _vexcelCollectionYear,
+        _vexcelParseObliques,
+        _vexcelObliqueExtractUrl,
         LayerProvider,
         tileProvider,
         tokenTileProvider,
