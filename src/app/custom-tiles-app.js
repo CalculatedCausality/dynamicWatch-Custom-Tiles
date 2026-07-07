@@ -1083,26 +1083,29 @@ export class CustomTilesApp {
 			// base is active (counterpart to the QLD Historical compass):
 			// a compass rose (N/E/S/W + ⊙ nadir) and a capture-date
 			// slider. The image panel is hidden until a direction is
-			// clicked (passive compass; fetches only on demand).
-			".dw-vex-ctl { position: absolute; top: 12px; right: 12px; z-index: 1200; background: rgba(20,20,22,0.92); border-radius: 10px; box-shadow: 0 4px 18px rgba(0,0,0,0.5); color: #f3f4f6; font-family: sans-serif; padding: 8px; width: max-content; }",
+			// clicked (passive compass; fetches only on demand). Styled to
+			// match the other custom panes: white translucent chrome,
+			// #bbb borders, #444 text, blue-tint hover (like the history
+			// bar / layer manager), not a dark theme.
+			".dw-vex-ctl { position: absolute; top: 12px; right: 12px; z-index: 1200; background: rgba(255,255,255,0.95); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); color: #333; font-family: sans-serif; padding: 8px; width: max-content; }",
 			".dw-vex-rose { display: grid; grid-template-columns: repeat(3, 30px); grid-template-rows: repeat(3, 30px); gap: 3px; margin: 0 auto; }",
 			".dw-vex-rose .dw-vex-n { grid-column: 2; grid-row: 1; }",
 			".dw-vex-rose .dw-vex-w { grid-column: 1; grid-row: 2; }",
 			".dw-vex-rose .dw-vex-c { grid-column: 2; grid-row: 2; }",
 			".dw-vex-rose .dw-vex-e { grid-column: 3; grid-row: 2; }",
 			".dw-vex-rose .dw-vex-s { grid-column: 2; grid-row: 3; }",
-			".dw-vex-dir { width: 30px; height: 30px; padding: 0; font-size: 13px; font-weight: 700; background: rgba(255,255,255,0.1); color: #e5e7eb; border: 1px solid transparent; border-radius: 6px; cursor: pointer; }",
-			".dw-vex-dir:hover { background: rgba(255,255,255,0.22); }",
-			".dw-vex-dir--on { background: #2563eb; color: #fff; }",
-			".dw-vex-date { display: flex; align-items: center; gap: 6px; margin-top: 7px; }",
-			".dw-vex-slider { flex: 1; min-width: 96px; margin: 0; accent-color: #3b82f6; cursor: pointer; }",
+			".dw-vex-dir { width: 30px; height: 30px; padding: 0; font-size: 13px; font-weight: 700; background: #fff; color: #444; border: 1px solid #bbb; border-radius: 3px; cursor: pointer; }",
+			".dw-vex-dir:hover { background: #e8f0fb; color: #000; border-color: #888; }",
+			".dw-vex-dir--on { background: #2563eb; color: #fff; border-color: #2563eb; }",
+			".dw-vex-date { display: flex; align-items: center; gap: 6px; margin-top: 8px; }",
+			".dw-vex-slider { flex: 1; min-width: 96px; margin: 0; accent-color: #4a8; cursor: pointer; }",
 			".dw-vex-slider:disabled { opacity: 0.4; cursor: default; }",
-			".dw-vex-year { min-width: 40px; text-align: right; font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; color: #cbd5e1; }",
-			".dw-vex-stage { position: relative; margin-top: 8px; width: min(44vw, 520px); min-height: 150px; max-height: 56vh; display: flex; align-items: center; justify-content: center; background: #000; border-radius: 6px; overflow: hidden; }",
-			".dw-vex-close { position: absolute; top: 4px; right: 6px; z-index: 2; background: rgba(0,0,0,0.5); border: none; color: #fff; font-size: 16px; line-height: 1; width: 22px; height: 22px; border-radius: 4px; cursor: pointer; }",
-			".dw-vex-close:hover { background: rgba(0,0,0,0.8); }",
+			".dw-vex-year { min-width: 40px; text-align: right; font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; color: #333; }",
+			".dw-vex-stage { position: relative; margin-top: 8px; width: min(44vw, 520px); min-height: 150px; max-height: 56vh; display: flex; align-items: center; justify-content: center; background: #111; border-radius: 4px; overflow: hidden; }",
+			".dw-vex-close { position: absolute; top: 4px; right: 6px; z-index: 2; background: rgba(255,255,255,0.9); border: 1px solid #bbb; color: #444; font-size: 15px; line-height: 1; width: 22px; height: 22px; border-radius: 3px; cursor: pointer; }",
+			".dw-vex-close:hover { background: #fff; color: #000; }",
 			".dw-vex-img { max-width: 100%; max-height: 56vh; display: block; }",
-			".dw-vex-msg { padding: 20px 16px; font-size: 12.5px; color: #cbd5e1; text-align: center; }",
+			".dw-vex-msg { padding: 20px 16px; font-size: 12.5px; color: #6b7280; text-align: center; }",
 			".dw-scc-notif-badge { color: #dc2626; font-weight: 600; }",
 			".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
 			// Deep-detail section inside the application popup (assessment
