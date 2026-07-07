@@ -90,7 +90,7 @@ await page.evaluate(() => {
 
 // Wait for the image to paint. ~25 MB JPEG, so decode is slow.
 await page.waitForFunction(() => {
-	const img = document.querySelector(".dw-vex-ctl .dw-vex-img");
+	const img = document.querySelector(".dw-vex-overlay .dw-vex-img");
 	return img && img.style.display !== "none" && img.complete && img.naturalWidth > 0;
 }, { timeout: 45_000 }).catch(() => {});
 
@@ -100,8 +100,9 @@ const viewer = await page.evaluate(() => {
 	const dirs = [...el.querySelectorAll(".dw-vex-dir")].map((b) => b.dataset.dir);
 	const slider = el.querySelector(".dw-vex-slider");
 	const captureCount = slider ? Number(slider.max) + 1 : 0;
-	const img = el.querySelector(".dw-vex-img");
-	const msg = el.querySelector(".dw-vex-msg");
+	const ov = document.querySelector(".dw-vex-overlay");
+	const img = ov && ov.querySelector(".dw-vex-img");
+	const msg = ov && ov.querySelector(".dw-vex-msg");
 	return {
 		present: !!el,
 		dirs,

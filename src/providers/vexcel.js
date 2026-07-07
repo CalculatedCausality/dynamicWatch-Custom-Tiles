@@ -192,6 +192,9 @@ let _vexCtl = null;
 
 export function createVexcelControl() {
 	if (_vexCtl) return _vexCtl;
+	// Compass control (docked, small) + a separate FULL-MAP overlay the
+	// oblique fills — clicking an angle replaces the map view with that
+	// angled image, the compass floating on top to switch angle/date.
 	const el = document.createElement("div");
 	el.className = "dw-vex-ctl";
 	el.innerHTML =
@@ -205,16 +208,21 @@ export function createVexcelControl() {
 		'<div class="dw-vex-date">' +
 		'<input type="range" class="dw-vex-slider" min="0" max="0" value="0" disabled>' +
 		'<span class="dw-vex-year">Vexcel</span>' +
-		"</div>" +
-		'<div class="dw-vex-stage" style="display:none">' +
-		'<button type="button" class="dw-vex-close" title="Close image">×</button>' +
+		"</div>";
+	const overlay = document.createElement("div");
+	overlay.className = "dw-vex-overlay";
+	overlay.style.display = "none";
+	overlay.innerHTML =
+		'<button type="button" class="dw-vex-close" title="Back to map">✕ Map</button>' +
 		'<div class="dw-vex-msg"></div>' +
-		'<img class="dw-vex-img" alt="Vexcel oblique view" style="display:none"></div>';
-	L.DomEvent.disableClickPropagation(el);
-	L.DomEvent.disableScrollPropagation(el);
+		'<img class="dw-vex-img" alt="Vexcel oblique view" style="display:none">';
+	for (const node of [el, overlay]) {
+		L.DomEvent.disableClickPropagation(node);
+		L.DomEvent.disableScrollPropagation(node);
+	}
 
 	const ctl = {
-		el, _map: null,
+		el, overlay, _map: null,
 		lat: 0, lng: 0, atKey: "",
 		model: null,
 		dir: "oblique-north",
@@ -224,16 +232,16 @@ export function createVexcelControl() {
 	};
 	const slider  = el.querySelector(".dw-vex-slider");
 	const yearEl  = el.querySelector(".dw-vex-year");
-	const stageEl = el.querySelector(".dw-vex-stage");
-	const imgEl   = el.querySelector(".dw-vex-img");
-	const msgEl   = el.querySelector(".dw-vex-msg");
+	const imgEl   = overlay.querySelector(".dw-vex-img");
+	const msgEl   = overlay.querySelector(".dw-vex-msg");
 	const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
 
 	const revoke = () => {
 		if (ctl.imgObjUrl) { try { URL.revokeObjectURL(ctl.imgObjUrl); } catch (_) {} ctl.imgObjUrl = ""; }
 	};
+	// Any message/image implies the full-map overlay is up.
 	const setMsg = (t) => {
-		stageEl.style.display = "";
+		overlay.style.display = "";
 		msgEl.textContent = t;
 		msgEl.style.display = t ? "" : "none";
 		imgEl.style.display = t ? "none" : "";
@@ -316,8 +324,8 @@ export function createVexcelControl() {
 		yearEl.textContent = caps[ctl.capIdx].year;
 	});
 	slider.addEventListener("change", () => { if (ctl.model) load(); });
-	el.querySelector(".dw-vex-close").addEventListener("click", () => {
-		stageEl.style.display = "none";
+	overlay.querySelector(".dw-vex-close").addEventListener("click", () => {
+		overlay.style.display = "none";  // back to the live map
 		ctl.gen++;
 		revoke();
 	});
@@ -328,6 +336,7 @@ export function createVexcelControl() {
 	ctl.addTo = (m) => {
 		if (ctl._map) return ctl;
 		ctl._map = m;
+		m.getContainer().appendChild(overlay);
 		m.getContainer().appendChild(el);
 		m.on("moveend", onMove);
 		markActiveDir(); renderSlider();
@@ -339,6 +348,7 @@ export function createVexcelControl() {
 		ctl.gen++;
 		revoke();
 		if (el.parentNode) el.parentNode.removeChild(el);
+		if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
 		ctl._map = null;
 		return ctl;
 	};

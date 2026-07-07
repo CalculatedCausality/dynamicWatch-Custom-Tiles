@@ -1101,11 +1101,14 @@ export class CustomTilesApp {
 			".dw-vex-slider { flex: 1; min-width: 96px; margin: 0; accent-color: #4a8; cursor: pointer; }",
 			".dw-vex-slider:disabled { opacity: 0.4; cursor: default; }",
 			".dw-vex-year { min-width: 40px; text-align: right; font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; color: #333; }",
-			".dw-vex-stage { position: relative; margin-top: 8px; width: min(44vw, 520px); min-height: 150px; max-height: 56vh; display: flex; align-items: center; justify-content: center; background: #111; border-radius: 4px; overflow: hidden; }",
-			".dw-vex-close { position: absolute; top: 4px; right: 6px; z-index: 2; background: rgba(255,255,255,0.9); border: 1px solid #bbb; color: #444; font-size: 15px; line-height: 1; width: 22px; height: 22px; border-radius: 3px; cursor: pointer; }",
+			// Full-map overlay: the chosen oblique REPLACES the map view
+			// (fills the whole map area), with the compass floating above
+			// it (dw-vex-ctl has the higher z-index) to switch angle/date.
+			".dw-vex-overlay { position: absolute; inset: 0; z-index: 1150; background: #0b0b0d; display: flex; align-items: center; justify-content: center; }",
+			".dw-vex-img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }",
+			".dw-vex-close { position: absolute; top: 12px; left: 12px; z-index: 2; background: rgba(255,255,255,0.95); border: 1px solid #bbb; color: #333; font-size: 12px; font-weight: 600; font-family: sans-serif; line-height: 1; padding: 7px 11px; border-radius: 5px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); cursor: pointer; }",
 			".dw-vex-close:hover { background: #fff; color: #000; }",
-			".dw-vex-img { max-width: 100%; max-height: 56vh; display: block; }",
-			".dw-vex-msg { padding: 20px 16px; font-size: 12.5px; color: #6b7280; text-align: center; }",
+			".dw-vex-msg { padding: 20px 16px; font-size: 13px; color: #d1d5db; text-align: center; }",
 			".dw-scc-notif-badge { color: #dc2626; font-weight: 600; }",
 			".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
 			// Deep-detail section inside the application popup (assessment
