@@ -35,11 +35,14 @@ const browser = await chromium.launch({
 const context = await browser.newContext({ storageState: STATE_PATH, viewport: { width: 1400, height: 900 } });
 
 let queryOk = false, tile200 = 0, tileOther = 0;
+const tileCoords = [];
 context.on("response", (resp) => {
 	const u = resp.url();
 	if (u.includes("/v2/oriented/query")) queryOk = queryOk || resp.status() === 200;
 	if (u.includes("/v2/oriented/tile")) {
 		if (resp.status() === 200) tile200++; else tileOther++;
+		const dm = u.match(/downsample=(\d+)/), xm = u.match(/tile-x=(\d+)/), ym = u.match(/tile-y=(\d+)/);
+		if (dm && xm && ym) tileCoords.push(`${dm[1]}/${xm[1]}/${ym[1]}`);
 	}
 });
 
@@ -98,7 +101,25 @@ await page.waitForFunction(() => {
 	const t = document.querySelectorAll(".dw-vex-tilemap .leaflet-tile-loaded");
 	return t.length >= 2;
 }, { timeout: 30_000 }).catch(() => {});
-await page.waitForTimeout(6000);
+await page.waitForTimeout(5000);
+
+// PAN the oblique and confirm NEW tiles stream in on movement — this is
+// the "scrollable tileset that loads on chunks" behaviour, not a static
+// image. Track distinct tile-x/tile-y coords requested before vs after.
+const coordsBefore = new Set(tileCoords);
+await page.evaluate(() => {
+	// Pan the inner Leaflet image-map by ~a screenful.
+	const el = document.querySelector(".dw-vex-tilemap");
+	const r = el.getBoundingClientRect();
+	const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+	el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: cx, clientY: cy }));
+	for (let i = 1; i <= 8; i++)
+		document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: cx - i * 45, clientY: cy - i * 30 }));
+	document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: cx - 360, clientY: cy - 240 }));
+});
+await page.waitForTimeout(4000);
+const newCoords = tileCoords.filter((c) => !coordsBefore.has(c)).length;
+console.log(`  new tile coords loaded after pan: ${newCoords}`);
 
 const viewer = await page.evaluate(() => {
 	const el = document.querySelector(".dw-vex-ctl");
@@ -134,11 +155,13 @@ console.log(`  capture slider steps: ${viewer.dates.length} (enabled: ${viewer.s
 console.log(`  tiles rendered: ${viewer.tilesLoaded}  msg: "${viewer.msg}"`);
 console.log(`  screenshot: ${shot}`);
 
-// PASS if the compass + shared history bar populated and the oblique
-// rendered as a CHUNKED tile pyramid (multiple /v2/oriented/tile 200s).
+// PASS if the compass + shared history bar populated, the oblique
+// rendered as a CHUNKED tile pyramid, AND panning streamed NEW tiles
+// (proves "scrollable tileset that loads on movement", not a static img).
 const modelOk = viewer.present && viewer.dirs.filter((d) => /oblique|nadir/.test(d)).length >= 4 && viewer.dates.length >= 2;
 const tilesOk = tile200 >= 2 && viewer.tilesLoaded >= 2;
-const ok = queryOk && modelOk && tilesOk;
-console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel oblique ${ok ? "renders as chunked tiles (pan/zoom)" : "did not fully verify"}`);
+const panLoadsTiles = newCoords >= 2;
+const ok = queryOk && modelOk && tilesOk && panLoadsTiles;
+console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel oblique ${ok ? "is a scrollable tileset that streams chunks on pan" : "did not fully verify"}`);
 await browser.close();
 process.exit(ok ? 0 : 1);

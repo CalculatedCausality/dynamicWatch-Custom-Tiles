@@ -298,12 +298,25 @@ export function createVexcelControl() {
 		return ctl._imgMap;
 	};
 
+	const dropTiles = () => {
+		if (ctl._tileLayer && ctl._imgMap) {
+			ctl._imgMap.removeLayer(ctl._tileLayer);
+			ctl._tileLayer = null;
+		}
+	};
+
 	// Show the currently-selected oblique as a fresh tile pyramid.
 	const load = () => {
 		if (!ctl.model) return;
 		const cap = ctl.model.captures[ctl.capIdx];
 		const img = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
-		if (!img) { setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here."); return; }
+		if (!img) {
+			// e.g. nadir only flown some years — clear the stale pyramid
+			// so the message shows on black, not over the old photo.
+			dropTiles();
+			setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here.");
+			return;
+		}
 		const token = _getStoredToken();
 		const base = _vexcelObliqueTileBase(img.name, img.layer, token);
 		if (!base) { setMsg("Vexcel token expired — reselect the base to refresh it."); return; }
@@ -329,7 +342,7 @@ export function createVexcelControl() {
 		map.setMaxZoom(maxZ);
 		map.invalidateSize();
 
-		if (ctl._tileLayer) { map.removeLayer(ctl._tileLayer); ctl._tileLayer = null; }
+		dropTiles();
 		const TileCls = L.TileLayer.extend({
 			getTileUrl(coords) {
 				const ds = maxZ - coords.z; // 0 = native, maxZ = coarsest
@@ -350,12 +363,19 @@ export function createVexcelControl() {
 		}).addTo(map);
 
 		// Image occupies pixels [0..w]×[0..h] at native zoom; CRS.Simple
-		// flips y, so SW = (0,h), NE = (w,0). Fit the whole frame; the
-		// user's spot sits near centre (image-center-distance-asc).
+		// flips y, so SW = (0,h), NE = (w,0).
 		const bounds = L.latLngBounds(
 			map.unproject([0, h], maxZ), map.unproject([w, 0], maxZ));
-		map.setMaxBounds(bounds.pad(0.3));
-		map.fitBounds(bounds);
+		map.setMaxBounds(bounds.pad(0.1));
+		map.setMinZoom(Math.max(0, map.getBoundsZoom(bounds, false) - 0));
+		// Open ZOOMED IN on the centre (the user's spot sits near the
+		// frame middle) so dragging immediately streams new tiles — a
+		// scrollable tileset, not a whole-image thumbnail. Scroll out for
+		// the overview. One below native keeps context while leaving room
+		// to pan; clamped so small frames still fit.
+		const fitZ = map.getBoundsZoom(bounds, false);
+		const initZ = Math.min(maxZ, Math.max(fitZ, maxZ - 1));
+		map.setView(bounds.getCenter(), initZ, { animate: false });
 	};
 
 	// Query captures at the current map centre and refresh the date bar.

@@ -2970,11 +2970,18 @@
       });
       return ctl._imgMap;
     };
+    const dropTiles = () => {
+      if (ctl._tileLayer && ctl._imgMap) {
+        ctl._imgMap.removeLayer(ctl._tileLayer);
+        ctl._tileLayer = null;
+      }
+    };
     const load = () => {
       if (!ctl.model) return;
       const cap = ctl.model.captures[ctl.capIdx];
       const img = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
       if (!img) {
+        dropTiles();
         setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here.");
         return;
       }
@@ -3001,10 +3008,7 @@
       const map = ensureImgMap();
       map.setMaxZoom(maxZ);
       map.invalidateSize();
-      if (ctl._tileLayer) {
-        map.removeLayer(ctl._tileLayer);
-        ctl._tileLayer = null;
-      }
+      dropTiles();
       const TileCls = L.TileLayer.extend({
         getTileUrl(coords) {
           const ds = maxZ - coords.z;
@@ -3029,8 +3033,11 @@
         map.unproject([0, h], maxZ),
         map.unproject([w, 0], maxZ)
       );
-      map.setMaxBounds(bounds.pad(0.3));
-      map.fitBounds(bounds);
+      map.setMaxBounds(bounds.pad(0.1));
+      map.setMinZoom(Math.max(0, map.getBoundsZoom(bounds, false) - 0));
+      const fitZ = map.getBoundsZoom(bounds, false);
+      const initZ = Math.min(maxZ, Math.max(fitZ, maxZ - 1));
+      map.setView(bounds.getCenter(), initZ, { animate: false });
     };
     let refreshTimer = null;
     const refreshCaptures = () => {
