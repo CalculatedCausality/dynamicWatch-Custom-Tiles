@@ -442,12 +442,12 @@ export class CustomTilesApp {
 	_syncVexcelHistControl(map) {
 		const ctrl = this.vexcelHistControl;
 		if (!ctrl) return;
-		// Show the date bar only while the Vexcel base is active AND an
-		// oblique overlay is open (the flat basemap has no date axis).
+		// Show the date bar whenever the Vexcel base is active. On the flat
+		// basemap it's still useful: scrubbing a date opens that date's
+		// oblique (the basemap tiles themselves are current-best-locked).
 		const active = !!(
 			this.layers[CFG.LAYER_VEXCEL] &&
-			map.hasLayer(this.layers[CFG.LAYER_VEXCEL]) &&
-			this._vexCtl && this._vexCtl.isOverlayOpen()
+			map.hasLayer(this.layers[CFG.LAYER_VEXCEL])
 		);
 		if (active && !ctrl._map) ctrl.addTo(map);
 		else if (!active && ctrl._map) ctrl.remove();
@@ -1128,7 +1128,9 @@ export class CustomTilesApp {
 			// match the other custom panes: white translucent chrome,
 			// #bbb borders, #444 text, blue-tint hover (like the history
 			// bar / layer manager), not a dark theme.
-			".dw-vex-ctl { position: absolute; top: 12px; right: 12px; z-index: 1200; background: rgba(255,255,255,0.95); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); color: #333; font-family: sans-serif; padding: 8px; width: max-content; }",
+			// Docked lower-right, clear of the site's top-right close/exit
+			// button (the compass used to cover it on the basemap).
+			".dw-vex-ctl { position: absolute; top: 84px; right: 12px; z-index: 1200; background: rgba(255,255,255,0.95); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); color: #333; font-family: sans-serif; padding: 8px; width: max-content; }",
 			".dw-vex-rose { display: grid; grid-template-columns: repeat(3, 30px); grid-template-rows: repeat(3, 30px); gap: 3px; margin: 0 auto; }",
 			".dw-vex-rose .dw-vex-n { grid-column: 2; grid-row: 1; }",
 			".dw-vex-rose .dw-vex-w { grid-column: 1; grid-row: 2; }",

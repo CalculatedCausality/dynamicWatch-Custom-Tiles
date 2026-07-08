@@ -84,23 +84,23 @@ const set = await page.evaluate(() => {
 if (!set.ok) { console.error("Vexcel base missing"); await browser.close(); process.exit(1); }
 
 // The compass docks on its own; dates ride the SHARED history bar which
-// appears ONLY once an oblique is open (the basemap is date-locked).
+// shows whenever the Vexcel base is active (scrubbing opens the dated
+// oblique — the basemap tiles themselves are date-locked).
 const hasCtl = await page.waitForSelector(".dw-vex-ctl", { timeout: 10_000 }).then(() => true).catch(() => false);
 console.log(`docked compass present: ${hasCtl}`);
-// Give the compass a moment to query captures at the map centre.
-await page.waitForTimeout(2500);
-const barOnBasemap = await page.evaluate(() => !!document.querySelector(".dw-history-slider"));
-console.log(`date bar on basemap (should be false): ${barOnBasemap}`);
+// The date bar should populate at the map centre without opening an
+// oblique first.
+const barOnBasemap = await page.waitForFunction(() => {
+	const s = document.querySelector(".dw-history-slider");
+	return s && Number(s.max) >= 1;
+}, { timeout: 15_000 }).then(() => true).catch(() => false);
+console.log(`date bar shown on basemap (should be true): ${barOnBasemap}`);
 
-// Click a direction — opens the oblique AND reveals the date bar.
+// Click a direction — opens the oblique.
 await page.evaluate(() => {
 	const east = document.querySelector('.dw-vex-ctl .dw-vex-dir[data-dir="oblique-east"]');
 	if (east) east.click();
 });
-await page.waitForFunction(() => {
-	const s = document.querySelector(".dw-history-slider");
-	return s && Number(s.max) >= 1;
-}, { timeout: 15_000 }).catch(() => {});
 
 // Wait for the tile pyramid to render chunks (progressive load), then
 // give it a moment to fill the visible grid.
@@ -237,10 +237,10 @@ console.log(`  screenshot: ${shot}`);
 const modelOk = viewer.present && viewer.dirs.filter((d) => /oblique|nadir/.test(d)).length >= 4 && viewer.dates.length >= 2;
 const tilesOk = tile200 >= 2 && viewer.tilesLoaded >= 2;
 const panLoadsTiles = newCoords >= 2;
-const barGating = barOnBasemap === false; // bar hidden on basemap
+const barGating = barOnBasemap === true; // bar shown + populated on basemap
 const continuousPan = newFrames.length >= 1; // crossed into an adjacent frame
 const ok = queryOk && modelOk && tilesOk && panLoadsTiles && barGating && nadirOk && continuousPan && irOk;
-console.log(`  date bar gated: ${barGating}  |  nadir grey+fallback: ${nadirOk}  |  continuous pan (frame switch): ${continuousPan}`);
+console.log(`  date bar on basemap: ${barGating}  |  nadir grey+fallback: ${nadirOk}  |  continuous pan (frame switch): ${continuousPan}`);
 console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel oblique ${ok ? "is a scrollable tileset that streams chunks on pan" : "did not fully verify"}`);
 await browser.close();
 process.exit(ok ? 0 : 1);

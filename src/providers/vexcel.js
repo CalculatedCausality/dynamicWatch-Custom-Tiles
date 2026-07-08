@@ -652,7 +652,9 @@ export function createVexcelControl() {
 			if (avail.length) ctl.dir = avail[0].key;
 		}
 		markActiveDir();
-		if (overlay.style.display !== "none") load();
+		// Scrubbing a date shows that date's imagery — open the oblique
+		// even from the basemap (whose own tiles are date-locked).
+		load();
 	};
 
 	ctl.addTo = (m) => {

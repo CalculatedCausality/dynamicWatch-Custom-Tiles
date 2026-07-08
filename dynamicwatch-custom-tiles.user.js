@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.124
+// @version      7.9.125
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -3282,7 +3282,7 @@
         if (avail.length) ctl.dir = avail[0].key;
       }
       markActiveDir();
-      if (overlay.style.display !== "none") load();
+      load();
     };
     ctl.addTo = (m) => {
       if (ctl._map) return ctl;
@@ -8195,7 +8195,7 @@
     _syncVexcelHistControl(map) {
       const ctrl = this.vexcelHistControl;
       if (!ctrl) return;
-      const active = !!(this.layers[CFG.LAYER_VEXCEL] && map.hasLayer(this.layers[CFG.LAYER_VEXCEL]) && this._vexCtl && this._vexCtl.isOverlayOpen());
+      const active = !!(this.layers[CFG.LAYER_VEXCEL] && map.hasLayer(this.layers[CFG.LAYER_VEXCEL]));
       if (active && !ctrl._map) ctrl.addTo(map);
       else if (!active && ctrl._map) ctrl.remove();
     }
@@ -8795,7 +8795,9 @@
         // match the other custom panes: white translucent chrome,
         // #bbb borders, #444 text, blue-tint hover (like the history
         // bar / layer manager), not a dark theme.
-        ".dw-vex-ctl { position: absolute; top: 12px; right: 12px; z-index: 1200; background: rgba(255,255,255,0.95); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); color: #333; font-family: sans-serif; padding: 8px; width: max-content; }",
+        // Docked lower-right, clear of the site's top-right close/exit
+        // button (the compass used to cover it on the basemap).
+        ".dw-vex-ctl { position: absolute; top: 84px; right: 12px; z-index: 1200; background: rgba(255,255,255,0.95); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); color: #333; font-family: sans-serif; padding: 8px; width: max-content; }",
         ".dw-vex-rose { display: grid; grid-template-columns: repeat(3, 30px); grid-template-rows: repeat(3, 30px); gap: 3px; margin: 0 auto; }",
         ".dw-vex-rose .dw-vex-n { grid-column: 2; grid-row: 1; }",
         ".dw-vex-rose .dw-vex-w { grid-column: 1; grid-row: 2; }",
