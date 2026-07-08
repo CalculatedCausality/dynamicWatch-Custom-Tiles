@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.130
+// @version      7.9.132
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -91,6 +91,18 @@
     VEXCEL_PASS_KEY: "dw_vexcel_pass",
     VEXCEL_APP_KEY: "anz",
     VEXCEL_APP_HDR: "viewer-app",
+    // The viewer's proper tile credential is the `session` minted by
+    // POST admin.vexcelgroup.com/api/viewer/configuration/init, gated by a
+    // hash = sha256(`${APP_NAME}_${timestamp}`) (no secret salt). Accounts
+    // that don't issue a session (session:null) fall back to the JWT.
+    VEXCEL_SESSION_KEY: "dw_vexcel_session",
+    VEXCEL_INIT_URL: "https://admin.vexcelgroup.com/api/viewer/configuration/init",
+    VEXCEL_APP_NAME: "viewer",
+    // The imagery services (and configuration/init's session mint) gate on
+    // an Origin of the ANZ viewer — verified: Origin present → 200 / real
+    // session; absent → 401 / session:null. <img> tiles can't send a
+    // spoofed Origin, so the basemap GM-fetches + blob-bridges like Stamen.
+    VEXCEL_SPOOF_ORIGIN: "https://anz-viewer.vexcelgroup.com",
     // Esri's reference overlays — the label/road tile pair designed to
     // sit on World Imagery. Auto-synced onto the Wayback base the same
     // way QLD Labels/Roads pair with the QLD bases. Keyless XYZ.
@@ -2801,8 +2813,9 @@
   function _vexcelTokenValid(token) {
     return !!token && _vexcelTokenExp(token) > Date.now() + 60 * 1e3;
   }
-  function _vexcelTileTpl(token) {
-    return CFG.VEXCEL_WMTS_BASE + "?service=wmts&request=getTile&layer=urban&Style=RGB&TileMatrixSet=urban&TileMatrix={z}&TileRow={y}&TileCol={x}&format=image/jpeg&token=" + encodeURIComponent(token);
+  function _vexcelTileTpl(token, session) {
+    const base = CFG.VEXCEL_WMTS_BASE + "?service=wmts&request=getTile&layer=urban&Style=RGB&TileMatrixSet=urban&TileMatrix={z}&TileRow={y}&TileCol={x}&format=image/jpeg";
+    return session ? base + "&session=" + encodeURIComponent(session) + "&token=" + encodeURIComponent(token) : base + "&token=" + encodeURIComponent(token);
   }
   var VEXCEL_DIRECTIONS = [
     { key: "oblique-north", label: "N" },
@@ -2855,9 +2868,9 @@
     const wkt = `POINT(${Number(lng)} ${Number(lat)})`;
     return CFG.VEXCEL_API_BASE + "/v2/oriented/extract?wkt=" + encodeURIComponent(wkt) + "&srid=4326&layer=" + encodeURIComponent(layer || "urban") + "&image-name=" + encodeURIComponent(imageName) + "&token=" + encodeURIComponent(token);
   }
-  function _vexcelObliqueTileBase(imageName, layer, token) {
+  function _vexcelObliqueTileBase(imageName, layer, token, session) {
     if (!imageName || !_vexcelTokenValid(token)) return "";
-    return CFG.VEXCEL_API_BASE + "/v2/oriented/tile?layer=" + encodeURIComponent(layer || "urban") + "&image-name=" + encodeURIComponent(imageName) + "&token=" + encodeURIComponent(token);
+    return CFG.VEXCEL_API_BASE + "/v2/oriented/tile?layer=" + encodeURIComponent(layer || "urban") + "&image-name=" + encodeURIComponent(imageName) + (session ? "&session=" + encodeURIComponent(session) : "") + "&token=" + encodeURIComponent(token);
   }
   function _vexcelMaxDownsample(w, h) {
     const px = Math.max(Number(w) || 256, Number(h) || 256);
@@ -2907,6 +2920,118 @@
       GM_setValue(CFG.VEXCEL_TOKEN_KEY, t);
     } catch (_) {
     }
+  }
+  function _vexcelTokKey(token) {
+    return String(token || "").split(".")[2] || "";
+  }
+  function _getStoredSession() {
+    try {
+      const o = JSON.parse(GM_getValue(CFG.VEXCEL_SESSION_KEY, "") || "null");
+      return o && o.s || "";
+    } catch (_) {
+      return "";
+    }
+  }
+  function _sessionMintedFor(token) {
+    try {
+      const o = JSON.parse(GM_getValue(CFG.VEXCEL_SESSION_KEY, "") || "null");
+      return !!o && o.k === _vexcelTokKey(token);
+    } catch (_) {
+      return false;
+    }
+  }
+  function _storeSession(session, token) {
+    try {
+      GM_setValue(
+        CFG.VEXCEL_SESSION_KEY,
+        JSON.stringify({ s: session || "", k: _vexcelTokKey(token) })
+      );
+    } catch (_) {
+    }
+  }
+  function _clearSession() {
+    try {
+      GM_setValue(CFG.VEXCEL_SESSION_KEY, "");
+    } catch (_) {
+    }
+  }
+  function _vexcelHashCode(str, cb) {
+    try {
+      const bytes = new TextEncoder().encode(String(str));
+      crypto.subtle.digest("SHA-256", bytes).then(
+        (buf) => cb(Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("")),
+        () => cb("")
+      );
+    } catch (_) {
+      cb("");
+    }
+  }
+  function _vexcelInitSession(token, cb) {
+    cb = cb || function() {
+    };
+    if (!_vexcelTokenValid(token)) {
+      cb("");
+      return;
+    }
+    const ts = typeof Date !== "undefined" && Date.now ? Date.now() : 0;
+    _vexcelHashCode(CFG.VEXCEL_APP_NAME + "_" + ts, (hash) => {
+      if (!hash) {
+        cb("");
+        return;
+      }
+      gmJsonGet(
+        CFG.VEXCEL_INIT_URL + "?token=" + encodeURIComponent(token),
+        {
+          method: "POST",
+          data: "hash=" + hash + "&timestamp=" + ts + "&app=" + encodeURIComponent(CFG.VEXCEL_APP_NAME),
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-App-Key": CFG.VEXCEL_APP_HDR,
+            // REQUIRED: without the viewer Origin, init returns
+            // session:null (the account looks unentitled). With it, a
+            // real session is minted. GM_xmlhttpRequest can set Origin;
+            // a page <fetch> can't.
+            "Origin": CFG.VEXCEL_SPOOF_ORIGIN,
+            "Referer": CFG.VEXCEL_SPOOF_ORIGIN + "/"
+          }
+        },
+        (err, data) => {
+          const s = data && (data.session || data.data && data.data.session);
+          cb(s ? String(s) : "");
+        }
+      );
+    });
+  }
+  function _ensureSession(token, cb) {
+    cb = cb || function() {
+    };
+    if (!_vexcelTokenValid(token)) {
+      cb("");
+      return;
+    }
+    if (_sessionMintedFor(token)) {
+      cb(_getStoredSession());
+      return;
+    }
+    _vexcelInitSession(token, (s) => {
+      _storeSession(s, token);
+      cb(s);
+    });
+  }
+  function _vexcelOriginHeaders(extra) {
+    return Object.assign({
+      Origin: CFG.VEXCEL_SPOOF_ORIGIN,
+      Referer: CFG.VEXCEL_SPOOF_ORIGIN + "/"
+    }, extra || {});
+  }
+  function _ensureQueryAuth(cb) {
+    _ensureTokenSilent((tok) => {
+      if (!_vexcelTokenValid(tok)) {
+        cb(null);
+        return;
+      }
+      _ensureSession(tok, (sess) => cb(tok, sess || ""));
+    });
   }
   function _getStoredCreds() {
     try {
@@ -3059,15 +3184,21 @@
     cb(_vexcelTokenValid(tok) ? tok : null);
   }
   function fetchVexcelObliques(lat, lng, cb) {
-    _ensureTokenSilent((token) => _fetchVexcelObliques(lat, lng, token, cb));
+    _ensureQueryAuth((token, session) => {
+      if (!token) {
+        cb(null);
+        return;
+      }
+      _fetchVexcelObliques(lat, lng, token, session, cb);
+    });
   }
-  function _fetchVexcelObliques(lat, lng, token, cb) {
+  function _fetchVexcelObliques(lat, lng, token, session, cb) {
     if (!_vexcelTokenValid(token)) {
       cb(null);
       return;
     }
     gmJsonGet(
-      CFG.VEXCEL_API_BASE + "/v2/oriented/query?token=" + encodeURIComponent(token),
+      CFG.VEXCEL_API_BASE + "/v2/oriented/query?session=" + encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
       {
         method: "POST",
         data: JSON.stringify({
@@ -3082,7 +3213,7 @@
           "order-by": "image-center-distance-asc",
           include: "collection,capture-date,product-type,image-name,source-layer,raster-size-width,raster-size-height,geometry"
         }),
-        headers: { "Content-Type": "application/json" }
+        headers: _vexcelOriginHeaders({ "Content-Type": "application/json" })
       },
       (err, data, raw) => {
         if (raw && (raw.status === 401 || raw.status === 403)) {
@@ -3103,15 +3234,21 @@
     return d ? d.label : key;
   }
   function fetchVexcelFrame(lng, lat, collection, dir, band, cb) {
-    _ensureTokenSilent((token) => _fetchVexcelFrame(lng, lat, collection, dir, band, token, cb));
+    _ensureQueryAuth((token, session) => {
+      if (!token) {
+        cb(null);
+        return;
+      }
+      _fetchVexcelFrame(lng, lat, collection, dir, band, token, session, cb);
+    });
   }
-  function _fetchVexcelFrame(lng, lat, collection, dir, band, token, cb) {
+  function _fetchVexcelFrame(lng, lat, collection, dir, band, token, session, cb) {
     if (!_vexcelTokenValid(token)) {
       cb(null);
       return;
     }
     gmJsonGet(
-      CFG.VEXCEL_API_BASE + "/v2/oriented/query?token=" + encodeURIComponent(token),
+      CFG.VEXCEL_API_BASE + "/v2/oriented/query?session=" + encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
       {
         method: "POST",
         data: JSON.stringify({
@@ -3125,7 +3262,7 @@
           "total-records": 1,
           include: "image-name,source-layer,raster-size-width,raster-size-height,geometry"
         }),
-        headers: { "Content-Type": "application/json" }
+        headers: _vexcelOriginHeaders({ "Content-Type": "application/json" })
       },
       (err, data) => {
         const f = !err && data && Array.isArray(data.features) && data.features[0];
@@ -3282,7 +3419,8 @@
       const base = _vexcelObliqueTileBase(
         frame.name,
         frame.layer,
-        _getStoredToken()
+        _getStoredToken(),
+        _getStoredSession()
       );
       if (!base) {
         setMsg("Vexcel token expired — reselect the base to refresh it.");
@@ -3306,24 +3444,49 @@
       map.setMaxZoom(maxZ);
       map.invalidateSize();
       dropTiles();
-      const TileCls = L.TileLayer.extend({
-        getTileUrl(coords) {
+      const TileCls = L.GridLayer.extend({
+        createTile(coords, done) {
+          const img = document.createElement("img");
+          img.setAttribute("role", "presentation");
           const ds = maxZ - coords.z;
-          return base + "&downsample=" + ds + "&tile-x=" + coords.x + "&tile-y=" + coords.y;
+          const url = base + "&downsample=" + ds + "&tile-x=" + coords.x + "&tile-y=" + coords.y;
+          img._dwHandle = gmGet(url, {
+            responseType: "arraybuffer",
+            headers: _vexcelOriginHeaders({ Accept: "image/jpeg,image/*,*/*;q=0.8" })
+          }, (err, r) => {
+            img._dwHandle = null;
+            if (err || !r || r.status !== 200) {
+              img.src = BLANK_TILE;
+              done(null, img);
+              return;
+            }
+            const blob = new Blob([r.response], { type: "image/jpeg" });
+            const objUrl = URL.createObjectURL(blob);
+            img.onload = () => {
+              URL.revokeObjectURL(objUrl);
+              done(null, img);
+            };
+            img.onerror = () => {
+              URL.revokeObjectURL(objUrl);
+              img.src = BLANK_TILE;
+              done(null, img);
+            };
+            img.src = objUrl;
+          });
+          return img;
         },
         _isValidTile(coords) {
           const g = grids[coords.z];
           return !!g && coords.x >= 0 && coords.y >= 0 && coords.x < g.x && coords.y < g.y;
         }
       });
-      ctl._tileLayer = new TileCls("", {
+      ctl._tileLayer = new TileCls({
         tileSize: TS,
         minZoom: 0,
         maxZoom: maxZ,
-        noWrap: true,
-        crossOrigin: true,
-        errorTileUrl: BLANK_TILE
+        noWrap: true
       }).addTo(map);
+      wireTileAbort(ctl._tileLayer);
       const bounds = L.latLngBounds(
         map.unproject([0, h], maxZ),
         map.unproject([w, 0], maxZ)
@@ -3500,34 +3663,77 @@
   }
   var VexcelLayerProvider = class extends LayerProvider {
     create() {
-      const stored = _getStoredToken();
-      const layer = L.tileLayer(
-        _vexcelTokenValid(stored) ? _vexcelTileTpl(stored) : BLANK_TILE,
-        {
-          tileSize: 256,
-          maxNativeZoom: 21,
-          maxZoom: 25,
-          crossOrigin: true,
-          // Urban program tiles 404 outside flown areas — render
-          // those as blank rather than broken-image icons.
-          errorTileUrl: BLANK_TILE,
-          attribution: '&copy; <a href="https://www.vexcelgroup.com/" target="_blank" rel="noreferrer">Vexcel Imaging</a>'
+      const spoofOrigin = CFG.VEXCEL_SPOOF_ORIGIN;
+      const tileHeaders = {
+        Origin: spoofOrigin,
+        Referer: spoofOrigin + "/",
+        Accept: "image/jpeg,image/*,*/*;q=0.8"
+      };
+      const tileUrl = (z, x, y) => {
+        const tok = _getStoredToken(), sess = _getStoredSession();
+        if (!_vexcelTokenValid(tok) || !sess) return "";
+        return CFG.VEXCEL_WMTS_BASE + "?service=wmts&request=getTile&layer=urban&Style=RGB&TileMatrixSet=urban&TileMatrix=" + z + "&TileRow=" + y + "&TileCol=" + x + "&format=image/jpeg&session=" + encodeURIComponent(sess) + "&token=" + encodeURIComponent(tok);
+      };
+      const VexGrid = L.GridLayer.extend({
+        createTile(coords, done) {
+          const img = document.createElement("img");
+          img.setAttribute("role", "presentation");
+          const url = tileUrl(coords.z, coords.x, coords.y);
+          if (this._dwAuthGaveUp || !url) {
+            img.src = BLANK_TILE;
+            setTimeout(() => done(null, img), 0);
+            return img;
+          }
+          img._dwHandle = gmGet(url, {
+            responseType: "arraybuffer",
+            headers: tileHeaders
+          }, (err, r) => {
+            img._dwHandle = null;
+            if (err) {
+              done(new Error("Vexcel " + err.message), img);
+              return;
+            }
+            if (r.status === 404) {
+              img.src = BLANK_TILE;
+              done(null, img);
+              return;
+            }
+            if (r.status !== 200) {
+              done(new Error("Vexcel HTTP " + r.status), img);
+              return;
+            }
+            const blob = new Blob([r.response], { type: "image/jpeg" });
+            const objUrl = URL.createObjectURL(blob);
+            img.onload = () => {
+              URL.revokeObjectURL(objUrl);
+              done(null, img);
+            };
+            img.onerror = () => {
+              URL.revokeObjectURL(objUrl);
+              done(new Error("Vexcel decode failed"), img);
+            };
+            img.src = objUrl;
+          });
+          return img;
         }
-      );
+      });
+      const layer = new VexGrid({
+        tileSize: 256,
+        maxNativeZoom: 21,
+        maxZoom: 25,
+        attribution: '&copy; <a href="https://www.vexcelgroup.com/" target="_blank" rel="noreferrer">Vexcel Imaging</a>'
+      });
+      wireTileAbort(layer);
       layer.on("add", (e) => {
         layer._dwAuthTries = 0;
         layer._dwAuthGaveUp = false;
-        const apply = (tok) => {
+        const ready = (tok) => {
           if (!_vexcelTokenValid(tok)) return;
-          const tpl = _vexcelTileTpl(tok);
-          if (layer._url !== tpl) {
-            layer.setUrl(tpl);
-            layer.redraw();
-          }
+          _ensureSession(tok, () => layer.redraw());
         };
         const cur = _getStoredToken();
-        if (_vexcelTokenValid(cur)) apply(cur);
-        else _ensureAuthedToken(void 0, apply);
+        if (_vexcelTokenValid(cur)) ready(cur);
+        else _ensureAuthedToken(void 0, ready);
         const map = e && e.target && e.target._map;
         if (map) createVexcelControl().addTo(map);
       });
@@ -3543,49 +3749,71 @@
       });
       let errBurst = 0, errTimer = null;
       layer.on("tileerror", () => {
-        if (!layer._map || layer._dwReprompt) return;
+        if (!layer._map || layer._dwReprompt || layer._dwAuthGaveUp) return;
         errBurst++;
         clearTimeout(errTimer);
         errTimer = setTimeout(() => {
           errBurst = 0;
         }, 3e3);
-        if (errBurst < 8) return;
+        if (errBurst < 6) return;
         errBurst = 0;
-        if (layer._dwAuthGaveUp) return;
-        if (layer._dwAuthTries >= 1 && _vexcelTokenValid(_getStoredToken())) {
-          layer._dwAuthGaveUp = true;
-          layer.setUrl(BLANK_TILE);
-          if (_vexCtl && _vexCtl.setBaseMsg) {
-            _vexCtl.setBaseMsg(
-              "No Vexcel imagery loaded here — either this area isn't covered, or the account hit its usage limit. Try another area, or again later."
-            );
-          }
-          console.warn("[CustomTiles] Vexcel: fresh token still errors — no coverage or account quota-capped; stopping retries.");
+        layer._dwReprompt = true;
+        const tok = _getStoredToken();
+        if (layer._dwAuthTries === 0 && _vexcelTokenValid(tok)) {
+          layer._dwAuthTries = 1;
+          _clearSession();
+          _ensureSession(tok, () => {
+            layer._dwReprompt = false;
+            layer.redraw();
+          });
           return;
         }
-        layer._dwReprompt = true;
-        _storeToken("");
-        _ensureAuthedToken(
-          "Vexcel refused the current token (expired or usage limit).",
-          (tok) => {
-            layer._dwReprompt = false;
-            if (_vexcelTokenValid(tok)) {
-              layer._dwAuthTries++;
-              layer.setUrl(_vexcelTileTpl(tok));
-              layer.redraw();
-              if (_vexCtl) {
-                _vexCtl.atKey = "";
+        if (layer._dwAuthTries === 1) {
+          layer._dwAuthTries = 2;
+          _storeToken("");
+          _clearSession();
+          _ensureAuthedToken(
+            "Vexcel refused the current session (expired or usage limit).",
+            (t) => {
+              layer._dwReprompt = false;
+              if (_vexcelTokenValid(t)) {
+                _ensureSession(t, () => layer.redraw());
+                if (_vexCtl) {
+                  _vexCtl.atKey = "";
+                }
+              } else {
+                layer._dwAuthGaveUp = true;
+                layer.redraw();
               }
-            } else {
-              layer.setUrl(BLANK_TILE);
             }
-          }
-        );
+          );
+          return;
+        }
+        layer._dwReprompt = false;
+        layer._dwAuthGaveUp = true;
+        layer.redraw();
+        if (_vexCtl && _vexCtl.setBaseMsg) {
+          _vexCtl.setBaseMsg(
+            "No Vexcel imagery loaded here — either this area isn't covered, or the account/session was refused. Try another area, or reselect the base."
+          );
+        }
+        console.warn("[CustomTiles] Vexcel: session+token still refused after re-auth — no coverage or account refused; stopping retries.");
       });
-      layer._dwMb3DGetUrl = () => {
+      dwRegisterMbLayer(layer, (z, x, y) => new Promise((resolve, reject) => {
         const tok = _getStoredToken();
-        return _vexcelTokenValid(tok) ? _vexcelTileTpl(tok) : "";
-      };
+        if (!_vexcelTokenValid(tok)) {
+          reject(new Error("Vexcel: no token"));
+          return;
+        }
+        _ensureSession(tok, () => {
+          const url = tileUrl(z, x, y);
+          if (!url) {
+            reject(new Error("Vexcel: no session"));
+            return;
+          }
+          dwMbGmFetchAB(url, { headers: tileHeaders }).then(resolve, reject);
+        });
+      }));
       return layer;
     }
   };

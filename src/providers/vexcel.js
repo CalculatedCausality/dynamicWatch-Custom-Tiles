@@ -1,6 +1,7 @@
+import { dwMbGmFetchAB, dwRegisterMbLayer } from "../bridge/mapbox-tile-bridge.js";
 import { BLANK_TILE, CFG } from "../config.js";
 import { LayerProvider } from "../layers/provider-factories.js";
-import { gmJsonGet } from "../utils/http.js";
+import { gmGet, gmJsonGet, wireTileAbort } from "../utils/http.js";
 
 /* -- Vexcel high-res aerial (ANZ viewer WMTS) ---------------------------
  * api.vexcelgroup.com serves the "urban" ortho mosaic (7.5 cm class,
@@ -39,13 +40,21 @@ export function _vexcelTokenValid(token) {
 	return !!token && _vexcelTokenExp(token) > Date.now() + 60 * 1000;
 }
 
-export function _vexcelTileTpl(token) {
-	return (
+export function _vexcelTileTpl(token, session) {
+	const base =
 		CFG.VEXCEL_WMTS_BASE +
 		"?service=wmts&request=getTile&layer=urban&Style=RGB" +
 		"&TileMatrixSet=urban&TileMatrix={z}&TileRow={y}&TileCol={x}" +
-		"&format=image/jpeg&token=" + encodeURIComponent(token)
-	);
+		"&format=image/jpeg";
+	// The imagery service needs BOTH the session (from configuration/init)
+	// AND the JWT — verified: session-only → 403 Forbidden, token-only → 403
+	// "Unauthorized by Service", session+token (with the viewer Origin) →
+	// 200. The tiles also require an Origin header, so these URLs are fetched
+	// via GM_xmlhttpRequest (blob-bridged), never as plain <img> src.
+	return session
+		? base + "&session=" + encodeURIComponent(session) +
+			"&token=" + encodeURIComponent(token)
+		: base + "&token=" + encodeURIComponent(token);
 }
 
 /* -- Oblique / directional views ---------------------------------------
@@ -137,16 +146,18 @@ export function _vexcelObliqueExtractUrl(imageName, layer, lat, lng, token) {
 	);
 }
 
-// Tile-pyramid base for an oblique — /v2/oriented/tile serves 256px
-// JPEG tiles token-only (CORS *), so the oblique loads progressively in
-// chunks (pan/zoom) instead of one giant image. Leaflet fills in
-// downsample/tile-x/tile-y per request via a custom getTileUrl.
-export function _vexcelObliqueTileBase(imageName, layer, token) {
+// Tile-pyramid base for an oblique — /v2/oriented/tile serves 256px JPEG
+// tiles, so the oblique loads progressively in chunks (pan/zoom) instead of
+// one giant image. Needs session+token (and, on the wire, the viewer Origin
+// header — added by the GM fetch), so tiles are GM-fetched + blob-bridged.
+// downsample/tile-x/tile-y are appended per tile.
+export function _vexcelObliqueTileBase(imageName, layer, token, session) {
 	if (!imageName || !_vexcelTokenValid(token)) return "";
 	return (
 		CFG.VEXCEL_API_BASE + "/v2/oriented/tile?layer=" +
 		encodeURIComponent(layer || "urban") +
 		"&image-name=" + encodeURIComponent(imageName) +
+		(session ? "&session=" + encodeURIComponent(session) : "") +
 		"&token=" + encodeURIComponent(token)
 	);
 }
@@ -213,6 +224,123 @@ function _getStoredToken() {
 
 function _storeToken(t) {
 	try { GM_setValue(CFG.VEXCEL_TOKEN_KEY, t); } catch (_) {}
+}
+
+/* -- Session (the viewer's proper tile credential) ---------------------
+ * The official viewer doesn't just use the JWT: after login it POSTs
+ * /api/viewer/configuration/init and, on accounts that are entitled that
+ * way, gets back a `session` it appends to tile requests. The init call is
+ * gated by hash = sha256(`${APP_NAME}_${timestamp}`) — reverse-engineered
+ * from the viewer bundle, no secret salt. We reproduce that flow so tiles
+ * carry whatever credential the account actually issues; accounts that
+ * return session:null (this one currently) transparently use the JWT.
+ * The session is bound to the token it was minted with, so a token refresh
+ * re-mints it and we never re-POST init for an unchanged token.
+ */
+function _vexcelTokKey(token) { return String(token || "").split(".")[2] || ""; }
+
+function _getStoredSession() {
+	try {
+		const o = JSON.parse(GM_getValue(CFG.VEXCEL_SESSION_KEY, "") || "null");
+		return (o && o.s) || "";
+	} catch (_) { return ""; }
+}
+
+function _sessionMintedFor(token) {
+	try {
+		const o = JSON.parse(GM_getValue(CFG.VEXCEL_SESSION_KEY, "") || "null");
+		return !!o && o.k === _vexcelTokKey(token);
+	} catch (_) { return false; }
+}
+
+function _storeSession(session, token) {
+	try {
+		GM_setValue(CFG.VEXCEL_SESSION_KEY,
+			JSON.stringify({ s: session || "", k: _vexcelTokKey(token) }));
+	} catch (_) {}
+}
+
+// Drop the cached session so the next _ensureSession re-mints one (used when
+// tiles are refused — the session can expire while the JWT is still valid).
+function _clearSession() {
+	try { GM_setValue(CFG.VEXCEL_SESSION_KEY, ""); } catch (_) {}
+}
+
+// sha256 hex of a string via WebCrypto (dynamic.watch is a secure context),
+// matching the viewer's hashCode(). cb("") on any failure.
+function _vexcelHashCode(str, cb) {
+	try {
+		const bytes = new TextEncoder().encode(String(str));
+		crypto.subtle.digest("SHA-256", bytes).then(
+			(buf) => cb(Array.from(new Uint8Array(buf))
+				.map((b) => b.toString(16).padStart(2, "0")).join("")),
+			() => cb(""),
+		);
+	} catch (_) { cb(""); }
+}
+
+// Exchange a valid JWT for the viewer `session` via configuration/init.
+// cb(session) — "" when the account issues none (then the JWT is used).
+function _vexcelInitSession(token, cb) {
+	cb = cb || function () {};
+	if (!_vexcelTokenValid(token)) { cb(""); return; }
+	const ts = (typeof Date !== "undefined" && Date.now) ? Date.now() : 0;
+	_vexcelHashCode(CFG.VEXCEL_APP_NAME + "_" + ts, (hash) => {
+		if (!hash) { cb(""); return; }
+		gmJsonGet(
+			CFG.VEXCEL_INIT_URL + "?token=" + encodeURIComponent(token),
+			{
+				method: "POST",
+				data: "hash=" + hash + "&timestamp=" + ts +
+					"&app=" + encodeURIComponent(CFG.VEXCEL_APP_NAME),
+				headers: {
+					"Content-Type": "application/x-www-form-urlencoded",
+					"X-App-Key": CFG.VEXCEL_APP_HDR,
+					// REQUIRED: without the viewer Origin, init returns
+					// session:null (the account looks unentitled). With it, a
+					// real session is minted. GM_xmlhttpRequest can set Origin;
+					// a page <fetch> can't.
+					"Origin": CFG.VEXCEL_SPOOF_ORIGIN,
+					"Referer": CFG.VEXCEL_SPOOF_ORIGIN + "/",
+				},
+			},
+			(err, data) => {
+				const s = data && (data.session ||
+					(data.data && data.data.session));
+				cb(s ? String(s) : "");
+			},
+		);
+	});
+}
+
+// Ensure a session exists for the current token, minting it once. Runs
+// init at most once per token (result — real session or "" — is cached
+// bound to the token), so activation/tileerror paths can call it freely.
+// Always resolves; the token remains the fallback credential.
+function _ensureSession(token, cb) {
+	cb = cb || function () {};
+	if (!_vexcelTokenValid(token)) { cb(""); return; }
+	if (_sessionMintedFor(token)) { cb(_getStoredSession()); return; }
+	_vexcelInitSession(token, (s) => { _storeSession(s, token); cb(s); });
+}
+
+// Every Vexcel imagery service (ortho + oriented) gates on the ANZ-viewer
+// Origin header AND session+token on the query string — verified: drop any
+// one → 403. These headers ride on all GM imagery requests.
+function _vexcelOriginHeaders(extra) {
+	return Object.assign({
+		Origin: CFG.VEXCEL_SPOOF_ORIGIN,
+		Referer: CFG.VEXCEL_SPOOF_ORIGIN + "/",
+	}, extra || {});
+}
+
+// Resolve BOTH a valid token and its session for the async oblique paths.
+// cb(token, session) — token valid + session (may be ""); cb(null) if none.
+function _ensureQueryAuth(cb) {
+	_ensureTokenSilent((tok) => {
+		if (!_vexcelTokenValid(tok)) { cb(null); return; }
+		_ensureSession(tok, (sess) => cb(tok, sess || ""));
+	});
 }
 
 // Credentials for silent daily token refresh. Stored in GM (the user's
@@ -371,13 +499,16 @@ function _promptForToken(lead) {
 // Queries both programs (wide-area + urban) so rural/edge points that
 // only have wide-area coverage still resolve.
 export function fetchVexcelObliques(lat, lng, cb) {
-	_ensureTokenSilent((token) => _fetchVexcelObliques(lat, lng, token, cb));
+	_ensureQueryAuth((token, session) => {
+		if (!token) { cb(null); return; }
+		_fetchVexcelObliques(lat, lng, token, session, cb);
+	});
 }
-function _fetchVexcelObliques(lat, lng, token, cb) {
+function _fetchVexcelObliques(lat, lng, token, session, cb) {
 	if (!_vexcelTokenValid(token)) { cb(null); return; }
 	gmJsonGet(
-		CFG.VEXCEL_API_BASE + "/v2/oriented/query?token=" +
-			encodeURIComponent(token),
+		CFG.VEXCEL_API_BASE + "/v2/oriented/query?session=" +
+			encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
 		{
 			method: "POST",
 			data: JSON.stringify({
@@ -393,7 +524,7 @@ function _fetchVexcelObliques(lat, lng, token, cb) {
 				include: "collection,capture-date,product-type,image-name," +
 					"source-layer,raster-size-width,raster-size-height,geometry",
 			}),
-			headers: { "Content-Type": "application/json" },
+			headers: _vexcelOriginHeaders({ "Content-Type": "application/json" }),
 		},
 		(err, data, raw) => {
 			// 401/403 = token rejected server-side despite a valid expiry
@@ -421,12 +552,16 @@ function _dirLabel(key) {
 // ground point — used while panning to pull the ADJACENT frame as the
 // view crosses the current frame's edge.
 export function fetchVexcelFrame(lng, lat, collection, dir, band, cb) {
-	_ensureTokenSilent((token) => _fetchVexcelFrame(lng, lat, collection, dir, band, token, cb));
+	_ensureQueryAuth((token, session) => {
+		if (!token) { cb(null); return; }
+		_fetchVexcelFrame(lng, lat, collection, dir, band, token, session, cb);
+	});
 }
-function _fetchVexcelFrame(lng, lat, collection, dir, band, token, cb) {
+function _fetchVexcelFrame(lng, lat, collection, dir, band, token, session, cb) {
 	if (!_vexcelTokenValid(token)) { cb(null); return; }
 	gmJsonGet(
-		CFG.VEXCEL_API_BASE + "/v2/oriented/query?token=" + encodeURIComponent(token),
+		CFG.VEXCEL_API_BASE + "/v2/oriented/query?session=" +
+			encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
 		{
 			method: "POST",
 			data: JSON.stringify({
@@ -437,7 +572,7 @@ function _fetchVexcelFrame(lng, lat, collection, dir, band, token, cb) {
 				include: "image-name,source-layer,raster-size-width," +
 					"raster-size-height,geometry",
 			}),
-			headers: { "Content-Type": "application/json" },
+			headers: _vexcelOriginHeaders({ "Content-Type": "application/json" }),
 		},
 		(err, data) => {
 			const f = !err && data && Array.isArray(data.features) && data.features[0];
@@ -633,7 +768,7 @@ export function createVexcelControl() {
 	const loadFrame = (frame, opts) => {
 		opts = opts || {};
 		const base = _vexcelObliqueTileBase(
-			frame.name, frame.layer, _getStoredToken());
+			frame.name, frame.layer, _getStoredToken(), _getStoredSession());
 		if (!base) { setMsg("Vexcel token expired — reselect the base to refresh it."); return; }
 		setMsg(""); // opens the overlay (fires overlaytoggle) + hides msg
 		const w = frame.w || 10560, h = frame.h || 14144;
@@ -656,11 +791,28 @@ export function createVexcelControl() {
 		map.invalidateSize();
 
 		dropTiles();
-		const TileCls = L.TileLayer.extend({
-			getTileUrl(coords) {
+		// GM-fetched + blob-bridged (like the basemap) because /oriented/tile
+		// needs the viewer Origin header + session, which an <img> can't send.
+		const TileCls = L.GridLayer.extend({
+			createTile(coords, done) {
+				const img = document.createElement("img");
+				img.setAttribute("role", "presentation");
 				const ds = maxZ - coords.z; // 0 = native, maxZ = coarsest
-				return base + "&downsample=" + ds +
+				const url = base + "&downsample=" + ds +
 					"&tile-x=" + coords.x + "&tile-y=" + coords.y;
+				img._dwHandle = gmGet(url, {
+					responseType: "arraybuffer",
+					headers: _vexcelOriginHeaders({ Accept: "image/jpeg,image/*,*/*;q=0.8" }),
+				}, (err, r) => {
+					img._dwHandle = null;
+					if (err || !r || r.status !== 200) { img.src = BLANK_TILE; done(null, img); return; }
+					const blob = new Blob([r.response], { type: "image/jpeg" });
+					const objUrl = URL.createObjectURL(blob);
+					img.onload = () => { URL.revokeObjectURL(objUrl); done(null, img); };
+					img.onerror = () => { URL.revokeObjectURL(objUrl); img.src = BLANK_TILE; done(null, img); };
+					img.src = objUrl;
+				});
+				return img;
 			},
 			_isValidTile(coords) {
 				const g = grids[coords.z];
@@ -668,10 +820,10 @@ export function createVexcelControl() {
 					coords.x < g.x && coords.y < g.y;
 			},
 		});
-		ctl._tileLayer = new TileCls("", {
-			tileSize: TS, minZoom: 0, maxZoom: maxZ,
-			noWrap: true, crossOrigin: true, errorTileUrl: BLANK_TILE,
+		ctl._tileLayer = new TileCls({
+			tileSize: TS, minZoom: 0, maxZoom: maxZ, noWrap: true,
 		}).addTo(map);
+		wireTileAbort(ctl._tileLayer);
 
 		// Image pixels [0..w]×[0..h] at native zoom; CRS.Simple flips y
 		// so SW=(0,h), NE=(w,0).
@@ -868,38 +1020,90 @@ export function vexcelHasToken() {
 
 export class VexcelLayerProvider extends LayerProvider {
 	create() {
-		const stored = _getStoredToken();
-		const layer = L.tileLayer(
-			_vexcelTokenValid(stored) ? _vexcelTileTpl(stored) : BLANK_TILE,
-			{
-				tileSize: 256,
-				maxNativeZoom: 21,
-				maxZoom: 25,
-				crossOrigin: true,
-				// Urban program tiles 404 outside flown areas — render
-				// those as blank rather than broken-image icons.
-				errorTileUrl: BLANK_TILE,
-				attribution:
-					'&copy; <a href="https://www.vexcelgroup.com/" target="_blank"' +
-					' rel="noreferrer">Vexcel Imaging</a>',
+		const spoofOrigin = CFG.VEXCEL_SPOOF_ORIGIN;
+		// The imagery service requires the ANZ-viewer Origin header AND both
+		// the session + JWT on the query string. An <img> tile can send
+		// neither a spoofed Origin nor be gated behind an async session, so
+		// tiles are GM-fetched (which CAN set Origin) and blob-bridged, the
+		// same pattern Stamen/QLD-Historical use.
+		const tileHeaders = {
+			Origin: spoofOrigin,
+			Referer: spoofOrigin + "/",
+			Accept: "image/jpeg,image/*,*/*;q=0.8",
+		};
+		// Concrete per-tile WMTS getTile URL with both credentials; "" until
+		// a session exists (then the layer redraws), so we never fire a
+		// doomed token-only request.
+		const tileUrl = (z, x, y) => {
+			const tok = _getStoredToken(), sess = _getStoredSession();
+			if (!_vexcelTokenValid(tok) || !sess) return "";
+			return CFG.VEXCEL_WMTS_BASE +
+				"?service=wmts&request=getTile&layer=urban&Style=RGB" +
+				"&TileMatrixSet=urban&TileMatrix=" + z + "&TileRow=" + y +
+				"&TileCol=" + x + "&format=image/jpeg" +
+				"&session=" + encodeURIComponent(sess) +
+				"&token=" + encodeURIComponent(tok);
+		};
+
+		const VexGrid = L.GridLayer.extend({
+			createTile(coords, done) {
+				const img = document.createElement("img");
+				img.setAttribute("role", "presentation");
+				const url = tileUrl(coords.z, coords.x, coords.y);
+				// Given up, or creds not minted yet → blank (a redraw after
+				// auth repaints). data: src so it "loads" without erroring.
+				if (this._dwAuthGaveUp || !url) {
+					img.src = BLANK_TILE;
+					setTimeout(() => done(null, img), 0);
+					return img;
+				}
+				img._dwHandle = gmGet(url, {
+					responseType: "arraybuffer", headers: tileHeaders,
+				}, (err, r) => {
+					img._dwHandle = null;
+					if (err) { done(new Error("Vexcel " + err.message), img); return; }
+					// 404 = outside flown coverage → blank, NOT an error (so a
+					// pan over a gap doesn't look like an auth failure). Only
+					// 401/403 (session/token refused) trips the burst.
+					if (r.status === 404) { img.src = BLANK_TILE; done(null, img); return; }
+					if (r.status !== 200) { done(new Error("Vexcel HTTP " + r.status), img); return; }
+					const blob = new Blob([r.response], { type: "image/jpeg" });
+					const objUrl = URL.createObjectURL(blob);
+					img.onload = () => { URL.revokeObjectURL(objUrl); done(null, img); };
+					img.onerror = () => {
+						URL.revokeObjectURL(objUrl);
+						done(new Error("Vexcel decode failed"), img);
+					};
+					img.src = objUrl;
+				});
+				return img;
 			},
-		);
-		// Token check happens when the base is SELECTED, not at boot —
-		// a page-load prompt would be obnoxious and the token may well
-		// have rotated since the last session.
+		});
+
+		const layer = new VexGrid({
+			tileSize: 256,
+			maxNativeZoom: 21,
+			maxZoom: 25,
+			attribution:
+				'&copy; <a href="https://www.vexcelgroup.com/" target="_blank"' +
+				' rel="noreferrer">Vexcel Imaging</a>',
+		});
+		wireTileAbort(layer);
+
+		// Auth happens when the base is SELECTED, not at boot — a page-load
+		// prompt would be obnoxious and the token may have rotated. Mint the
+		// session (once per token, via configuration/init with the Origin
+		// header) then redraw so tiles carry session+token.
 		layer.on("add", (e) => {
-			layer._dwAuthTries = 0; // fresh activation → allow one re-auth
+			layer._dwAuthTries = 0; // fresh activation → allow re-auth
 			layer._dwAuthGaveUp = false;
-			const apply = (tok) => {
+			const ready = (tok) => {
 				if (!_vexcelTokenValid(tok)) return;
-				const tpl = _vexcelTileTpl(tok);
-				if (layer._url !== tpl) { layer.setUrl(tpl); layer.redraw(); }
+				_ensureSession(tok, () => layer.redraw());
 			};
 			const cur = _getStoredToken();
-			// Valid token → paint now; otherwise silently auto-login with
-			// stored creds (or prompt for creds/token the first time).
-			if (_vexcelTokenValid(cur)) apply(cur);
-			else _ensureAuthedToken(undefined, apply);
+			if (_vexcelTokenValid(cur)) ready(cur);
+			else _ensureAuthedToken(undefined, ready); // silent auto-login / prompt
 			// Show the docked imagery compass (N/E/S/W/⊙ + date slider).
 			const map = e && e.target && e.target._map;
 			if (map) createVexcelControl().addTo(map);
@@ -907,11 +1111,10 @@ export class VexcelLayerProvider extends LayerProvider {
 		layer.on("remove", () => {
 			if (_vexCtl) _vexCtl.remove();
 		});
-		// A real tile painted ⇒ token+account are fine → re-arm re-auth
-		// and clear any status notice. NOTE: Leaflet fires "tileload" for
-		// the errorTileUrl fallback too (it's a data: URI that "loads"),
-		// so we must ignore those — otherwise the give-up counter resets
-		// every failed tile and the storm never converges.
+		// A real (blob:) tile painted ⇒ session+token+account are all fine →
+		// re-arm re-auth and clear any notice. Ignore data: blanks (coverage
+		// gaps / not-yet-authed), else the give-up counter would reset on
+		// every blank and the storm would never converge.
 		layer.on("tileload", (e) => {
 			const src = (e && e.tile && e.tile.src) || "";
 			if (src.slice(0, 5) === "data:") return; // blank fallback, not a real paint
@@ -919,75 +1122,75 @@ export class VexcelLayerProvider extends LayerProvider {
 			layer._dwAuthGaveUp = false;
 			if (_vexCtl && _vexCtl.setBaseMsg) _vexCtl.setBaseMsg("");
 		});
-		// A rejected token (403 quota/revoked) still passes the JWT-expiry
-		// check, so the basemap would silently blank forever. A BURST of
-		// tile errors (whole view failing, not the odd out-of-coverage
-		// 404) means the token was refused — clear it and prompt for a
-		// fresh one, then repaint. Guarded so it prompts once per burst.
-		// Tiles are `<img>` loads whose only URL that ever 403s is the
-		// real WMTS one (the no-token fallback is a blank data URI that
-		// never errors), so a burst of tile errors ⇒ the token was
-		// refused. (The oblique query may have already cleared it, so we
-		// do NOT gate on token validity here.)
+		// A BURST of tile errors = the session/token was refused (out-of-
+		// coverage 404s blank instead of erroring, so they don't count).
+		// Escalate cheaply: (0) the session may have expired while the JWT is
+		// still valid → re-mint it via init; (1) the JWT itself is bad →
+		// re-auth from creds/prompt + re-mint; (2) give up (account refused /
+		// no coverage) — blank and stop, re-armed only by a real paint or a
+		// base re-toggle. This bounds logins (≤1 extra) so we never storm.
 		let errBurst = 0, errTimer = null;
 		layer.on("tileerror", () => {
-			if (!layer._map || layer._dwReprompt) return;
+			if (!layer._map || layer._dwReprompt || layer._dwAuthGaveUp) return;
 			errBurst++;
 			clearTimeout(errTimer);
 			errTimer = setTimeout(() => { errBurst = 0; }, 3000);
-			if (errBurst < 8) return;
+			if (errBurst < 6) return;
 			errBurst = 0;
-			if (layer._dwAuthGaveUp) return; // already blanked; don't loop
-			// CRITICAL: a freshly-minted token still passes the JWT-expiry
-			// check, so if we ALREADY re-authed once and tiles STILL storm,
-			// the token isn't the problem — the account is quota-capped (or
-			// there's no coverage here). Re-minting again would loop forever
-			// (this is the 643-request 403 storm). Give up: blank + notify,
-			// re-armed only by a successful tileload or a base re-toggle.
-			if (layer._dwAuthTries >= 1 && _vexcelTokenValid(_getStoredToken())) {
-				layer._dwAuthGaveUp = true;
-				layer.setUrl(BLANK_TILE);
-				// Could be a real 403 (account usage limit) OR a 404 (this
-				// area isn't flown) — the <img> error doesn't tell us which,
-				// so keep the note honest about both.
-				if (_vexCtl && _vexCtl.setBaseMsg) {
-					_vexCtl.setBaseMsg(
-						"No Vexcel imagery loaded here — either this area isn't " +
-						"covered, or the account hit its usage limit. Try another " +
-						"area, or again later.");
-				}
-				console.warn("[CustomTiles] Vexcel: fresh token still errors — " +
-					"no coverage or account quota-capped; stopping retries.");
+			layer._dwReprompt = true;
+			const tok = _getStoredToken();
+			if (layer._dwAuthTries === 0 && _vexcelTokenValid(tok)) {
+				layer._dwAuthTries = 1;
+				_clearSession(); // force a fresh session for the same JWT
+				_ensureSession(tok, () => { layer._dwReprompt = false; layer.redraw(); });
 				return;
 			}
-			layer._dwReprompt = true;
-			_storeToken(""); // drop the rejected token
-			// Silently re-mint via stored creds first; only prompt if we
-			// have none / they're rejected. `_dwReprompt` gates re-entry
-			// until this resolves.
-			_ensureAuthedToken(
-				"Vexcel refused the current token (expired or usage limit).",
-				(tok) => {
-					layer._dwReprompt = false;
-					if (_vexcelTokenValid(tok)) {
-						layer._dwAuthTries++;
-						layer.setUrl(_vexcelTileTpl(tok));
-						layer.redraw();
-						if (_vexCtl) { _vexCtl.atKey = ""; } // force a re-query
-					} else {
-						// Cancelled / still bad — stop hammering the dead
-						// token (blank data URIs don't error → no re-prompt).
-						layer.setUrl(BLANK_TILE);
-					}
-				},
-			);
+			if (layer._dwAuthTries === 1) {
+				layer._dwAuthTries = 2;
+				_storeToken(""); _clearSession(); // drop both, re-auth from scratch
+				_ensureAuthedToken(
+					"Vexcel refused the current session (expired or usage limit).",
+					(t) => {
+						layer._dwReprompt = false;
+						if (_vexcelTokenValid(t)) {
+							_ensureSession(t, () => layer.redraw());
+							if (_vexCtl) { _vexCtl.atKey = ""; } // force a re-query
+						} else {
+							layer._dwAuthGaveUp = true; layer.redraw();
+						}
+					},
+				);
+				return;
+			}
+			// Re-minted the session AND re-authed and STILL refused → the
+			// account/session is refused here or there's no coverage. Stop.
+			layer._dwReprompt = false;
+			layer._dwAuthGaveUp = true;
+			layer.redraw();
+			if (_vexCtl && _vexCtl.setBaseMsg) {
+				_vexCtl.setBaseMsg(
+					"No Vexcel imagery loaded here — either this area isn't " +
+					"covered, or the account/session was refused. Try another " +
+					"area, or reselect the base.");
+			}
+			console.warn("[CustomTiles] Vexcel: session+token still refused after " +
+				"re-auth — no coverage or account refused; stopping retries.");
 		});
-		// 3D sync re-evaluates per sync, so a token pasted mid-session
-		// flows into the Mapbox raster source without a mode toggle.
-		layer._dwMb3DGetUrl = () => {
+		// 3D: the Mapbox raster source can't send a spoofed Origin either, so
+		// register the same GM-fetch bridge (dw:// / transformRequest) 2D
+		// uses. NO _dwMb3DGetUrl — that path would emit a plain raster URL
+		// with no Origin header and 401.
+		dwRegisterMbLayer(layer, (z, x, y) => new Promise((resolve, reject) => {
+			// Self-heal: mint the session here too (cached), so 3D works even
+			// if it activates before the 2D `add` minted it.
 			const tok = _getStoredToken();
-			return _vexcelTokenValid(tok) ? _vexcelTileTpl(tok) : "";
-		};
+			if (!_vexcelTokenValid(tok)) { reject(new Error("Vexcel: no token")); return; }
+			_ensureSession(tok, () => {
+				const url = tileUrl(z, x, y);
+				if (!url) { reject(new Error("Vexcel: no session")); return; }
+				dwMbGmFetchAB(url, { headers: tileHeaders }).then(resolve, reject);
+			});
+		}));
 		return layer;
 	}
 }

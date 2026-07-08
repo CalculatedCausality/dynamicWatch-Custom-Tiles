@@ -52,6 +52,18 @@ export const CFG = {
 	VEXCEL_PASS_KEY: "dw_vexcel_pass",
 	VEXCEL_APP_KEY: "anz",
 	VEXCEL_APP_HDR: "viewer-app",
+	// The viewer's proper tile credential is the `session` minted by
+	// POST admin.vexcelgroup.com/api/viewer/configuration/init, gated by a
+	// hash = sha256(`${APP_NAME}_${timestamp}`) (no secret salt). Accounts
+	// that don't issue a session (session:null) fall back to the JWT.
+	VEXCEL_SESSION_KEY: "dw_vexcel_session",
+	VEXCEL_INIT_URL: "https://admin.vexcelgroup.com/api/viewer/configuration/init",
+	VEXCEL_APP_NAME: "viewer",
+	// The imagery services (and configuration/init's session mint) gate on
+	// an Origin of the ANZ viewer — verified: Origin present → 200 / real
+	// session; absent → 401 / session:null. <img> tiles can't send a
+	// spoofed Origin, so the basemap GM-fetches + blob-bridges like Stamen.
+	VEXCEL_SPOOF_ORIGIN: "https://anz-viewer.vexcelgroup.com",
 	// Esri's reference overlays — the label/road tile pair designed to
 	// sit on World Imagery. Auto-synced onto the Wayback base the same
 	// way QLD Labels/Roads pair with the QLD bases. Keyless XYZ.
