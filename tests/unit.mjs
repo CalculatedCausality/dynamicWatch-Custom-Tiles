@@ -1119,9 +1119,9 @@ t("_vexcelParseObliques builds direction + capture model with layers", () => {
 	// first image per cell wins (dup ignored), carrying its source layer
 	// (+ zeroed raster dims since the fixtures omit them)
 	deepEq(model.images["oblique-east@au-qld-sunshinecoast-2019"],
-		{ name: "img-e-2019", layer: "urban", w: 0, h: 0 });
+		{ name: "img-e-2019", layer: "urban", w: 0, h: 0, corners: null });
 	deepEq(model.images["oblique-north@au-nsw-widearea-2021"],
-		{ name: "img-n-2021", layer: "wide-area", w: 0, h: 0 });
+		{ name: "img-n-2021", layer: "wide-area", w: 0, h: 0, corners: null });
 	// captures sorted year-desc
 	deepEq(model.captures.map((c) => c.year), ["2025", "2021", "2019"]);
 });
@@ -1131,6 +1131,31 @@ t("_vexcelMaxDownsample derives the pyramid depth from raster size", () => {
 	eq(dw._vexcelMaxDownsample(10560, 14144), 6, "2025 oblique → 0-6");
 	eq(dw._vexcelMaxDownsample(7700, 10300), 6, "2019 oblique");
 	eq(dw._vexcelMaxDownsample(0, 0), 0, "degenerate safe");
+});
+
+t("_vexcelFootprint extracts the 4 corner ring", () => {
+	const geom = { coordinates: [[[153.0, -26.5], [153.1, -26.5], [153.1, -26.6], [153.0, -26.6], [153.0, -26.5]]] };
+	deepEq(dw._vexcelFootprint(geom),
+		[[153.0, -26.5], [153.1, -26.5], [153.1, -26.6], [153.0, -26.6]]);
+	eq(dw._vexcelFootprint(null), null, "null-safe");
+	eq(dw._vexcelFootprint({ coordinates: [[[1, 2]]] }), null, "too few points");
+});
+
+t("_vexcelBilinear / _vexcelInvBilinear round-trip a ground point", () => {
+	// A slightly trapezoidal footprint (TL,TR,BR,BL).
+	const c = [[153.000, -26.598], [153.010, -26.598], [153.009, -26.610], [153.001, -26.609]];
+	// Corners map to the unit-square corners.
+	deepEq(dw._vexcelBilinear(c, 0, 0), c[0], "u0v0 → TL");
+	deepEq(dw._vexcelBilinear(c, 1, 0), c[1], "u1v0 → TR");
+	deepEq(dw._vexcelBilinear(c, 1, 1), c[2], "u1v1 → BR");
+	deepEq(dw._vexcelBilinear(c, 0, 1), c[3], "u0v1 → BL");
+	// pixel (u,v) → ground → (u,v) recovers within tolerance.
+	for (const [u0, v0] of [[0.3, 0.7], [0.62, 0.18], [0.5, 0.5]]) {
+		const g = dw._vexcelBilinear(c, u0, v0);
+		const [u1, v1] = dw._vexcelInvBilinear(c, g[0], g[1]);
+		close(u1, u0, 1e-3, "u round-trip");
+		close(v1, v0, 1e-3, "v round-trip");
+	}
 });
 
 t("_vexcelObliqueTileBase builds a token-scoped tile base", () => {
@@ -1152,7 +1177,7 @@ t("_vexcelParseObliques carries raster dimensions for the pyramid", () => {
 		},
 	}] });
 	deepEq(model.images["oblique-north@au-qld-x-2025"],
-		{ name: "n1", layer: "urban", w: 10560, h: 14144 });
+		{ name: "n1", layer: "urban", w: 10560, h: 14144, corners: null });
 });
 
 t("_vexcelObliqueExtractUrl builds a token-scoped, layer-aware URL", () => {

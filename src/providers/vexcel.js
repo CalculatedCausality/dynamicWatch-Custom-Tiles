@@ -99,6 +99,7 @@ export function _vexcelParseObliques(data) {
 				layer: p["source-layer"] || p.layer || "urban",
 				w: Number(p["raster-size-width"]) || 0,
 				h: Number(p["raster-size-height"]) || 0,
+				corners: _vexcelFootprint(f.geometry),
 			};
 		}
 		if (!captureMeta.has(coll)) {
@@ -149,6 +150,54 @@ export function _vexcelMaxDownsample(w, h) {
 	return Math.max(0, Math.ceil(Math.log2(px / 256)));
 }
 
+/* -- Frame footprint ↔ image-pixel mapping (continuous panning) --------
+ * Each oblique is one aerial photo; to pan CONTINUOUSLY across the
+ * survey we map the current view's pixel position to a ground point via
+ * the frame's footprint, then load the neighbouring frame there. The
+ * footprint is a quad (TL,TR,BR,BL matching image corners
+ * [0,0],[w,0],[w,h],[0,h]); a bilinear map is enough (frames are ~nadir-
+ * aligned, kappa≈0) and needs no matrix solve.
+ */
+export function _vexcelFootprint(geometry) {
+	const ring = geometry && geometry.coordinates && geometry.coordinates[0];
+	if (!Array.isArray(ring) || ring.length < 4) return null;
+	// Drop the closing point if present; keep TL,TR,BR,BL.
+	const c = ring.slice(0, 4).map((p) => [Number(p[0]), Number(p[1])]);
+	return c.every((p) => isFinite(p[0]) && isFinite(p[1])) ? c : null;
+}
+
+// (u,v) in the unit square (u:0=left→1=right, v:0=top→1=bottom) → ground
+// [lng,lat] via bilinear interpolation of the footprint corners.
+export function _vexcelBilinear(corners, u, v) {
+	const a = (1 - u) * (1 - v), b = u * (1 - v), d = u * v, e = (1 - u) * v;
+	return [
+		a * corners[0][0] + b * corners[1][0] + d * corners[2][0] + e * corners[3][0],
+		a * corners[0][1] + b * corners[1][1] + d * corners[2][1] + e * corners[3][1],
+	];
+}
+
+// Inverse: ground [lng,lat] → (u,v). Newton iteration from the centre
+// (the map is close to affine, so this converges in a few steps).
+export function _vexcelInvBilinear(corners, lng, lat) {
+	let u = 0.5, v = 0.5;
+	for (let i = 0; i < 15; i++) {
+		const p = _vexcelBilinear(corners, u, v);
+		const fx = p[0] - lng, fy = p[1] - lat;
+		const du = 1e-4, dv = 1e-4;
+		const pu = _vexcelBilinear(corners, u + du, v);
+		const pv = _vexcelBilinear(corners, u, v + dv);
+		const j00 = (pu[0] - p[0]) / du, j01 = (pv[0] - p[0]) / dv;
+		const j10 = (pu[1] - p[1]) / du, j11 = (pv[1] - p[1]) / dv;
+		const det = j00 * j11 - j01 * j10;
+		if (!det) break;
+		u -= (j11 * fx - j01 * fy) / det;
+		v -= (-j10 * fx + j00 * fy) / det;
+		u = Math.max(0, Math.min(1, u));
+		v = Math.max(0, Math.min(1, v));
+	}
+	return [u, v];
+}
+
 function _getStoredToken() {
 	try { return GM_getValue(CFG.VEXCEL_TOKEN_KEY, "") || ""; }
 	catch (_) { return ""; }
@@ -193,7 +242,7 @@ export function fetchVexcelObliques(lat, lng, cb) {
 				// so the user's spot sits near the middle of the oblique.
 				"order-by": "image-center-distance-asc",
 				include: "collection,capture-date,product-type,image-name," +
-					"source-layer,raster-size-width,raster-size-height",
+					"source-layer,raster-size-width,raster-size-height,geometry",
 			}),
 			headers: { "Content-Type": "application/json" },
 		},
@@ -208,6 +257,40 @@ export function fetchVexcelObliques(lat, lng, cb) {
 function _dirLabel(key) {
 	const d = VEXCEL_DIRECTIONS.find((x) => x.key === key);
 	return d ? d.label : key;
+}
+
+// Fetch the single best-centred frame for a direction+collection at a
+// ground point — used while panning to pull the ADJACENT frame as the
+// view crosses the current frame's edge.
+export function fetchVexcelFrame(lng, lat, collection, dir, cb) {
+	const token = _getStoredToken();
+	if (!_vexcelTokenValid(token)) { cb(null); return; }
+	gmJsonGet(
+		CFG.VEXCEL_API_BASE + "/v2/oriented/query?token=" + encodeURIComponent(token),
+		{
+			method: "POST",
+			data: JSON.stringify({
+				wkt: `POINT(${Number(lng)} ${Number(lat)})`,
+				srid: "4326", layer: "wide-area,urban",
+				collection, "product-type": dir,
+				"order-by": "image-center-distance-asc", "total-records": 1,
+				include: "image-name,source-layer,raster-size-width," +
+					"raster-size-height,geometry",
+			}),
+			headers: { "Content-Type": "application/json" },
+		},
+		(err, data) => {
+			const f = !err && data && Array.isArray(data.features) && data.features[0];
+			if (!f) { cb(null); return; }
+			const p = f.properties || {};
+			cb({
+				name: p["image-name"], layer: p["source-layer"] || "urban",
+				w: Number(p["raster-size-width"]) || 0,
+				h: Number(p["raster-size-height"]) || 0,
+				corners: _vexcelFootprint(f.geometry),
+			});
+		},
+	);
 }
 
 /* -- Vexcel imagery compass (docked, layer-attached) ------------------
@@ -322,6 +405,8 @@ export function createVexcelControl() {
 			zoomControl: true,
 			minZoom: 0,
 		});
+		// Continuous panning: settle → maybe switch to the adjacent frame.
+		ctl._imgMap.on("moveend", onInnerMove);
 		return ctl._imgMap;
 	};
 
@@ -332,39 +417,35 @@ export function createVexcelControl() {
 		}
 	};
 
-	// Show the currently-selected oblique as a fresh tile pyramid.
-	const load = () => {
-		if (!ctl.model) return;
-		const cap = ctl.model.captures[ctl.capIdx];
-		const img = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
-		if (!img) {
-			// e.g. nadir only flown some years — clear the stale pyramid
-			// so the message shows on black, not over the old photo.
-			dropTiles();
-			setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here.");
-			return;
-		}
-		const token = _getStoredToken();
-		const base = _vexcelObliqueTileBase(img.name, img.layer, token);
-		if (!base) { setMsg("Vexcel token expired — reselect the base to refresh it."); return; }
+	ctl._frame = null;       // { name, layer, w, h, corners, collection, maxZ }
+	ctl._suppressMove = false;
 
+	// Render one oblique frame as a fresh tile pyramid. opts.center =
+	// [lng,lat] to keep that ground point centred (used when panning
+	// switches to a neighbouring frame); otherwise open zoomed-in on the
+	// frame centre.
+	const loadFrame = (frame, opts) => {
+		opts = opts || {};
+		const base = _vexcelObliqueTileBase(
+			frame.name, frame.layer, _getStoredToken());
+		if (!base) { setMsg("Vexcel token expired — reselect the base to refresh it."); return; }
 		setMsg(""); // opens the overlay (fires overlaytoggle) + hides msg
-		const w = img.w || 10560, h = img.h || 14144;
+		const w = frame.w || 10560, h = frame.h || 14144;
 
 		// Zoomify-style pyramid: level 0 = coarsest (~1 tile), maxZoom =
-		// native. gridSize[z] bounds the valid tile grid per level so we
-		// don't request off-image tiles, and downsample = maxZoom - z.
+		// native. gridSize[z] bounds the valid tile grid per level.
 		const TS = 256;
 		const sizes = [];
 		let s = L.point(w, h);
 		sizes.push(s);
 		while (s.x > TS || s.y > TS) { s = s.divideBy(2).ceil(); sizes.push(s); }
-		sizes.reverse();                       // index 0 = smallest
+		sizes.reverse();
 		const maxZ = sizes.length - 1;
 		const grids = sizes.map((p) =>
 			L.point(Math.ceil(p.x / TS), Math.ceil(p.y / TS)));
 
 		const map = ensureImgMap();
+		map.setMinZoom(0);
 		map.setMaxZoom(maxZ);
 		map.invalidateSize();
 
@@ -375,8 +456,6 @@ export function createVexcelControl() {
 				return base + "&downsample=" + ds +
 					"&tile-x=" + coords.x + "&tile-y=" + coords.y;
 			},
-			// Only request tiles that exist in the level's grid — kills
-			// the off-image 404 storm and keeps placement exact.
 			_isValidTile(coords) {
 				const g = grids[coords.z];
 				return !!g && coords.x >= 0 && coords.y >= 0 &&
@@ -388,21 +467,74 @@ export function createVexcelControl() {
 			noWrap: true, crossOrigin: true, errorTileUrl: BLANK_TILE,
 		}).addTo(map);
 
-		// Image occupies pixels [0..w]×[0..h] at native zoom; CRS.Simple
-		// flips y, so SW = (0,h), NE = (w,0).
+		// Image pixels [0..w]×[0..h] at native zoom; CRS.Simple flips y
+		// so SW=(0,h), NE=(w,0).
 		const bounds = L.latLngBounds(
 			map.unproject([0, h], maxZ), map.unproject([w, 0], maxZ));
 		map.setMaxBounds(bounds.pad(0.1));
-		map.setMinZoom(Math.max(0, map.getBoundsZoom(bounds, false) - 0));
-		// Open ZOOMED IN on the centre (the user's spot sits near the
-		// frame middle) so dragging immediately streams new tiles — a
-		// scrollable tileset, not a whole-image thumbnail. Scroll out for
-		// the overview. One below native keeps context while leaving room
-		// to pan; clamped so small frames still fit.
-		const fitZ = map.getBoundsZoom(bounds, false);
-		const initZ = Math.min(maxZ, Math.max(fitZ, maxZ - 1));
-		map.setView(bounds.getCenter(), initZ, { animate: false });
-		markActiveDir(); // overlay is now open → highlight the active angle
+
+		ctl._frame = Object.assign({ collection: frame.collection, maxZ, w, h }, frame);
+
+		// View: keep the panned-to ground point centred when switching
+		// frames (so the pan feels continuous); else open zoomed-in on
+		// the frame centre.
+		const keepZ = opts.keepZoom && map.getZoom();
+		let center = bounds.getCenter(), z;
+		if (opts.center && frame.corners) {
+			const [u, v] = _vexcelInvBilinear(frame.corners, opts.center[0], opts.center[1]);
+			center = map.unproject([u * w, v * h], maxZ);
+			z = keepZ || Math.min(maxZ, Math.max(map.getBoundsZoom(bounds, false), maxZ - 1));
+		} else {
+			z = Math.min(maxZ, Math.max(map.getBoundsZoom(bounds, false), maxZ - 1));
+		}
+		// Arm one skip: the programmatic setView below fires a moveend we
+		// must ignore (else it re-queries and can loop). onInnerMove clears
+		// the flag on that first moveend; real pans then flow through.
+		ctl._suppressMove = true;
+		map.setView(center, z, { animate: false });
+		markActiveDir();
+	};
+
+	// Show the currently-selected direction+date as an oblique frame.
+	const load = () => {
+		if (!ctl.model) return;
+		const cap = ctl.model.captures[ctl.capIdx];
+		const img = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
+		if (!img) {
+			dropTiles();
+			setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here.");
+			ctl._frame = null;
+			return;
+		}
+		loadFrame(Object.assign({ collection: cap.collection }, img));
+	};
+
+	// Continuous panning: when the inner view settles, map its centre
+	// pixel → ground via the frame footprint and pull the frame best
+	// centred there. If it's a NEIGHBOUR, switch to it (keeping the
+	// ground point centred) so you can scroll across the whole survey.
+	let panTimer = null;
+	const onInnerMove = () => {
+		if (ctl._suppressMove) { ctl._suppressMove = false; return; } // skip the programmatic setView
+		const f = ctl._frame;
+		if (!f || !f.corners || !ctl.model) return;
+		clearTimeout(panTimer);
+		panTimer = setTimeout(() => {
+			const map = ctl._imgMap;
+			if (!map || !ctl.isOverlayOpen()) return;
+			const pt = map.project(map.getCenter(), f.maxZ);
+			const u = Math.max(0, Math.min(1, pt.x / f.w));
+			const v = Math.max(0, Math.min(1, pt.y / f.h));
+			const ground = _vexcelBilinear(f.corners, u, v);
+			const cap = ctl.model.captures[ctl.capIdx];
+			if (!cap) return;
+			fetchVexcelFrame(ground[0], ground[1], cap.collection, ctl.dir, (fr) => {
+				if (!fr || !fr.name || !ctl.isOverlayOpen()) return;
+				if (fr.name === f.name) return;            // same frame — nothing to do
+				loadFrame(Object.assign({ collection: cap.collection }, fr),
+					{ center: ground, keepZoom: true });
+			});
+		}, 300);
 	};
 
 	// Query captures at the current map centre and refresh the date bar.

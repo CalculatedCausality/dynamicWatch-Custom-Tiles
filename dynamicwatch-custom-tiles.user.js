@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.120
+// @version      7.9.122
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -2820,7 +2820,8 @@
           name,
           layer: p["source-layer"] || p.layer || "urban",
           w: Number(p["raster-size-width"]) || 0,
-          h: Number(p["raster-size-height"]) || 0
+          h: Number(p["raster-size-height"]) || 0,
+          corners: _vexcelFootprint(f.geometry)
         };
       }
       if (!captureMeta.has(coll)) {
@@ -2845,6 +2846,38 @@
   function _vexcelMaxDownsample(w, h) {
     const px = Math.max(Number(w) || 256, Number(h) || 256);
     return Math.max(0, Math.ceil(Math.log2(px / 256)));
+  }
+  function _vexcelFootprint(geometry) {
+    const ring = geometry && geometry.coordinates && geometry.coordinates[0];
+    if (!Array.isArray(ring) || ring.length < 4) return null;
+    const c = ring.slice(0, 4).map((p) => [Number(p[0]), Number(p[1])]);
+    return c.every((p) => isFinite(p[0]) && isFinite(p[1])) ? c : null;
+  }
+  function _vexcelBilinear(corners, u, v) {
+    const a = (1 - u) * (1 - v), b = u * (1 - v), d = u * v, e = (1 - u) * v;
+    return [
+      a * corners[0][0] + b * corners[1][0] + d * corners[2][0] + e * corners[3][0],
+      a * corners[0][1] + b * corners[1][1] + d * corners[2][1] + e * corners[3][1]
+    ];
+  }
+  function _vexcelInvBilinear(corners, lng, lat) {
+    let u = 0.5, v = 0.5;
+    for (let i = 0; i < 15; i++) {
+      const p = _vexcelBilinear(corners, u, v);
+      const fx = p[0] - lng, fy = p[1] - lat;
+      const du = 1e-4, dv = 1e-4;
+      const pu = _vexcelBilinear(corners, u + du, v);
+      const pv = _vexcelBilinear(corners, u, v + dv);
+      const j00 = (pu[0] - p[0]) / du, j01 = (pv[0] - p[0]) / dv;
+      const j10 = (pu[1] - p[1]) / du, j11 = (pv[1] - p[1]) / dv;
+      const det = j00 * j11 - j01 * j10;
+      if (!det) break;
+      u -= (j11 * fx - j01 * fy) / det;
+      v -= (-j10 * fx + j00 * fy) / det;
+      u = Math.max(0, Math.min(1, u));
+      v = Math.max(0, Math.min(1, v));
+    }
+    return [u, v];
   }
   function _getStoredToken() {
     try {
@@ -2887,7 +2920,7 @@
           // the one whose frame is centred nearest the clicked point,
           // so the user's spot sits near the middle of the oblique.
           "order-by": "image-center-distance-asc",
-          include: "collection,capture-date,product-type,image-name,source-layer,raster-size-width,raster-size-height"
+          include: "collection,capture-date,product-type,image-name,source-layer,raster-size-width,raster-size-height,geometry"
         }),
         headers: { "Content-Type": "application/json" }
       },
@@ -2904,6 +2937,45 @@
   function _dirLabel(key) {
     const d = VEXCEL_DIRECTIONS.find((x) => x.key === key);
     return d ? d.label : key;
+  }
+  function fetchVexcelFrame(lng, lat, collection, dir, cb) {
+    const token = _getStoredToken();
+    if (!_vexcelTokenValid(token)) {
+      cb(null);
+      return;
+    }
+    gmJsonGet(
+      CFG.VEXCEL_API_BASE + "/v2/oriented/query?token=" + encodeURIComponent(token),
+      {
+        method: "POST",
+        data: JSON.stringify({
+          wkt: `POINT(${Number(lng)} ${Number(lat)})`,
+          srid: "4326",
+          layer: "wide-area,urban",
+          collection,
+          "product-type": dir,
+          "order-by": "image-center-distance-asc",
+          "total-records": 1,
+          include: "image-name,source-layer,raster-size-width,raster-size-height,geometry"
+        }),
+        headers: { "Content-Type": "application/json" }
+      },
+      (err, data) => {
+        const f = !err && data && Array.isArray(data.features) && data.features[0];
+        if (!f) {
+          cb(null);
+          return;
+        }
+        const p = f.properties || {};
+        cb({
+          name: p["image-name"],
+          layer: p["source-layer"] || "urban",
+          w: Number(p["raster-size-width"]) || 0,
+          h: Number(p["raster-size-height"]) || 0,
+          corners: _vexcelFootprint(f.geometry)
+        });
+      }
+    );
   }
   var _vexCtl = null;
   function createVexcelControl() {
@@ -2987,6 +3059,7 @@
         zoomControl: true,
         minZoom: 0
       });
+      ctl._imgMap.on("moveend", onInnerMove);
       return ctl._imgMap;
     };
     const dropTiles = () => {
@@ -2995,23 +3068,21 @@
         ctl._tileLayer = null;
       }
     };
-    const load = () => {
-      if (!ctl.model) return;
-      const cap = ctl.model.captures[ctl.capIdx];
-      const img = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
-      if (!img) {
-        dropTiles();
-        setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here.");
-        return;
-      }
-      const token = _getStoredToken();
-      const base = _vexcelObliqueTileBase(img.name, img.layer, token);
+    ctl._frame = null;
+    ctl._suppressMove = false;
+    const loadFrame = (frame, opts) => {
+      opts = opts || {};
+      const base = _vexcelObliqueTileBase(
+        frame.name,
+        frame.layer,
+        _getStoredToken()
+      );
       if (!base) {
         setMsg("Vexcel token expired — reselect the base to refresh it.");
         return;
       }
       setMsg("");
-      const w = img.w || 10560, h = img.h || 14144;
+      const w = frame.w || 10560, h = frame.h || 14144;
       const TS = 256;
       const sizes = [];
       let s = L.point(w, h);
@@ -3024,6 +3095,7 @@
       const maxZ = sizes.length - 1;
       const grids = sizes.map((p) => L.point(Math.ceil(p.x / TS), Math.ceil(p.y / TS)));
       const map = ensureImgMap();
+      map.setMinZoom(0);
       map.setMaxZoom(maxZ);
       map.invalidateSize();
       dropTiles();
@@ -3032,8 +3104,6 @@
           const ds = maxZ - coords.z;
           return base + "&downsample=" + ds + "&tile-x=" + coords.x + "&tile-y=" + coords.y;
         },
-        // Only request tiles that exist in the level's grid — kills
-        // the off-image 404 storm and keeps placement exact.
         _isValidTile(coords) {
           const g = grids[coords.z];
           return !!g && coords.x >= 0 && coords.y >= 0 && coords.x < g.x && coords.y < g.y;
@@ -3052,11 +3122,59 @@
         map.unproject([w, 0], maxZ)
       );
       map.setMaxBounds(bounds.pad(0.1));
-      map.setMinZoom(Math.max(0, map.getBoundsZoom(bounds, false) - 0));
-      const fitZ = map.getBoundsZoom(bounds, false);
-      const initZ = Math.min(maxZ, Math.max(fitZ, maxZ - 1));
-      map.setView(bounds.getCenter(), initZ, { animate: false });
+      ctl._frame = Object.assign({ collection: frame.collection, maxZ, w, h }, frame);
+      const keepZ = opts.keepZoom && map.getZoom();
+      let center = bounds.getCenter(), z;
+      if (opts.center && frame.corners) {
+        const [u, v] = _vexcelInvBilinear(frame.corners, opts.center[0], opts.center[1]);
+        center = map.unproject([u * w, v * h], maxZ);
+        z = keepZ || Math.min(maxZ, Math.max(map.getBoundsZoom(bounds, false), maxZ - 1));
+      } else {
+        z = Math.min(maxZ, Math.max(map.getBoundsZoom(bounds, false), maxZ - 1));
+      }
+      ctl._suppressMove = true;
+      map.setView(center, z, { animate: false });
       markActiveDir();
+    };
+    const load = () => {
+      if (!ctl.model) return;
+      const cap = ctl.model.captures[ctl.capIdx];
+      const img = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
+      if (!img) {
+        dropTiles();
+        setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here.");
+        ctl._frame = null;
+        return;
+      }
+      loadFrame(Object.assign({ collection: cap.collection }, img));
+    };
+    let panTimer = null;
+    const onInnerMove = () => {
+      if (ctl._suppressMove) {
+        ctl._suppressMove = false;
+        return;
+      }
+      const f = ctl._frame;
+      if (!f || !f.corners || !ctl.model) return;
+      clearTimeout(panTimer);
+      panTimer = setTimeout(() => {
+        const map = ctl._imgMap;
+        if (!map || !ctl.isOverlayOpen()) return;
+        const pt = map.project(map.getCenter(), f.maxZ);
+        const u = Math.max(0, Math.min(1, pt.x / f.w));
+        const v = Math.max(0, Math.min(1, pt.y / f.h));
+        const ground = _vexcelBilinear(f.corners, u, v);
+        const cap = ctl.model.captures[ctl.capIdx];
+        if (!cap) return;
+        fetchVexcelFrame(ground[0], ground[1], cap.collection, ctl.dir, (fr) => {
+          if (!fr || !fr.name || !ctl.isOverlayOpen()) return;
+          if (fr.name === f.name) return;
+          loadFrame(
+            Object.assign({ collection: cap.collection }, fr),
+            { center: ground, keepZoom: true }
+          );
+        });
+      }, 300);
     };
     let refreshTimer = null;
     const refreshCaptures = () => {
@@ -8821,6 +8939,9 @@
         _vexcelObliqueExtractUrl,
         _vexcelObliqueTileBase,
         _vexcelMaxDownsample,
+        _vexcelFootprint,
+        _vexcelBilinear,
+        _vexcelInvBilinear,
         LayerProvider,
         tileProvider,
         tokenTileProvider,
