@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.122
+// @version      7.9.124
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -2804,6 +2804,9 @@
     const m = String(collection || "").match(/(\d{4})(?!.*\d{4})/);
     return m ? m[1] : String(collection || "");
   }
+  function _vexcelBand(name) {
+    return /_irg$/i.test(String(name || "")) ? "irg" : "rgb";
+  }
   function _vexcelParseObliques(data) {
     const images = {};
     const captureMeta = /* @__PURE__ */ new Map();
@@ -2815,8 +2818,10 @@
       const name = p["image-name"];
       if (!dir || !coll || !name) continue;
       const key = dir + "@" + coll;
-      if (!(key in images)) {
-        images[key] = {
+      const band = _vexcelBand(name);
+      if (!images[key]) images[key] = {};
+      if (!images[key][band]) {
+        images[key][band] = {
           name,
           layer: p["source-layer"] || p.layer || "urban",
           w: Number(p["raster-size-width"]) || 0,
@@ -2916,6 +2921,8 @@
           wkt: `POINT(${Number(lng)} ${Number(lat)})`,
           srid: "4326",
           layer: "wide-area,urban",
+          // Both bands (rgb + irg) so the viewer can offer an IR
+          // toggle; parse buckets them by the image-name suffix.
           // image-center-distance-asc → the first image per cell is
           // the one whose frame is centred nearest the clicked point,
           // so the user's spot sits near the middle of the oblique.
@@ -2938,7 +2945,7 @@
     const d = VEXCEL_DIRECTIONS.find((x) => x.key === key);
     return d ? d.label : key;
   }
-  function fetchVexcelFrame(lng, lat, collection, dir, cb) {
+  function fetchVexcelFrame(lng, lat, collection, dir, band, cb) {
     const token = _getStoredToken();
     if (!_vexcelTokenValid(token)) {
       cb(null);
@@ -2954,6 +2961,7 @@
           layer: "wide-area,urban",
           collection,
           "product-type": dir,
+          bands: band || "rgb",
           "order-by": "image-center-distance-asc",
           "total-records": 1,
           include: "image-name,source-layer,raster-size-width,raster-size-height,geometry"
@@ -2982,7 +2990,7 @@
     if (_vexCtl) return _vexCtl;
     const el = document.createElement("div");
     el.className = "dw-vex-ctl";
-    el.innerHTML = '<div class="dw-vex-rose"><button type="button" class="dw-vex-dir dw-vex-n" data-dir="oblique-north" title="Look from the north">N</button><button type="button" class="dw-vex-dir dw-vex-w" data-dir="oblique-west" title="Look from the west">W</button><button type="button" class="dw-vex-dir dw-vex-c" data-dir="nadir" title="Straight down (dated)">⊙</button><button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button><button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button></div>';
+    el.innerHTML = '<div class="dw-vex-rose"><button type="button" class="dw-vex-dir dw-vex-n" data-dir="oblique-north" title="Look from the north">N</button><button type="button" class="dw-vex-dir dw-vex-w" data-dir="oblique-west" title="Look from the west">W</button><button type="button" class="dw-vex-dir dw-vex-c" data-dir="nadir" title="Straight down (dated)">⊙</button><button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button><button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button></div><button type="button" class="dw-vex-ir" title="Toggle near-infrared (vegetation shows red)">IR</button>';
     const overlay = document.createElement("div");
     overlay.className = "dw-vex-overlay";
     overlay.style.display = "none";
@@ -3001,6 +3009,8 @@
       atKey: "",
       model: null,
       dir: "oblique-north",
+      band: "rgb",
+      // "rgb" | "irg" (near-infrared)
       capIdx: 0,
       // index into model.captures (0 = newest)
       gen: 0,
@@ -3024,6 +3034,19 @@
     const mapEl = overlay.querySelector(".dw-vex-tilemap");
     const msgEl = overlay.querySelector(".dw-vex-msg");
     const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
+    const irBtn = el.querySelector(".dw-vex-ir");
+    const cellFor = (dir) => {
+      const cap = ctl.model && ctl.model.captures[ctl.capIdx];
+      return cap ? ctl.model.images[dir + "@" + cap.collection] : null;
+    };
+    const curImage = () => {
+      const cell = cellFor(ctl.dir);
+      return cell ? cell[ctl.band] || cell.rgb : null;
+    };
+    const irAvail = () => {
+      const cell = cellFor(ctl.dir);
+      return !!(cell && cell.irg);
+    };
     const setMsg = (t) => {
       const wasClosed = overlay.style.display === "none";
       overlay.style.display = "";
@@ -3033,22 +3056,33 @@
     };
     ctl.isOverlayOpen = () => overlay.style.display !== "none";
     const dirHasPhoto = (dir) => {
-      const cap = ctl.model && ctl.model.captures[ctl.capIdx];
-      return !!(cap && ctl.model.images[dir + "@" + cap.collection]);
+      const cell = cellFor(dir);
+      return !!(cell && (cell.rgb || cell.irg));
     };
     const availDirs = () => {
       if (!ctl.model) return [];
       return ctl.model.directions.filter((d) => dirHasPhoto(d.key));
     };
-    const markActiveDir = () => dirBtns.forEach((b) => {
-      const has = dirHasPhoto(b.dataset.dir);
-      b.classList.toggle(
-        "dw-vex-dir--on",
-        ctl.isOverlayOpen() && b.dataset.dir === ctl.dir && has
-      );
-      b.classList.toggle("dw-vex-dir--off", !!ctl.model && !has);
-      b.disabled = !!ctl.model && !has;
-    });
+    const updateIrBtn = () => {
+      if (!irBtn) return;
+      const avail = irAvail();
+      if (!avail && ctl.band === "irg") ctl.band = "rgb";
+      irBtn.disabled = !avail;
+      irBtn.classList.toggle("dw-vex-dir--off", !avail);
+      irBtn.classList.toggle("dw-vex-ir--on", ctl.band === "irg" && avail);
+    };
+    const markActiveDir = () => {
+      dirBtns.forEach((b) => {
+        const has = dirHasPhoto(b.dataset.dir);
+        b.classList.toggle(
+          "dw-vex-dir--on",
+          ctl.isOverlayOpen() && b.dataset.dir === ctl.dir && has
+        );
+        b.classList.toggle("dw-vex-dir--off", !!ctl.model && !has);
+        b.disabled = !!ctl.model && !has;
+      });
+      updateIrBtn();
+    };
     ctl._imgMap = null;
     ctl._tileLayer = null;
     const ensureImgMap = () => {
@@ -3139,7 +3173,7 @@
     const load = () => {
       if (!ctl.model) return;
       const cap = ctl.model.captures[ctl.capIdx];
-      const img = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
+      const img = curImage();
       if (!img) {
         dropTiles();
         setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here.");
@@ -3166,7 +3200,7 @@
         const ground = _vexcelBilinear(f.corners, u, v);
         const cap = ctl.model.captures[ctl.capIdx];
         if (!cap) return;
-        fetchVexcelFrame(ground[0], ground[1], cap.collection, ctl.dir, (fr) => {
+        fetchVexcelFrame(ground[0], ground[1], cap.collection, ctl.dir, ctl.band, (fr) => {
           if (!fr || !fr.name || !ctl.isOverlayOpen()) return;
           if (fr.name === f.name) return;
           loadFrame(
@@ -3222,6 +3256,12 @@
       markActiveDir();
       load();
     }));
+    if (irBtn) irBtn.addEventListener("click", () => {
+      if (irBtn.disabled || !irAvail()) return;
+      ctl.band = ctl.band === "irg" ? "rgb" : "irg";
+      updateIrBtn();
+      if (ctl.isOverlayOpen()) load();
+    });
     overlay.querySelector(".dw-vex-close").addEventListener("click", () => {
       overlay.style.display = "none";
       ctl.gen++;
@@ -8769,6 +8809,12 @@
         // (e.g. ⊙ nadir was only flown some years). Non-clickable.
         ".dw-vex-dir--off { opacity: 0.35; cursor: default; background: #f3f4f6; }",
         ".dw-vex-dir--off:hover { background: #f3f4f6; color: #444; border-color: transparent; }",
+        // Near-infrared band toggle (vegetation → red). Sits under the
+        // compass rose; greyed where no IR band exists (SCC: nadir 2025).
+        ".dw-vex-ir { display: block; width: 96px; margin: 6px auto 0; padding: 4px 0; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; background: #fff; color: #444; border: 1px solid #bbb; border-radius: 3px; cursor: pointer; }",
+        ".dw-vex-ir:hover:not(.dw-vex-dir--off) { background: #fdecec; color: #b91c1c; border-color: #dca; }",
+        ".dw-vex-ir--on { background: #dc2626; color: #fff; border-color: #dc2626; }",
+        ".dw-vex-ir--on:hover { background: #dc2626 !important; color: #fff !important; }",
         // Full-map overlay: the chosen oblique REPLACES the map view
         // (fills the whole map area), with the compass floating above
         // it (dw-vex-ctl has the higher z-index). Dates ride the shared
@@ -8939,6 +8985,7 @@
         _vexcelObliqueExtractUrl,
         _vexcelObliqueTileBase,
         _vexcelMaxDownsample,
+        _vexcelBand,
         _vexcelFootprint,
         _vexcelBilinear,
         _vexcelInvBilinear,

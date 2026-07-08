@@ -77,11 +77,17 @@ export function _vexcelCollectionYear(collection) {
 	return m ? m[1] : String(collection || "");
 }
 
+// Band of an image from its name suffix — Vexcel serves each frame as
+// `..._rgb` (true colour) and sometimes `..._irg` (near-infrared, false-
+// colour: vegetation reads bright red). Only nadir has IR on SCC.
+export function _vexcelBand(name) {
+	return /_irg$/i.test(String(name || "")) ? "irg" : "rgb";
+}
+
 // oriented/query FeatureCollection → { directions, captures, images }.
-// images is keyed "<product-type>@<collection>" → { name, layer } for
-// the first (best) photo in that cell; captures is the distinct
-// collection list newest-first. Each image carries its own source
-// layer (urban / wide-area) so extract targets the right program.
+// images is keyed "<product-type>@<collection>" → { rgb?, irg? }, each
+// { name, layer, w, h, corners } for the first (best) photo in that
+// cell+band; captures is the distinct collection list newest-first.
 export function _vexcelParseObliques(data) {
 	const images = {};
 	const captureMeta = new Map(); // collection → { year, date }
@@ -93,8 +99,10 @@ export function _vexcelParseObliques(data) {
 		const name = p["image-name"];
 		if (!dir || !coll || !name) continue;
 		const key = dir + "@" + coll;
-		if (!(key in images)) {
-			images[key] = {
+		const band = _vexcelBand(name);
+		if (!images[key]) images[key] = {};
+		if (!images[key][band]) {
+			images[key][band] = {
 				name,
 				layer: p["source-layer"] || p.layer || "urban",
 				w: Number(p["raster-size-width"]) || 0,
@@ -237,6 +245,8 @@ export function fetchVexcelObliques(lat, lng, cb) {
 				wkt: `POINT(${Number(lng)} ${Number(lat)})`,
 				srid: "4326",
 				layer: "wide-area,urban",
+				// Both bands (rgb + irg) so the viewer can offer an IR
+				// toggle; parse buckets them by the image-name suffix.
 				// image-center-distance-asc → the first image per cell is
 				// the one whose frame is centred nearest the clicked point,
 				// so the user's spot sits near the middle of the oblique.
@@ -262,7 +272,7 @@ function _dirLabel(key) {
 // Fetch the single best-centred frame for a direction+collection at a
 // ground point — used while panning to pull the ADJACENT frame as the
 // view crosses the current frame's edge.
-export function fetchVexcelFrame(lng, lat, collection, dir, cb) {
+export function fetchVexcelFrame(lng, lat, collection, dir, band, cb) {
 	const token = _getStoredToken();
 	if (!_vexcelTokenValid(token)) { cb(null); return; }
 	gmJsonGet(
@@ -272,7 +282,7 @@ export function fetchVexcelFrame(lng, lat, collection, dir, cb) {
 			data: JSON.stringify({
 				wkt: `POINT(${Number(lng)} ${Number(lat)})`,
 				srid: "4326", layer: "wide-area,urban",
-				collection, "product-type": dir,
+				collection, "product-type": dir, bands: band || "rgb",
 				"order-by": "image-center-distance-asc", "total-records": 1,
 				include: "image-name,source-layer,raster-size-width," +
 					"raster-size-height,geometry",
@@ -325,7 +335,8 @@ export function createVexcelControl() {
 		'<button type="button" class="dw-vex-dir dw-vex-c" data-dir="nadir" title="Straight down (dated)">⊙</button>' +
 		'<button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button>' +
 		'<button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button>' +
-		"</div>";
+		"</div>" +
+		'<button type="button" class="dw-vex-ir" title="Toggle near-infrared (vegetation shows red)">IR</button>';
 	const overlay = document.createElement("div");
 	overlay.className = "dw-vex-overlay";
 	overlay.style.display = "none";
@@ -347,6 +358,7 @@ export function createVexcelControl() {
 		lat: 0, lng: 0, atKey: "",
 		model: null,
 		dir: "oblique-north",
+		band: "rgb",     // "rgb" | "irg" (near-infrared)
 		capIdx: 0,       // index into model.captures (0 = newest)
 		gen: 0,
 		on(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); return ctl; },
@@ -356,6 +368,22 @@ export function createVexcelControl() {
 	const mapEl   = overlay.querySelector(".dw-vex-tilemap");
 	const msgEl   = overlay.querySelector(".dw-vex-msg");
 	const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
+	const irBtn   = el.querySelector(".dw-vex-ir");
+
+	// Cell {rgb?, irg?} for a direction at the current date; the image
+	// for the active band (falling back to rgb).
+	const cellFor = (dir) => {
+		const cap = ctl.model && ctl.model.captures[ctl.capIdx];
+		return cap ? ctl.model.images[dir + "@" + cap.collection] : null;
+	};
+	const curImage = () => {
+		const cell = cellFor(ctl.dir);
+		return cell ? (cell[ctl.band] || cell.rgb) : null;
+	};
+	const irAvail = () => {
+		const cell = cellFor(ctl.dir);
+		return !!(cell && cell.irg);
+	};
 
 	// setMsg opens the overlay; fire "overlaytoggle" on the closed→open
 	// transition so the app can show the date bar (which only makes sense
@@ -374,23 +402,37 @@ export function createVexcelControl() {
 	// ⊙ is disabled on years without it rather than dead-ending in a "no
 	// photo" message.
 	const dirHasPhoto = (dir) => {
-		const cap = ctl.model && ctl.model.captures[ctl.capIdx];
-		return !!(cap && ctl.model.images[dir + "@" + cap.collection]);
+		const cell = cellFor(dir);
+		return !!(cell && (cell.rgb || cell.irg));
 	};
 	const availDirs = () => {
 		if (!ctl.model) return [];
 		return ctl.model.directions.filter((d) => dirHasPhoto(d.key));
 	};
+	// Reflect the IR toggle state: highlighted when active, greyed when
+	// the current direction+date has no infrared band (SCC: nadir 2025
+	// only). Auto-reverts to rgb if IR isn't available here.
+	const updateIrBtn = () => {
+		if (!irBtn) return;
+		const avail = irAvail();
+		if (!avail && ctl.band === "irg") ctl.band = "rgb";
+		irBtn.disabled = !avail;
+		irBtn.classList.toggle("dw-vex-dir--off", !avail);
+		irBtn.classList.toggle("dw-vex-ir--on", ctl.band === "irg" && avail);
+	};
 	// Highlight the active direction ONLY while an oblique is open (on the
 	// flat basemap no angle is "selected"); grey out any with no photo for
 	// the current date so ⊙ can't dead-end on a year it wasn't flown.
-	const markActiveDir = () => dirBtns.forEach((b) => {
-		const has = dirHasPhoto(b.dataset.dir);
-		b.classList.toggle("dw-vex-dir--on",
-			ctl.isOverlayOpen() && b.dataset.dir === ctl.dir && has);
-		b.classList.toggle("dw-vex-dir--off", !!ctl.model && !has);
-		b.disabled = !!ctl.model && !has;
-	});
+	const markActiveDir = () => {
+		dirBtns.forEach((b) => {
+			const has = dirHasPhoto(b.dataset.dir);
+			b.classList.toggle("dw-vex-dir--on",
+				ctl.isOverlayOpen() && b.dataset.dir === ctl.dir && has);
+			b.classList.toggle("dw-vex-dir--off", !!ctl.model && !has);
+			b.disabled = !!ctl.model && !has;
+		});
+		updateIrBtn();
+	};
 
 	// The oblique renders as a Leaflet image pyramid (CRS.Simple): 256px
 	// JPEG tiles from /v2/oriented/tile load progressively as you pan/zoom
@@ -495,11 +537,11 @@ export function createVexcelControl() {
 		markActiveDir();
 	};
 
-	// Show the currently-selected direction+date as an oblique frame.
+	// Show the currently-selected direction+date+band as an oblique frame.
 	const load = () => {
 		if (!ctl.model) return;
 		const cap = ctl.model.captures[ctl.capIdx];
-		const img = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
+		const img = curImage();
 		if (!img) {
 			dropTiles();
 			setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here.");
@@ -528,7 +570,7 @@ export function createVexcelControl() {
 			const ground = _vexcelBilinear(f.corners, u, v);
 			const cap = ctl.model.captures[ctl.capIdx];
 			if (!cap) return;
-			fetchVexcelFrame(ground[0], ground[1], cap.collection, ctl.dir, (fr) => {
+			fetchVexcelFrame(ground[0], ground[1], cap.collection, ctl.dir, ctl.band, (fr) => {
 				if (!fr || !fr.name || !ctl.isOverlayOpen()) return;
 				if (fr.name === f.name) return;            // same frame — nothing to do
 				loadFrame(Object.assign({ collection: cap.collection }, fr),
@@ -577,6 +619,14 @@ export function createVexcelControl() {
 		markActiveDir();
 		load();
 	}));
+	// IR toggle: swap the active band (rgb ⇄ near-infrared) and reload the
+	// current view. Only enabled where an IR band exists (SCC: nadir 2025).
+	if (irBtn) irBtn.addEventListener("click", () => {
+		if (irBtn.disabled || !irAvail()) return;
+		ctl.band = ctl.band === "irg" ? "rgb" : "irg";
+		updateIrBtn();
+		if (ctl.isOverlayOpen()) load();
+	});
 	overlay.querySelector(".dw-vex-close").addEventListener("click", () => {
 		overlay.style.display = "none";  // back to the live map
 		ctl.gen++;

@@ -155,8 +155,28 @@ await page.evaluate(() => {
 await page.waitForTimeout(3500);
 const nadirNewest = await page.evaluate(() => {
 	const top = document.querySelector('.dw-vex-ctl .dw-vex-dir[data-dir="nadir"]');
-	return { enabled: top && !top.disabled, on: top && top.classList.contains("dw-vex-dir--on") };
+	const ir = document.querySelector(".dw-vex-ir");
+	return { enabled: top && !top.disabled, on: top && top.classList.contains("dw-vex-dir--on"), irEnabled: ir && !ir.disabled };
 });
+
+// IR toggle: on nadir 2025 (which has infrared), the IR button is
+// enabled; clicking it must stream an _irg (infrared) frame.
+const irBefore = tileImages.filter((n) => /_irg$/.test(n)).length;
+await page.evaluate(() => {
+	const ir = document.querySelector(".dw-vex-ir");
+	if (ir && !ir.disabled) ir.click();
+});
+await page.waitForTimeout(4500);
+const irLoaded = tileImages.filter((n) => /_irg$/.test(n)).length > irBefore;
+const irOn = await page.evaluate(() => {
+	const ir = document.querySelector(".dw-vex-ir");
+	return ir && ir.classList.contains("dw-vex-ir--on");
+});
+console.log(`  IR toggle: enabled-on-nadir=${nadirNewest.irEnabled} loaded-infrared=${irLoaded} highlighted=${irOn}`);
+// Toggle back to rgb before scrubbing away.
+await page.evaluate(() => { const ir = document.querySelector(".dw-vex-ir"); if (ir && !ir.disabled) ir.click(); });
+await page.waitForTimeout(1500);
+
 await page.evaluate(() => {
 	const s = document.querySelector(".dw-history-slider");
 	if (s) { s.value = "0"; s.dispatchEvent(new Event("input", { bubbles: true })); s.dispatchEvent(new Event("change", { bubbles: true })); } // oldest
@@ -175,6 +195,7 @@ console.log(`  ⊙ on newest: enabled=${nadirNewest.enabled} highlighted=${nadir
 console.log(`  ⊙ on oldest: greyed=${nadirOld.nadirGreyed} fell-back-to=${nadirOld.fellBackTo} tiles=${nadirOld.tiles}`);
 const nadirOk = nadirNewest.enabled && nadirOld.nadirGreyed &&
 	/oblique/.test(nadirOld.fellBackTo || "") && nadirOld.tiles >= 2;
+const irOk = nadirNewest.irEnabled && irLoaded && irOn;
 
 const viewer = await page.evaluate(() => {
 	const el = document.querySelector(".dw-vex-ctl");
@@ -218,7 +239,7 @@ const tilesOk = tile200 >= 2 && viewer.tilesLoaded >= 2;
 const panLoadsTiles = newCoords >= 2;
 const barGating = barOnBasemap === false; // bar hidden on basemap
 const continuousPan = newFrames.length >= 1; // crossed into an adjacent frame
-const ok = queryOk && modelOk && tilesOk && panLoadsTiles && barGating && nadirOk && continuousPan;
+const ok = queryOk && modelOk && tilesOk && panLoadsTiles && barGating && nadirOk && continuousPan && irOk;
 console.log(`  date bar gated: ${barGating}  |  nadir grey+fallback: ${nadirOk}  |  continuous pan (frame switch): ${continuousPan}`);
 console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel oblique ${ok ? "is a scrollable tileset that streams chunks on pan" : "did not fully verify"}`);
 await browser.close();

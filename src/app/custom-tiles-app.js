@@ -1142,6 +1142,12 @@ export class CustomTilesApp {
 			// (e.g. ⊙ nadir was only flown some years). Non-clickable.
 			".dw-vex-dir--off { opacity: 0.35; cursor: default; background: #f3f4f6; }",
 			".dw-vex-dir--off:hover { background: #f3f4f6; color: #444; border-color: transparent; }",
+			// Near-infrared band toggle (vegetation → red). Sits under the
+			// compass rose; greyed where no IR band exists (SCC: nadir 2025).
+			".dw-vex-ir { display: block; width: 96px; margin: 6px auto 0; padding: 4px 0; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; background: #fff; color: #444; border: 1px solid #bbb; border-radius: 3px; cursor: pointer; }",
+			".dw-vex-ir:hover:not(.dw-vex-dir--off) { background: #fdecec; color: #b91c1c; border-color: #dca; }",
+			".dw-vex-ir--on { background: #dc2626; color: #fff; border-color: #dc2626; }",
+			".dw-vex-ir--on:hover { background: #dc2626 !important; color: #fff !important; }",
 			// Full-map overlay: the chosen oblique REPLACES the map view
 			// (fills the whole map area), with the compass floating above
 			// it (dw-vex-ctl has the higher z-index). Dates ride the shared

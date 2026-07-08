@@ -1116,14 +1116,30 @@ t("_vexcelParseObliques builds direction + capture model with layers", () => {
 	// directions in canonical N/E/S/W/Top order, only those present
 	deepEq(model.directions.map((d) => d.key),
 		["oblique-north", "oblique-east", "nadir"]);
-	// first image per cell wins (dup ignored), carrying its source layer
-	// (+ zeroed raster dims since the fixtures omit them)
+	// first image per cell+band wins (dup ignored); cell is { rgb: {...} }
+	// (fixtures are all rgb; raster dims zeroed since omitted)
 	deepEq(model.images["oblique-east@au-qld-sunshinecoast-2019"],
-		{ name: "img-e-2019", layer: "urban", w: 0, h: 0, corners: null });
+		{ rgb: { name: "img-e-2019", layer: "urban", w: 0, h: 0, corners: null } });
 	deepEq(model.images["oblique-north@au-nsw-widearea-2021"],
-		{ name: "img-n-2021", layer: "wide-area", w: 0, h: 0, corners: null });
+		{ rgb: { name: "img-n-2021", layer: "wide-area", w: 0, h: 0, corners: null } });
 	// captures sorted year-desc
 	deepEq(model.captures.map((c) => c.year), ["2025", "2021", "2019"]);
+});
+
+t("_vexcelBand + parse bucket rgb / irg variants per cell", () => {
+	eq(dw._vexcelBand("W_2025_..._rgb"), "rgb");
+	eq(dw._vexcelBand("W_2025_..._irg"), "irg", "infrared suffix");
+	eq(dw._vexcelBand(""), "rgb", "default");
+	const feat = (name) => ({ properties: {
+		"product-type": "nadir", collection: "au-qld-x-2025", "image-name": name,
+		"source-layer": "urban", "raster-size-width": 100, "raster-size-height": 100,
+	} });
+	const model = dw._vexcelParseObliques({ features: [
+		feat("N_a_rgb"), feat("N_a_irg"), feat("N_b_rgb"),
+	] });
+	const cell = model.images["nadir@au-qld-x-2025"];
+	eq(cell.rgb.name, "N_a_rgb", "first rgb kept");
+	eq(cell.irg.name, "N_a_irg", "irg bucketed separately");
 });
 
 t("_vexcelMaxDownsample derives the pyramid depth from raster size", () => {
@@ -1177,7 +1193,7 @@ t("_vexcelParseObliques carries raster dimensions for the pyramid", () => {
 		},
 	}] });
 	deepEq(model.images["oblique-north@au-qld-x-2025"],
-		{ name: "n1", layer: "urban", w: 10560, h: 14144, corners: null });
+		{ rgb: { name: "n1", layer: "urban", w: 10560, h: 14144, corners: null } });
 });
 
 t("_vexcelObliqueExtractUrl builds a token-scoped, layer-aware URL", () => {
