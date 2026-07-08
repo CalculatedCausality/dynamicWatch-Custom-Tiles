@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.125
+// @version      7.9.126
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -3008,7 +3008,11 @@
       lng: 0,
       atKey: "",
       model: null,
-      dir: "oblique-north",
+      // Default to the straight-down nadir (⊙) — it matches the flat
+      // basemap orientation, so entering the dated viewer feels like
+      // "the same view, but through time". Falls back to an oblique
+      // angle on dates/areas without nadir (SCC: nadir is 2025 only).
+      dir: "nadir",
       band: "rgb",
       // "rgb" | "irg" (near-infrared)
       capIdx: 0,

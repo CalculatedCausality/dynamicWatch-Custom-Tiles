@@ -84,6 +84,13 @@ const set = await page.evaluate(() => {
 });
 if (!set.ok) { console.error("Vexcel base missing"); await browser.close(); process.exit(1); }
 await page.waitForSelector(".dw-vex-ctl", { timeout: 10_000 });
+// Wait for the capture query to resolve (history bar populates) before
+// clicking directions — else ctl.model is still null and clicks report
+// "No Vexcel oblique here".
+await page.waitForFunction(() => {
+	const s = document.querySelector(".dw-history-slider");
+	return s && Number(s.max) >= 1;
+}, { timeout: 20_000 }).catch(() => {});
 await nukeModal();
 
 if (!existsSync(REPORT_DIR)) mkdirSync(REPORT_DIR, { recursive: true });

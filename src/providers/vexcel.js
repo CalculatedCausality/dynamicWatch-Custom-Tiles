@@ -357,7 +357,11 @@ export function createVexcelControl() {
 		el, overlay, _map: null,
 		lat: 0, lng: 0, atKey: "",
 		model: null,
-		dir: "oblique-north",
+		// Default to the straight-down nadir (⊙) — it matches the flat
+		// basemap orientation, so entering the dated viewer feels like
+		// "the same view, but through time". Falls back to an oblique
+		// angle on dates/areas without nadir (SCC: nadir is 2025 only).
+		dir: "nadir",
 		band: "rgb",     // "rgb" | "irg" (near-infrared)
 		capIdx: 0,       // index into model.captures (0 = newest)
 		gen: 0,
