@@ -42,12 +42,14 @@ const browser = await chromium.launch({
 });
 const context = await browser.newContext({ storageState: STATE_PATH, viewport: { width: 1400, height: 900 } });
 
-// Track per-angle extract outcomes by the image-name direction token.
-const extractLog = [];
+// Track oblique tile fetches (the chunked pyramid) with their image-name
+// so we can prove each direction pulls a DIFFERENT photo.
+const tileLog = [];
 context.on("response", (resp) => {
 	const u = resp.url();
-	if (u.includes("/v2/oriented/extract")) {
-		extractLog.push({ status: resp.status(), url: u });
+	if (u.includes("/v2/oriented/tile")) {
+		const m = u.match(/image-name=([^&]+)/);
+		tileLog.push({ status: resp.status(), name: m ? decodeURIComponent(m[1]) : "" });
 	}
 });
 
@@ -89,70 +91,57 @@ if (!existsSync(REPORT_DIR)) mkdirSync(REPORT_DIR, { recursive: true });
 const results = [];
 for (const a of ANGLES) {
 	await nukeModal();
-	// Record the current blob src so we can detect the NEW paint — each
-	// load mints a fresh object URL, so src always changes on success.
-	const prevSrc = await page.evaluate(() => {
-		const img = document.querySelector(".dw-vex-overlay .dw-vex-img");
-		return img ? img.src : "";
-	});
-	const beforeExtracts = extractLog.length;
+	const before = tileLog.length;
 	const clicked = await page.evaluate((dir) => {
 		const b = document.querySelector(`.dw-vex-ctl .dw-vex-dir[data-dir="${dir}"]`);
 		if (b) { b.click(); return true; }
 		return false;
 	}, a.dir);
 
-	// Wait for a FRESH image (different src) to finish decoding.
-	const painted = await page.waitForFunction((prev) => {
-		const img = document.querySelector(".dw-vex-overlay .dw-vex-img");
-		return img && img.style.display !== "none" && img.complete &&
-			img.naturalWidth > 0 && img.src && img.src !== prev;
-	}, prevSrc, { timeout: 60_000 }).then(() => true).catch(() => false);
+	// Wait for THIS direction's tile pyramid to render several chunks.
+	const painted = await page.waitForFunction(() => {
+		const t = document.querySelectorAll(".dw-vex-tilemap .leaflet-tile-loaded");
+		return t.length >= 4;
+	}, { timeout: 45_000 }).then(() => true).catch(() => false);
+	await page.waitForTimeout(3500); // let the visible grid fill
 
 	const info = await page.evaluate(() => {
 		const ctl = document.querySelector(".dw-vex-ctl");
 		const ov  = document.querySelector(".dw-vex-overlay");
-		const img = ov.querySelector(".dw-vex-img");
 		const msg = ov.querySelector(".dw-vex-msg");
 		const on  = ctl.querySelector(".dw-vex-dir--on");
 		return {
 			activeDir: on ? on.dataset.dir : null,
 			year: (document.querySelector(".dw-history-bar-label") || {}).textContent,
 			overlayShown: ov.style.display !== "none",
-			natW: img ? img.naturalWidth : 0,
-			natH: img ? img.naturalHeight : 0,
-			imgShown: img && img.style.display !== "none",
+			tiles: document.querySelectorAll(".dw-vex-tilemap .leaflet-tile-loaded").length,
 			msg: msg && msg.style.display !== "none" ? msg.textContent : "",
 		};
 	});
-	const newExtracts = extractLog.slice(beforeExtracts);
-	// Full-page shot: the oblique fills the whole map, compass on top.
+	const mine = tileLog.slice(before).filter((t) => t.status === 200);
+	const name = mine.length ? mine[mine.length - 1].name : "";
 	const shot = resolve(REPORT_DIR, `angle-${a.label}.png`);
 	await page.screenshot({ path: shot });
 
-	const ok = clicked && painted && info.imgShown && info.overlayShown &&
-		info.natW > 0 && info.activeDir === a.dir;
-	results.push({ ...a, ok, info, extracts: newExtracts.map((e) => e.status), shot });
+	const ok = clicked && painted && info.overlayShown && info.tiles >= 4 &&
+		info.activeDir === a.dir;
+	results.push({ ...a, ok, info, name, tiles: mine.length, shot });
 	console.log(`  ${ok ? "✓" : "✗"} ${a.label.padEnd(3)} activeDir=${info.activeDir} ` +
-		`natWxH=${info.natW}x${info.natH} year=${info.year} ` +
-		`extract=${newExtracts.map((e) => e.status).join(",") || "-"} ` +
+		`tiles=${info.tiles} year=${info.year} img=${name.slice(-40)} ` +
 		`${info.msg ? "msg=\"" + info.msg + "\"" : ""}`);
 
-	// Space the pulls — extract is a heavy, rate-limited stitch.
-	await page.waitForTimeout(20_000);
+	await page.waitForTimeout(4000);
 }
 
 console.log("\n=== per-angle results ===");
 for (const r of results) console.log(`  ${r.ok ? "PASS" : "FAIL"}  ${r.label}  → ${r.shot}`);
 const passed = results.filter((r) => r.ok).length;
 
-// Sanity that we're not showing the same frame five times: obliques
-// come as portrait (N/S: 10560x14144) vs landscape (E/W: 14144x10560),
-// and nadir is its own size — so the set of WxH signatures must span
-// more than one value.
-const sigs = new Set(results.filter((r) => r.ok).map((r) => `${r.info.natW}x${r.info.natH}`));
-console.log(`\n${passed}/${results.length} angles rendered  |  distinct image sizes: ${[...sigs].join(", ")}`);
-const distinct = sigs.size >= 2;
-if (!distinct) console.log("  ✗ all angles shared one image size — suspect a stuck frame");
+// Each direction must pull a DIFFERENT photo — the image-names must all
+// differ (proves we're not showing one frame five times).
+const names = new Set(results.filter((r) => r.ok && r.name).map((r) => r.name));
+console.log(`\n${passed}/${results.length} angles rendered as tiles  |  distinct image-names: ${names.size}`);
+const distinct = names.size >= results.filter((r) => r.ok).length && names.size >= 4;
+if (!distinct) console.log("  ✗ image-names not all distinct — suspect a stuck frame");
 await browser.close();
 process.exit(passed === results.length && distinct ? 0 : 1);

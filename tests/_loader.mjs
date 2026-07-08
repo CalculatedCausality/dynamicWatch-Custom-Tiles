@@ -41,6 +41,7 @@ const HELPERS = [
 	// Vexcel aerial token + oblique helpers
 	"_vexcelParseToken", "_vexcelTokenExp", "_vexcelTokenValid", "_vexcelTileTpl",
 	"_vexcelCollectionYear", "_vexcelParseObliques", "_vexcelObliqueExtractUrl",
+	"_vexcelObliqueTileBase", "_vexcelMaxDownsample",
 	// Layer-provider factories
 	"LayerProvider", "tileProvider", "tokenTileProvider",
 	"arcgisExportProvider", "pollingDataLayer", "oimIcon",

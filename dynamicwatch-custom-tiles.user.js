@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.119
+// @version      7.9.120
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -2816,7 +2816,12 @@
       if (!dir || !coll || !name) continue;
       const key = dir + "@" + coll;
       if (!(key in images)) {
-        images[key] = { name, layer: p["source-layer"] || p.layer || "urban" };
+        images[key] = {
+          name,
+          layer: p["source-layer"] || p.layer || "urban",
+          w: Number(p["raster-size-width"]) || 0,
+          h: Number(p["raster-size-height"]) || 0
+        };
       }
       if (!captureMeta.has(coll)) {
         const date = String(p["capture-date"] || "").slice(0, 10) || _vexcelCollectionYear(coll);
@@ -2832,6 +2837,14 @@
     if (!imageName || !_vexcelTokenValid(token)) return "";
     const wkt = `POINT(${Number(lng)} ${Number(lat)})`;
     return CFG.VEXCEL_API_BASE + "/v2/oriented/extract?wkt=" + encodeURIComponent(wkt) + "&srid=4326&layer=" + encodeURIComponent(layer || "urban") + "&image-name=" + encodeURIComponent(imageName) + "&token=" + encodeURIComponent(token);
+  }
+  function _vexcelObliqueTileBase(imageName, layer, token) {
+    if (!imageName || !_vexcelTokenValid(token)) return "";
+    return CFG.VEXCEL_API_BASE + "/v2/oriented/tile?layer=" + encodeURIComponent(layer || "urban") + "&image-name=" + encodeURIComponent(imageName) + "&token=" + encodeURIComponent(token);
+  }
+  function _vexcelMaxDownsample(w, h) {
+    const px = Math.max(Number(w) || 256, Number(h) || 256);
+    return Math.max(0, Math.ceil(Math.log2(px / 256)));
   }
   function _getStoredToken() {
     try {
@@ -2870,7 +2883,11 @@
           wkt: `POINT(${Number(lng)} ${Number(lat)})`,
           srid: "4326",
           layer: "wide-area,urban",
-          include: "collection,capture-date,product-type,image-name,source-layer"
+          // image-center-distance-asc → the first image per cell is
+          // the one whose frame is centred nearest the clicked point,
+          // so the user's spot sits near the middle of the oblique.
+          "order-by": "image-center-distance-asc",
+          include: "collection,capture-date,product-type,image-name,source-layer,raster-size-width,raster-size-height"
         }),
         headers: { "Content-Type": "application/json" }
       },
@@ -2897,7 +2914,7 @@
     const overlay = document.createElement("div");
     overlay.className = "dw-vex-overlay";
     overlay.style.display = "none";
-    overlay.innerHTML = '<button type="button" class="dw-vex-close" title="Back to map">✕ Map</button><div class="dw-vex-hint">drag to pan · scroll to zoom</div><div class="dw-vex-msg"></div><div class="dw-vex-imgwrap"><img class="dw-vex-img" alt="Vexcel oblique view" style="display:none"></div>';
+    overlay.innerHTML = '<button type="button" class="dw-vex-close" title="Back to map">✕ Map</button><div class="dw-vex-hint">drag to pan · scroll to zoom</div><div class="dw-vex-msg"></div><div class="dw-vex-tilemap"></div>';
     for (const node of [el, overlay]) {
       L.DomEvent.disableClickPropagation(node);
       L.DomEvent.disableScrollPropagation(node);
@@ -2915,7 +2932,6 @@
       capIdx: 0,
       // index into model.captures (0 = newest)
       gen: 0,
-      imgObjUrl: "",
       on(ev, fn) {
         (listeners[ev] = listeners[ev] || []).push(fn);
         return ctl;
@@ -2933,60 +2949,27 @@
         }
       }
     };
-    const imgEl = overlay.querySelector(".dw-vex-img");
-    const wrapEl = overlay.querySelector(".dw-vex-imgwrap");
+    const mapEl = overlay.querySelector(".dw-vex-tilemap");
     const msgEl = overlay.querySelector(".dw-vex-msg");
     const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
-    const revoke = () => {
-      if (ctl.imgObjUrl) {
-        try {
-          URL.revokeObjectURL(ctl.imgObjUrl);
-        } catch (_) {
-        }
-        ctl.imgObjUrl = "";
-      }
-    };
     const setMsg = (t) => {
       overlay.style.display = "";
       msgEl.textContent = t;
       msgEl.style.display = t ? "" : "none";
-      imgEl.style.display = t ? "none" : "";
     };
     const markActiveDir = () => dirBtns.forEach((b) => b.classList.toggle("dw-vex-dir--on", b.dataset.dir === ctl.dir));
-    let zoom = 1, panX = 0, panY = 0, dragging = false, sx = 0, sy = 0;
-    const applyTransform = () => {
-      imgEl.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+    ctl._imgMap = null;
+    ctl._tileLayer = null;
+    const ensureImgMap = () => {
+      if (ctl._imgMap) return ctl._imgMap;
+      ctl._imgMap = L.map(mapEl, {
+        crs: L.CRS.Simple,
+        attributionControl: false,
+        zoomControl: true,
+        minZoom: 0
+      });
+      return ctl._imgMap;
     };
-    const resetView = () => {
-      zoom = 1;
-      panX = 0;
-      panY = 0;
-      applyTransform();
-    };
-    wrapEl.addEventListener("wheel", (e) => {
-      e.preventDefault();
-      const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
-      zoom = Math.min(8, Math.max(1, zoom * factor));
-      if (zoom === 1) {
-        panX = 0;
-        panY = 0;
-      }
-      applyTransform();
-    }, { passive: false });
-    wrapEl.addEventListener("mousedown", (e) => {
-      dragging = true;
-      sx = e.clientX - panX;
-      sy = e.clientY - panY;
-    });
-    window.addEventListener("mousemove", (e) => {
-      if (!dragging) return;
-      panX = e.clientX - sx;
-      panY = e.clientY - sy;
-      applyTransform();
-    });
-    window.addEventListener("mouseup", () => {
-      dragging = false;
-    });
     const load = () => {
       if (!ctl.model) return;
       const cap = ctl.model.captures[ctl.capIdx];
@@ -2995,27 +2978,59 @@
         setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here.");
         return;
       }
-      const url = _vexcelObliqueExtractUrl(img.name, img.layer, ctl.lat, ctl.lng, _getStoredToken());
-      if (!url) {
+      const token = _getStoredToken();
+      const base = _vexcelObliqueTileBase(img.name, img.layer, token);
+      if (!base) {
         setMsg("Vexcel token expired — reselect the base to refresh it.");
         return;
       }
-      const gen = ++ctl.gen;
-      resetView();
-      setMsg("Loading " + _dirLabel(ctl.dir) + " · " + cap.date + "… (large image)");
-      gmGet(url, { responseType: "blob", timeout: 9e4 }, (err, r) => {
-        if (gen !== ctl.gen) return;
-        if (err || !r || r.status < 200 || r.status >= 300) {
-          setMsg(r && r.status === 429 ? "Vexcel is rate-limiting image pulls — wait a moment and click again." : "Couldn't load this view.");
-          return;
+      overlay.style.display = "";
+      setMsg("");
+      const w = img.w || 10560, h = img.h || 14144;
+      const TS = 256;
+      const sizes = [];
+      let s = L.point(w, h);
+      sizes.push(s);
+      while (s.x > TS || s.y > TS) {
+        s = s.divideBy(2).ceil();
+        sizes.push(s);
+      }
+      sizes.reverse();
+      const maxZ = sizes.length - 1;
+      const grids = sizes.map((p) => L.point(Math.ceil(p.x / TS), Math.ceil(p.y / TS)));
+      const map = ensureImgMap();
+      map.setMaxZoom(maxZ);
+      map.invalidateSize();
+      if (ctl._tileLayer) {
+        map.removeLayer(ctl._tileLayer);
+        ctl._tileLayer = null;
+      }
+      const TileCls = L.TileLayer.extend({
+        getTileUrl(coords) {
+          const ds = maxZ - coords.z;
+          return base + "&downsample=" + ds + "&tile-x=" + coords.x + "&tile-y=" + coords.y;
+        },
+        // Only request tiles that exist in the level's grid — kills
+        // the off-image 404 storm and keeps placement exact.
+        _isValidTile(coords) {
+          const g = grids[coords.z];
+          return !!g && coords.x >= 0 && coords.y >= 0 && coords.x < g.x && coords.y < g.y;
         }
-        revoke();
-        ctl.imgObjUrl = URL.createObjectURL(r.response);
-        imgEl.onload = () => {
-          if (gen === ctl.gen) setMsg("");
-        };
-        imgEl.src = ctl.imgObjUrl;
       });
+      ctl._tileLayer = new TileCls("", {
+        tileSize: TS,
+        minZoom: 0,
+        maxZoom: maxZ,
+        noWrap: true,
+        crossOrigin: true,
+        errorTileUrl: BLANK_TILE
+      }).addTo(map);
+      const bounds = L.latLngBounds(
+        map.unproject([0, h], maxZ),
+        map.unproject([w, 0], maxZ)
+      );
+      map.setMaxBounds(bounds.pad(0.3));
+      map.fitBounds(bounds);
     };
     let refreshTimer = null;
     const refreshCaptures = () => {
@@ -3065,7 +3080,6 @@
     overlay.querySelector(".dw-vex-close").addEventListener("click", () => {
       overlay.style.display = "none";
       ctl.gen++;
-      revoke();
     });
     ctl.getCaptureCount = () => ctl.model && ctl.model.captures.length || 0;
     ctl.getCaptureIdx = () => ctl.capIdx;
@@ -3092,7 +3106,14 @@
       ctl._map.off("moveend", scheduleRefresh);
       clearTimeout(refreshTimer);
       ctl.gen++;
-      revoke();
+      if (ctl._imgMap) {
+        try {
+          ctl._imgMap.remove();
+        } catch (_) {
+        }
+        ctl._imgMap = null;
+        ctl._tileLayer = null;
+      }
       if (el.parentNode) el.parentNode.removeChild(el);
       if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
       ctl._map = null;
@@ -7958,9 +7979,9 @@
       }
       const esriRef = this.layers[CFG.LAYER_ESRI_REF];
       if (esriRef) {
-        const isWayback = map.hasLayer(this.layers[CFG.LAYER_WAYBACK]);
-        if (isWayback && !map.hasLayer(esriRef)) map.addLayer(esriRef);
-        else if (!isWayback && map.hasLayer(esriRef)) map.removeLayer(esriRef);
+        const wantEsri = map.hasLayer(this.layers[CFG.LAYER_WAYBACK]) || map.hasLayer(this.layers[CFG.LAYER_VEXCEL]);
+        if (wantEsri && !map.hasLayer(esriRef)) map.addLayer(esriRef);
+        else if (!wantEsri && map.hasLayer(esriRef)) map.removeLayer(esriRef);
       }
     }
     _syncHistCompass(map) {
@@ -8595,14 +8616,15 @@
         // it (dw-vex-ctl has the higher z-index). Dates ride the shared
         // history bar. The image pans (drag) + zooms (wheel) since the
         // full frame is large and can't be cropped server-side.
-        ".dw-vex-overlay { position: absolute; inset: 0; z-index: 1150; background: #0b0b0d; display: flex; align-items: center; justify-content: center; overflow: hidden; }",
-        ".dw-vex-imgwrap { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; cursor: grab; }",
-        ".dw-vex-imgwrap:active { cursor: grabbing; }",
-        ".dw-vex-img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; transform-origin: center center; will-change: transform; user-select: none; -webkit-user-drag: none; }",
-        ".dw-vex-close { position: absolute; top: 12px; left: 12px; z-index: 3; background: rgba(255,255,255,0.95); border: 1px solid #bbb; color: #333; font-size: 12px; font-weight: 600; font-family: sans-serif; line-height: 1; padding: 7px 11px; border-radius: 5px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); cursor: pointer; }",
+        ".dw-vex-overlay { position: absolute; inset: 0; z-index: 1150; background: #0b0b0d; }",
+        // The oblique is a Leaflet image-pyramid (CRS.Simple) that
+        // tiles /v2/oriented/tile — pans/zooms with chunked loading.
+        ".dw-vex-tilemap { position: absolute; inset: 0; background: #0b0b0d; }",
+        ".dw-vex-tilemap .leaflet-control-zoom { margin: 12px; }",
+        ".dw-vex-close { position: absolute; top: 12px; left: 12px; z-index: 1000; background: rgba(255,255,255,0.95); border: 1px solid #bbb; color: #333; font-size: 12px; font-weight: 600; font-family: sans-serif; line-height: 1; padding: 7px 11px; border-radius: 5px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); cursor: pointer; }",
         ".dw-vex-close:hover { background: #fff; color: #000; }",
-        ".dw-vex-hint { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 3; background: rgba(0,0,0,0.55); color: #e5e7eb; font-size: 11px; font-family: sans-serif; padding: 4px 10px; border-radius: 999px; pointer-events: none; }",
-        ".dw-vex-msg { position: absolute; z-index: 2; padding: 20px 16px; font-size: 13px; color: #d1d5db; text-align: center; }",
+        ".dw-vex-hint { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 1000; background: rgba(0,0,0,0.55); color: #e5e7eb; font-size: 11px; font-family: sans-serif; padding: 4px 10px; border-radius: 999px; pointer-events: none; }",
+        ".dw-vex-msg { position: absolute; inset: 0; z-index: 999; display: flex; align-items: center; justify-content: center; padding: 20px 16px; font-size: 13px; color: #d1d5db; text-align: center; }",
         ".dw-scc-notif-badge { color: #dc2626; font-weight: 600; }",
         ".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
         // Deep-detail section inside the application popup (assessment
@@ -8757,6 +8779,8 @@
         _vexcelCollectionYear,
         _vexcelParseObliques,
         _vexcelObliqueExtractUrl,
+        _vexcelObliqueTileBase,
+        _vexcelMaxDownsample,
         LayerProvider,
         tileProvider,
         tokenTileProvider,

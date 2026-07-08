@@ -34,13 +34,12 @@ const browser = await chromium.launch({
 });
 const context = await browser.newContext({ storageState: STATE_PATH, viewport: { width: 1400, height: 900 } });
 
-let queryOk = false, extractOk = false, extract429 = false;
+let queryOk = false, tile200 = 0, tileOther = 0;
 context.on("response", (resp) => {
 	const u = resp.url();
 	if (u.includes("/v2/oriented/query")) queryOk = queryOk || resp.status() === 200;
-	if (u.includes("/v2/oriented/extract")) {
-		if (resp.status() === 200) extractOk = true;
-		if (resp.status() === 429) extract429 = true;
+	if (u.includes("/v2/oriented/tile")) {
+		if (resp.status() === 200) tile200++; else tileOther++;
 	}
 });
 
@@ -93,11 +92,13 @@ await page.evaluate(() => {
 	if (east) east.click();
 });
 
-// Wait for the image to paint. ~25 MB JPEG, so decode is slow.
+// Wait for the tile pyramid to render chunks (progressive load), then
+// give it a moment to fill the visible grid.
 await page.waitForFunction(() => {
-	const img = document.querySelector(".dw-vex-overlay .dw-vex-img");
-	return img && img.style.display !== "none" && img.complete && img.naturalWidth > 0;
-}, { timeout: 45_000 }).catch(() => {});
+	const t = document.querySelectorAll(".dw-vex-tilemap .leaflet-tile-loaded");
+	return t.length >= 2;
+}, { timeout: 30_000 }).catch(() => {});
+await page.waitForTimeout(6000);
 
 const viewer = await page.evaluate(() => {
 	const el = document.querySelector(".dw-vex-ctl");
@@ -106,7 +107,7 @@ const viewer = await page.evaluate(() => {
 	const slider = document.querySelector(".dw-history-slider");
 	const captureCount = slider ? Number(slider.max) + 1 : 0;
 	const ov = document.querySelector(".dw-vex-overlay");
-	const img = ov && ov.querySelector(".dw-vex-img");
+	const tiles = document.querySelectorAll(".dw-vex-tilemap .leaflet-tile-loaded").length;
 	const msg = ov && ov.querySelector(".dw-vex-msg");
 	return {
 		present: !!el,
@@ -114,7 +115,8 @@ const viewer = await page.evaluate(() => {
 		dates: Array.from({ length: captureCount }, (_, i) => String(i)),
 		sliderEnabled: slider && !slider.disabled,
 		year: (document.querySelector(".dw-history-bar-label") || {}).textContent,
-		imgShown: img && img.style.display !== "none" && !!img.src,
+		tilesLoaded: tiles,
+		imgShown: tiles > 0,
 		msg: msg && msg.style.display !== "none" ? msg.textContent : "",
 	};
 });
@@ -126,18 +128,17 @@ await page.screenshot({ path: shot });
 
 console.log("\n=== Vexcel imagery control verification ===");
 console.log(`  oriented/query 200:  ${queryOk}`);
-console.log(`  oriented/extract 200: ${extractOk}  (429 rate-limited: ${extract429})`);
+console.log(`  oriented/tile 200: ${tile200}  (other: ${tileOther})`);
 console.log(`  control directions: ${JSON.stringify(viewer.dirs)}`);
 console.log(`  capture slider steps: ${viewer.dates.length} (enabled: ${viewer.sliderEnabled}, year: ${viewer.year})`);
-console.log(`  image painted: ${viewer.imgShown}  msg: "${viewer.msg}"`);
+console.log(`  tiles rendered: ${viewer.tilesLoaded}  msg: "${viewer.msg}"`);
 console.log(`  screenshot: ${shot}`);
 
-// PASS if the docked control appeared with N/E/S/W + a multi-year date
-// slider, and the extract path fired (image painted, or the documented
-// rate-limit — both prove correct wiring; 429 is a server throttle).
+// PASS if the compass + shared history bar populated and the oblique
+// rendered as a CHUNKED tile pyramid (multiple /v2/oriented/tile 200s).
 const modelOk = viewer.present && viewer.dirs.filter((d) => /oblique|nadir/.test(d)).length >= 4 && viewer.dates.length >= 2;
-const imageOk = viewer.imgShown || extractOk || extract429;
-const ok = queryOk && modelOk && imageOk;
-console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel control ${ok ? "works (docked N/E/S/W + date slider)" : "did not fully verify"}`);
+const tilesOk = tile200 >= 2 && viewer.tilesLoaded >= 2;
+const ok = queryOk && modelOk && tilesOk;
+console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel oblique ${ok ? "renders as chunked tiles (pan/zoom)" : "did not fully verify"}`);
 await browser.close();
 process.exit(ok ? 0 : 1);

@@ -1,7 +1,6 @@
 import { BLANK_TILE, CFG } from "../config.js";
 import { LayerProvider } from "../layers/provider-factories.js";
-import { gmGet, gmJsonGet } from "../utils/http.js";
-import { _escHtml } from "../utils/html.js";
+import { gmJsonGet } from "../utils/http.js";
 
 /* -- Vexcel high-res aerial (ANZ viewer WMTS) ---------------------------
  * api.vexcelgroup.com serves the "urban" ortho mosaic (7.5 cm class,
@@ -53,11 +52,12 @@ export function _vexcelTileTpl(token) {
  * The ortho WMTS is locked to the current-best mosaic on this account
  * (collection/date params ignored; layer=<collection> → 403). But the
  * OBLIQUE photography is per-capture and reachable token-only:
- *   POST /v2/oriented/query  → every (direction × capture) at a point
- *   GET  /v2/oriented/extract?image-name=… → the stitched oblique JPEG
+ *   POST /v2/oriented/query → every (direction × capture) at a point
+ *   GET  /v2/oriented/tile?downsample=&tile-x=&tile-y=&image-name=…
+ *        → 256px JPEG tiles (CORS *), so the oblique loads progressively
+ *        in chunks and pans/zooms as a Leaflet image pyramid.
  * So directional N/E/S/W views AND date selection live here, mirroring
- * the Vexcel viewer's oblique panel. extract is heavy (~25 MB) and
- * rate-limited, so this is an on-demand inspector, not a tile layer.
+ * the Vexcel viewer's oblique panel.
  */
 
 // product-type → compass label. Vexcel names an oblique by the side it
@@ -94,7 +94,12 @@ export function _vexcelParseObliques(data) {
 		if (!dir || !coll || !name) continue;
 		const key = dir + "@" + coll;
 		if (!(key in images)) {
-			images[key] = { name, layer: p["source-layer"] || p.layer || "urban" };
+			images[key] = {
+				name,
+				layer: p["source-layer"] || p.layer || "urban",
+				w: Number(p["raster-size-width"]) || 0,
+				h: Number(p["raster-size-height"]) || 0,
+			};
 		}
 		if (!captureMeta.has(coll)) {
 			// capture-date like "2019-11-29T04:23:00" → "2019-11-29".
@@ -121,6 +126,27 @@ export function _vexcelObliqueExtractUrl(imageName, layer, lat, lng, token) {
 		"&image-name=" + encodeURIComponent(imageName) +
 		"&token=" + encodeURIComponent(token)
 	);
+}
+
+// Tile-pyramid base for an oblique — /v2/oriented/tile serves 256px
+// JPEG tiles token-only (CORS *), so the oblique loads progressively in
+// chunks (pan/zoom) instead of one giant image. Leaflet fills in
+// downsample/tile-x/tile-y per request via a custom getTileUrl.
+export function _vexcelObliqueTileBase(imageName, layer, token) {
+	if (!imageName || !_vexcelTokenValid(token)) return "";
+	return (
+		CFG.VEXCEL_API_BASE + "/v2/oriented/tile?layer=" +
+		encodeURIComponent(layer || "urban") +
+		"&image-name=" + encodeURIComponent(imageName) +
+		"&token=" + encodeURIComponent(token)
+	);
+}
+
+// Deepest downsample level (whole image ≈ one 256px tile). Leaflet zoom
+// z maps to downsample = maxDownsample - z.
+export function _vexcelMaxDownsample(w, h) {
+	const px = Math.max(Number(w) || 256, Number(h) || 256);
+	return Math.max(0, Math.ceil(Math.log2(px / 256)));
 }
 
 function _getStoredToken() {
@@ -162,7 +188,12 @@ export function fetchVexcelObliques(lat, lng, cb) {
 				wkt: `POINT(${Number(lng)} ${Number(lat)})`,
 				srid: "4326",
 				layer: "wide-area,urban",
-				include: "collection,capture-date,product-type,image-name,source-layer",
+				// image-center-distance-asc → the first image per cell is
+				// the one whose frame is centred nearest the clicked point,
+				// so the user's spot sits near the middle of the oblique.
+				"order-by": "image-center-distance-asc",
+				include: "collection,capture-date,product-type,image-name," +
+					"source-layer,raster-size-width,raster-size-height",
 			}),
 			headers: { "Content-Type": "application/json" },
 		},
@@ -219,7 +250,7 @@ export function createVexcelControl() {
 		'<button type="button" class="dw-vex-close" title="Back to map">✕ Map</button>' +
 		'<div class="dw-vex-hint">drag to pan · scroll to zoom</div>' +
 		'<div class="dw-vex-msg"></div>' +
-		'<div class="dw-vex-imgwrap"><img class="dw-vex-img" alt="Vexcel oblique view" style="display:none"></div>';
+		'<div class="dw-vex-tilemap"></div>';
 	for (const node of [el, overlay]) {
 		L.DomEvent.disableClickPropagation(node);
 		L.DomEvent.disableScrollPropagation(node);
@@ -235,74 +266,96 @@ export function createVexcelControl() {
 		dir: "oblique-north",
 		capIdx: 0,       // index into model.captures (0 = newest)
 		gen: 0,
-		imgObjUrl: "",
 		on(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); return ctl; },
 		off(ev, fn) { listeners[ev] = (listeners[ev] || []).filter((f) => f !== fn); return ctl; },
 		_fire(ev) { for (const f of listeners[ev] || []) { try { f(); } catch (_) {} } },
 	};
-	const imgEl   = overlay.querySelector(".dw-vex-img");
-	const wrapEl  = overlay.querySelector(".dw-vex-imgwrap");
+	const mapEl   = overlay.querySelector(".dw-vex-tilemap");
 	const msgEl   = overlay.querySelector(".dw-vex-msg");
 	const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
 
-	const revoke = () => {
-		if (ctl.imgObjUrl) { try { URL.revokeObjectURL(ctl.imgObjUrl); } catch (_) {} ctl.imgObjUrl = ""; }
-	};
 	const setMsg = (t) => {
 		overlay.style.display = "";
 		msgEl.textContent = t;
 		msgEl.style.display = t ? "" : "none";
-		imgEl.style.display = t ? "none" : "";
 	};
 	const markActiveDir = () => dirBtns.forEach((b) =>
 		b.classList.toggle("dw-vex-dir--on", b.dataset.dir === ctl.dir));
 
-	/* -- image pan/zoom (the full frame is huge and un-croppable server
-	 * side, so let the user navigate to their spot) ------------------- */
-	let zoom = 1, panX = 0, panY = 0, dragging = false, sx = 0, sy = 0;
-	const applyTransform = () => {
-		imgEl.style.transform =
-			`translate(${panX}px, ${panY}px) scale(${zoom})`;
+	// The oblique renders as a Leaflet image pyramid (CRS.Simple): 256px
+	// JPEG tiles from /v2/oriented/tile load progressively as you pan/zoom
+	// — no more one giant download. Created lazily (needs a sized div).
+	ctl._imgMap = null;
+	ctl._tileLayer = null;
+	const ensureImgMap = () => {
+		if (ctl._imgMap) return ctl._imgMap;
+		ctl._imgMap = L.map(mapEl, {
+			crs: L.CRS.Simple,
+			attributionControl: false,
+			zoomControl: true,
+			minZoom: 0,
+		});
+		return ctl._imgMap;
 	};
-	const resetView = () => { zoom = 1; panX = 0; panY = 0; applyTransform(); };
-	wrapEl.addEventListener("wheel", (e) => {
-		e.preventDefault();
-		const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
-		zoom = Math.min(8, Math.max(1, zoom * factor));
-		if (zoom === 1) { panX = 0; panY = 0; }
-		applyTransform();
-	}, { passive: false });
-	wrapEl.addEventListener("mousedown", (e) => { dragging = true; sx = e.clientX - panX; sy = e.clientY - panY; });
-	window.addEventListener("mousemove", (e) => {
-		if (!dragging) return;
-		panX = e.clientX - sx; panY = e.clientY - sy; applyTransform();
-	});
-	window.addEventListener("mouseup", () => { dragging = false; });
 
-	// Pull the currently-selected oblique into the overlay.
+	// Show the currently-selected oblique as a fresh tile pyramid.
 	const load = () => {
 		if (!ctl.model) return;
 		const cap = ctl.model.captures[ctl.capIdx];
 		const img = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
 		if (!img) { setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here."); return; }
-		const url = _vexcelObliqueExtractUrl(img.name, img.layer, ctl.lat, ctl.lng, _getStoredToken());
-		if (!url) { setMsg("Vexcel token expired — reselect the base to refresh it."); return; }
-		const gen = ++ctl.gen;
-		resetView();
-		setMsg("Loading " + _dirLabel(ctl.dir) + " · " + cap.date + "… (large image)");
-		gmGet(url, { responseType: "blob", timeout: 90000 }, (err, r) => {
-			if (gen !== ctl.gen) return;
-			if (err || !r || r.status < 200 || r.status >= 300) {
-				setMsg(r && r.status === 429
-					? "Vexcel is rate-limiting image pulls — wait a moment and click again."
-					: "Couldn't load this view.");
-				return;
-			}
-			revoke();
-			ctl.imgObjUrl = URL.createObjectURL(r.response);
-			imgEl.onload = () => { if (gen === ctl.gen) setMsg(""); };
-			imgEl.src = ctl.imgObjUrl;
+		const token = _getStoredToken();
+		const base = _vexcelObliqueTileBase(img.name, img.layer, token);
+		if (!base) { setMsg("Vexcel token expired — reselect the base to refresh it."); return; }
+
+		overlay.style.display = "";
+		setMsg(""); // hide the message; the tile map fills the overlay
+		const w = img.w || 10560, h = img.h || 14144;
+
+		// Zoomify-style pyramid: level 0 = coarsest (~1 tile), maxZoom =
+		// native. gridSize[z] bounds the valid tile grid per level so we
+		// don't request off-image tiles, and downsample = maxZoom - z.
+		const TS = 256;
+		const sizes = [];
+		let s = L.point(w, h);
+		sizes.push(s);
+		while (s.x > TS || s.y > TS) { s = s.divideBy(2).ceil(); sizes.push(s); }
+		sizes.reverse();                       // index 0 = smallest
+		const maxZ = sizes.length - 1;
+		const grids = sizes.map((p) =>
+			L.point(Math.ceil(p.x / TS), Math.ceil(p.y / TS)));
+
+		const map = ensureImgMap();
+		map.setMaxZoom(maxZ);
+		map.invalidateSize();
+
+		if (ctl._tileLayer) { map.removeLayer(ctl._tileLayer); ctl._tileLayer = null; }
+		const TileCls = L.TileLayer.extend({
+			getTileUrl(coords) {
+				const ds = maxZ - coords.z; // 0 = native, maxZ = coarsest
+				return base + "&downsample=" + ds +
+					"&tile-x=" + coords.x + "&tile-y=" + coords.y;
+			},
+			// Only request tiles that exist in the level's grid — kills
+			// the off-image 404 storm and keeps placement exact.
+			_isValidTile(coords) {
+				const g = grids[coords.z];
+				return !!g && coords.x >= 0 && coords.y >= 0 &&
+					coords.x < g.x && coords.y < g.y;
+			},
 		});
+		ctl._tileLayer = new TileCls("", {
+			tileSize: TS, minZoom: 0, maxZoom: maxZ,
+			noWrap: true, crossOrigin: true, errorTileUrl: BLANK_TILE,
+		}).addTo(map);
+
+		// Image occupies pixels [0..w]×[0..h] at native zoom; CRS.Simple
+		// flips y, so SW = (0,h), NE = (w,0). Fit the whole frame; the
+		// user's spot sits near centre (image-center-distance-asc).
+		const bounds = L.latLngBounds(
+			map.unproject([0, h], maxZ), map.unproject([w, 0], maxZ));
+		map.setMaxBounds(bounds.pad(0.3));
+		map.fitBounds(bounds);
 	};
 
 	// Query captures at the current map centre and refresh the date bar.
@@ -347,7 +400,6 @@ export function createVexcelControl() {
 	overlay.querySelector(".dw-vex-close").addEventListener("click", () => {
 		overlay.style.display = "none";  // back to the live map
 		ctl.gen++;
-		revoke();
 	});
 
 	// -- history-bar adapter (dates) --------------------------------
@@ -377,7 +429,7 @@ export function createVexcelControl() {
 		ctl._map.off("moveend", scheduleRefresh);
 		clearTimeout(refreshTimer);
 		ctl.gen++;
-		revoke();
+		if (ctl._imgMap) { try { ctl._imgMap.remove(); } catch (_) {} ctl._imgMap = null; ctl._tileLayer = null; }
 		if (el.parentNode) el.parentNode.removeChild(el);
 		if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
 		ctl._map = null;

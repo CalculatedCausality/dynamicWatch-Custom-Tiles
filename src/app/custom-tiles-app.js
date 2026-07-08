@@ -399,13 +399,18 @@ export class CustomTilesApp {
 				if (map.hasLayer(lyr)) map.removeLayer(lyr);
 			}
 		}
-		// Wayback serves Esri World Imagery — pair it with Esri's own
-		// reference tiles (roads + labels), mirroring the QLD pairing.
+		// Esri's reference tiles (roads + street labels) pair with any
+		// unlabelled aerial base: Wayback (Esri World Imagery) AND Vexcel
+		// (which has no raster label layer — its /v2/osm labels are
+		// vector-only). Same raster overlay the QLD bases get, so Vexcel
+		// gets street/suburb labels in both 2D and 3D.
 		const esriRef = this.layers[CFG.LAYER_ESRI_REF];
 		if (esriRef) {
-			const isWayback = map.hasLayer(this.layers[CFG.LAYER_WAYBACK]);
-			if (isWayback && !map.hasLayer(esriRef)) map.addLayer(esriRef);
-			else if (!isWayback && map.hasLayer(esriRef)) map.removeLayer(esriRef);
+			const wantEsri =
+				map.hasLayer(this.layers[CFG.LAYER_WAYBACK]) ||
+				map.hasLayer(this.layers[CFG.LAYER_VEXCEL]);
+			if (wantEsri && !map.hasLayer(esriRef)) map.addLayer(esriRef);
+			else if (!wantEsri && map.hasLayer(esriRef)) map.removeLayer(esriRef);
 		}
 	}
 
@@ -1131,14 +1136,15 @@ export class CustomTilesApp {
 			// it (dw-vex-ctl has the higher z-index). Dates ride the shared
 			// history bar. The image pans (drag) + zooms (wheel) since the
 			// full frame is large and can't be cropped server-side.
-			".dw-vex-overlay { position: absolute; inset: 0; z-index: 1150; background: #0b0b0d; display: flex; align-items: center; justify-content: center; overflow: hidden; }",
-			".dw-vex-imgwrap { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; cursor: grab; }",
-			".dw-vex-imgwrap:active { cursor: grabbing; }",
-			".dw-vex-img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; transform-origin: center center; will-change: transform; user-select: none; -webkit-user-drag: none; }",
-			".dw-vex-close { position: absolute; top: 12px; left: 12px; z-index: 3; background: rgba(255,255,255,0.95); border: 1px solid #bbb; color: #333; font-size: 12px; font-weight: 600; font-family: sans-serif; line-height: 1; padding: 7px 11px; border-radius: 5px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); cursor: pointer; }",
+			".dw-vex-overlay { position: absolute; inset: 0; z-index: 1150; background: #0b0b0d; }",
+			// The oblique is a Leaflet image-pyramid (CRS.Simple) that
+			// tiles /v2/oriented/tile — pans/zooms with chunked loading.
+			".dw-vex-tilemap { position: absolute; inset: 0; background: #0b0b0d; }",
+			".dw-vex-tilemap .leaflet-control-zoom { margin: 12px; }",
+			".dw-vex-close { position: absolute; top: 12px; left: 12px; z-index: 1000; background: rgba(255,255,255,0.95); border: 1px solid #bbb; color: #333; font-size: 12px; font-weight: 600; font-family: sans-serif; line-height: 1; padding: 7px 11px; border-radius: 5px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); cursor: pointer; }",
 			".dw-vex-close:hover { background: #fff; color: #000; }",
-			".dw-vex-hint { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 3; background: rgba(0,0,0,0.55); color: #e5e7eb; font-size: 11px; font-family: sans-serif; padding: 4px 10px; border-radius: 999px; pointer-events: none; }",
-			".dw-vex-msg { position: absolute; z-index: 2; padding: 20px 16px; font-size: 13px; color: #d1d5db; text-align: center; }",
+			".dw-vex-hint { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 1000; background: rgba(0,0,0,0.55); color: #e5e7eb; font-size: 11px; font-family: sans-serif; padding: 4px 10px; border-radius: 999px; pointer-events: none; }",
+			".dw-vex-msg { position: absolute; inset: 0; z-index: 999; display: flex; align-items: center; justify-content: center; padding: 20px 16px; font-size: 13px; color: #d1d5db; text-align: center; }",
 			".dw-scc-notif-badge { color: #dc2626; font-weight: 600; }",
 			".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
 			// Deep-detail section inside the application popup (assessment

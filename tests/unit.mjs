@@ -1117,12 +1117,42 @@ t("_vexcelParseObliques builds direction + capture model with layers", () => {
 	deepEq(model.directions.map((d) => d.key),
 		["oblique-north", "oblique-east", "nadir"]);
 	// first image per cell wins (dup ignored), carrying its source layer
+	// (+ zeroed raster dims since the fixtures omit them)
 	deepEq(model.images["oblique-east@au-qld-sunshinecoast-2019"],
-		{ name: "img-e-2019", layer: "urban" });
+		{ name: "img-e-2019", layer: "urban", w: 0, h: 0 });
 	deepEq(model.images["oblique-north@au-nsw-widearea-2021"],
-		{ name: "img-n-2021", layer: "wide-area" });
+		{ name: "img-n-2021", layer: "wide-area", w: 0, h: 0 });
 	// captures sorted year-desc
 	deepEq(model.captures.map((c) => c.year), ["2025", "2021", "2019"]);
+});
+
+t("_vexcelMaxDownsample derives the pyramid depth from raster size", () => {
+	eq(dw._vexcelMaxDownsample(256, 256), 0, "single tile → depth 0");
+	eq(dw._vexcelMaxDownsample(10560, 14144), 6, "2025 oblique → 0-6");
+	eq(dw._vexcelMaxDownsample(7700, 10300), 6, "2019 oblique");
+	eq(dw._vexcelMaxDownsample(0, 0), 0, "degenerate safe");
+});
+
+t("_vexcelObliqueTileBase builds a token-scoped tile base", () => {
+	const jwt = fakeJwt(Math.floor(Date.now() / 1000) + 3600);
+	const b = dw._vexcelObliqueTileBase("img~n", "urban", jwt);
+	assert(b.startsWith("https://api.vexcelgroup.com/v2/oriented/tile?"), "endpoint");
+	assert(b.includes("image-name=img~n"), "image name");
+	assert(b.includes("layer=urban"), "layer");
+	assert(!/downsample|tile-x|tile-y/.test(b), "per-tile coords added by Leaflet, not here");
+	eq(dw._vexcelObliqueTileBase("img", "urban", "expired"), "", "invalid token → empty");
+});
+
+t("_vexcelParseObliques carries raster dimensions for the pyramid", () => {
+	const model = dw._vexcelParseObliques({ features: [{
+		properties: {
+			"product-type": "oblique-north", collection: "au-qld-x-2025",
+			"image-name": "n1", "source-layer": "urban",
+			"raster-size-width": 10560, "raster-size-height": 14144,
+		},
+	}] });
+	deepEq(model.images["oblique-north@au-qld-x-2025"],
+		{ name: "n1", layer: "urban", w: 10560, h: 14144 });
 });
 
 t("_vexcelObliqueExtractUrl builds a token-scoped, layer-aware URL", () => {

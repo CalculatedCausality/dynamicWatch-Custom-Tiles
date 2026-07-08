@@ -21,6 +21,8 @@ import { oimIcon } from './providers/openinframap.js';
 import {
 	_vexcelCollectionYear,
 	_vexcelObliqueExtractUrl,
+	_vexcelObliqueTileBase,
+	_vexcelMaxDownsample,
 	_vexcelParseObliques,
 	_vexcelParseToken,
 	_vexcelTileTpl,
@@ -111,6 +113,7 @@ export function bootUserscript() {
 			_sccFeatureKey,
 			_vexcelParseToken, _vexcelTokenExp, _vexcelTokenValid, _vexcelTileTpl,
 			_vexcelCollectionYear, _vexcelParseObliques, _vexcelObliqueExtractUrl,
+			_vexcelObliqueTileBase, _vexcelMaxDownsample,
 			LayerProvider, tileProvider, tokenTileProvider,
 			arcgisExportProvider, pollingDataLayer, oimIcon,
 		};
