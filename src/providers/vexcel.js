@@ -274,13 +274,40 @@ export function createVexcelControl() {
 	const msgEl   = overlay.querySelector(".dw-vex-msg");
 	const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
 
+	// setMsg opens the overlay; fire "overlaytoggle" on the closed→open
+	// transition so the app can show the date bar (which only makes sense
+	// while an oblique is up — the flat basemap is date-locked).
 	const setMsg = (t) => {
+		const wasClosed = overlay.style.display === "none";
 		overlay.style.display = "";
 		msgEl.textContent = t;
 		msgEl.style.display = t ? "" : "none";
+		if (wasClosed) ctl._fire("overlaytoggle");
 	};
-	const markActiveDir = () => dirBtns.forEach((b) =>
-		b.classList.toggle("dw-vex-dir--on", b.dataset.dir === ctl.dir));
+	ctl.isOverlayOpen = () => overlay.style.display !== "none";
+
+	// Which directions actually have a photo at the current capture date.
+	// N/E/S/W exist every flown year; nadir (⊙) only some (SCC: 2025), so
+	// ⊙ is disabled on years without it rather than dead-ending in a "no
+	// photo" message.
+	const dirHasPhoto = (dir) => {
+		const cap = ctl.model && ctl.model.captures[ctl.capIdx];
+		return !!(cap && ctl.model.images[dir + "@" + cap.collection]);
+	};
+	const availDirs = () => {
+		if (!ctl.model) return [];
+		return ctl.model.directions.filter((d) => dirHasPhoto(d.key));
+	};
+	// Highlight the active direction ONLY while an oblique is open (on the
+	// flat basemap no angle is "selected"); grey out any with no photo for
+	// the current date so ⊙ can't dead-end on a year it wasn't flown.
+	const markActiveDir = () => dirBtns.forEach((b) => {
+		const has = dirHasPhoto(b.dataset.dir);
+		b.classList.toggle("dw-vex-dir--on",
+			ctl.isOverlayOpen() && b.dataset.dir === ctl.dir && has);
+		b.classList.toggle("dw-vex-dir--off", !!ctl.model && !has);
+		b.disabled = !!ctl.model && !has;
+	});
 
 	// The oblique renders as a Leaflet image pyramid (CRS.Simple): 256px
 	// JPEG tiles from /v2/oriented/tile load progressively as you pan/zoom
@@ -321,8 +348,7 @@ export function createVexcelControl() {
 		const base = _vexcelObliqueTileBase(img.name, img.layer, token);
 		if (!base) { setMsg("Vexcel token expired — reselect the base to refresh it."); return; }
 
-		overlay.style.display = "";
-		setMsg(""); // hide the message; the tile map fills the overlay
+		setMsg(""); // opens the overlay (fires overlaytoggle) + hides msg
 		const w = img.w || 10560, h = img.h || 14144;
 
 		// Zoomify-style pyramid: level 0 = coarsest (~1 tile), maxZoom =
@@ -376,6 +402,7 @@ export function createVexcelControl() {
 		const fitZ = map.getBoundsZoom(bounds, false);
 		const initZ = Math.min(maxZ, Math.max(fitZ, maxZ - 1));
 		map.setView(bounds.getCenter(), initZ, { animate: false });
+		markActiveDir(); // overlay is now open → highlight the active angle
 	};
 
 	// Query captures at the current map centre and refresh the date bar.
@@ -411,15 +438,18 @@ export function createVexcelControl() {
 	};
 
 	dirBtns.forEach((b) => b.addEventListener("click", () => {
-		ctl.dir = b.dataset.dir;
-		markActiveDir();
+		if (b.disabled) return; // greyed — no photo for this date
 		if (!_vexcelTokenValid(_getStoredToken())) { setMsg("Paste a Vexcel token (reselect the base) to load imagery."); return; }
 		if (!ctl.model) { setMsg("No Vexcel oblique here — recentre over a flown area."); return; }
+		ctl.dir = b.dataset.dir;
+		markActiveDir();
 		load();
 	}));
 	overlay.querySelector(".dw-vex-close").addEventListener("click", () => {
 		overlay.style.display = "none";  // back to the live map
 		ctl.gen++;
+		markActiveDir();            // clear the highlight (no oblique open)
+		ctl._fire("overlaytoggle"); // hide the date bar with the oblique
 	});
 
 	// -- history-bar adapter (dates) --------------------------------
@@ -431,7 +461,16 @@ export function createVexcelControl() {
 	};
 	ctl.setCapture = (i) => {
 		ctl.capIdx = i;
-		if (overlay.style.display !== "none" && ctl.model) load();
+		if (!ctl.model) return;
+		// The chosen date may not have the current direction (e.g. ⊙
+		// nadir on a pre-2025 year) — fall back to an available angle so
+		// scrubbing always shows imagery rather than a dead "no photo".
+		if (!dirHasPhoto(ctl.dir)) {
+			const avail = availDirs();
+			if (avail.length) ctl.dir = avail[0].key;
+		}
+		markActiveDir();
+		if (overlay.style.display !== "none") load();
 	};
 
 	ctl.addTo = (m) => {

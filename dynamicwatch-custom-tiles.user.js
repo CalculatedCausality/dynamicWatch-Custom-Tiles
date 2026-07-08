@@ -2953,11 +2953,30 @@
     const msgEl = overlay.querySelector(".dw-vex-msg");
     const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
     const setMsg = (t) => {
+      const wasClosed = overlay.style.display === "none";
       overlay.style.display = "";
       msgEl.textContent = t;
       msgEl.style.display = t ? "" : "none";
+      if (wasClosed) ctl._fire("overlaytoggle");
     };
-    const markActiveDir = () => dirBtns.forEach((b) => b.classList.toggle("dw-vex-dir--on", b.dataset.dir === ctl.dir));
+    ctl.isOverlayOpen = () => overlay.style.display !== "none";
+    const dirHasPhoto = (dir) => {
+      const cap = ctl.model && ctl.model.captures[ctl.capIdx];
+      return !!(cap && ctl.model.images[dir + "@" + cap.collection]);
+    };
+    const availDirs = () => {
+      if (!ctl.model) return [];
+      return ctl.model.directions.filter((d) => dirHasPhoto(d.key));
+    };
+    const markActiveDir = () => dirBtns.forEach((b) => {
+      const has = dirHasPhoto(b.dataset.dir);
+      b.classList.toggle(
+        "dw-vex-dir--on",
+        ctl.isOverlayOpen() && b.dataset.dir === ctl.dir && has
+      );
+      b.classList.toggle("dw-vex-dir--off", !!ctl.model && !has);
+      b.disabled = !!ctl.model && !has;
+    });
     ctl._imgMap = null;
     ctl._tileLayer = null;
     const ensureImgMap = () => {
@@ -2991,7 +3010,6 @@
         setMsg("Vexcel token expired — reselect the base to refresh it.");
         return;
       }
-      overlay.style.display = "";
       setMsg("");
       const w = img.w || 10560, h = img.h || 14144;
       const TS = 256;
@@ -3038,6 +3056,7 @@
       const fitZ = map.getBoundsZoom(bounds, false);
       const initZ = Math.min(maxZ, Math.max(fitZ, maxZ - 1));
       map.setView(bounds.getCenter(), initZ, { animate: false });
+      markActiveDir();
     };
     let refreshTimer = null;
     const refreshCaptures = () => {
@@ -3072,8 +3091,7 @@
       refreshTimer = setTimeout(refreshCaptures, 500);
     };
     dirBtns.forEach((b) => b.addEventListener("click", () => {
-      ctl.dir = b.dataset.dir;
-      markActiveDir();
+      if (b.disabled) return;
       if (!_vexcelTokenValid(_getStoredToken())) {
         setMsg("Paste a Vexcel token (reselect the base) to load imagery.");
         return;
@@ -3082,11 +3100,15 @@
         setMsg("No Vexcel oblique here — recentre over a flown area.");
         return;
       }
+      ctl.dir = b.dataset.dir;
+      markActiveDir();
       load();
     }));
     overlay.querySelector(".dw-vex-close").addEventListener("click", () => {
       overlay.style.display = "none";
       ctl.gen++;
+      markActiveDir();
+      ctl._fire("overlaytoggle");
     });
     ctl.getCaptureCount = () => ctl.model && ctl.model.captures.length || 0;
     ctl.getCaptureIdx = () => ctl.capIdx;
@@ -3096,7 +3118,13 @@
     };
     ctl.setCapture = (i) => {
       ctl.capIdx = i;
-      if (overlay.style.display !== "none" && ctl.model) load();
+      if (!ctl.model) return;
+      if (!dirHasPhoto(ctl.dir)) {
+        const avail = availDirs();
+        if (avail.length) ctl.dir = avail[0].key;
+      }
+      markActiveDir();
+      if (overlay.style.display !== "none") load();
     };
     ctl.addTo = (m) => {
       if (ctl._map) return ctl;
@@ -7845,7 +7873,7 @@
         addBase(CFG.LAYER_APPLE, new AppleMapsLayerProvider(this.appleToken));
         addBase(CFG.LAYER_STAMEN_TERRAIN, new StamenTerrainLayerProvider());
         addBase(CFG.LAYER_VEXCEL, new VexcelLayerProvider());
-        const vexCtl = createVexcelControl();
+        const vexCtl = this._vexCtl = createVexcelControl();
         this.vexcelHistControl = this._makeHistoryBar({
           layer: vexCtl,
           event: "capturechange",
@@ -7854,6 +7882,7 @@
           setIdx: (i) => vexCtl.setCapture(i),
           getLabel: (i) => vexCtl.getCaptureDate(i)
         });
+        vexCtl.on("overlaytoggle", () => this._syncVexcelHistControl(map));
         const wayLyr = addBase(CFG.LAYER_WAYBACK, new WaybackLayerProvider());
         this.waybackHistControl = this._makeHistoryBar({
           layer: wayLyr,
@@ -8008,7 +8037,7 @@
     _syncVexcelHistControl(map) {
       const ctrl = this.vexcelHistControl;
       if (!ctrl) return;
-      const active = !!(this.layers[CFG.LAYER_VEXCEL] && map.hasLayer(this.layers[CFG.LAYER_VEXCEL]));
+      const active = !!(this.layers[CFG.LAYER_VEXCEL] && map.hasLayer(this.layers[CFG.LAYER_VEXCEL]) && this._vexCtl && this._vexCtl.isOverlayOpen());
       if (active && !ctrl._map) ctrl.addTo(map);
       else if (!active && ctrl._map) ctrl.remove();
     }
@@ -8618,6 +8647,10 @@
         ".dw-vex-dir { width: 30px; height: 30px; padding: 0; font-size: 13px; font-weight: 700; background: #fff; color: #444; border: 1px solid #bbb; border-radius: 3px; cursor: pointer; }",
         ".dw-vex-dir:hover { background: #e8f0fb; color: #000; border-color: #888; }",
         ".dw-vex-dir--on { background: #2563eb; color: #fff; border-color: #2563eb; }",
+        // Greyed = no photo for this direction on the selected date
+        // (e.g. ⊙ nadir was only flown some years). Non-clickable.
+        ".dw-vex-dir--off { opacity: 0.35; cursor: default; background: #f3f4f6; }",
+        ".dw-vex-dir--off:hover { background: #f3f4f6; color: #444; border-color: transparent; }",
         // Full-map overlay: the chosen oblique REPLACES the map view
         // (fills the whole map area), with the compass floating above
         // it (dw-vex-ctl has the higher z-index). Dates ride the shared

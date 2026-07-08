@@ -239,7 +239,7 @@ export class CustomTilesApp {
 			// Vexcel dates ride the SAME shared history bar every other
 			// time-series base uses. The compass (direction) is Vexcel-only
 			// and stays separate; this bar just scrubs the capture dates.
-			const vexCtl = createVexcelControl();
+			const vexCtl = this._vexCtl = createVexcelControl();
 			this.vexcelHistControl = this._makeHistoryBar({
 				layer: vexCtl, event: "capturechange",
 				getCount: () => vexCtl.getCaptureCount(),
@@ -247,6 +247,10 @@ export class CustomTilesApp {
 				setIdx:   (i) => vexCtl.setCapture(i),
 				getLabel: (i) => vexCtl.getCaptureDate(i),
 			});
+			// The date bar only makes sense while an oblique is open (the
+			// flat basemap is date-locked), so show/hide it as the oblique
+			// overlay toggles — not merely when the Vexcel base is active.
+			vexCtl.on("overlaytoggle", () => this._syncVexcelHistControl(map));
 			const wayLyr = addBase(CFG.LAYER_WAYBACK, new WaybackLayerProvider());
 			this.waybackHistControl = this._makeHistoryBar({
 				layer: wayLyr, event: "histchange",
@@ -438,9 +442,12 @@ export class CustomTilesApp {
 	_syncVexcelHistControl(map) {
 		const ctrl = this.vexcelHistControl;
 		if (!ctrl) return;
+		// Show the date bar only while the Vexcel base is active AND an
+		// oblique overlay is open (the flat basemap has no date axis).
 		const active = !!(
 			this.layers[CFG.LAYER_VEXCEL] &&
-			map.hasLayer(this.layers[CFG.LAYER_VEXCEL])
+			map.hasLayer(this.layers[CFG.LAYER_VEXCEL]) &&
+			this._vexCtl && this._vexCtl.isOverlayOpen()
 		);
 		if (active && !ctrl._map) ctrl.addTo(map);
 		else if (!active && ctrl._map) ctrl.remove();
@@ -1131,6 +1138,10 @@ export class CustomTilesApp {
 			".dw-vex-dir { width: 30px; height: 30px; padding: 0; font-size: 13px; font-weight: 700; background: #fff; color: #444; border: 1px solid #bbb; border-radius: 3px; cursor: pointer; }",
 			".dw-vex-dir:hover { background: #e8f0fb; color: #000; border-color: #888; }",
 			".dw-vex-dir--on { background: #2563eb; color: #fff; border-color: #2563eb; }",
+			// Greyed = no photo for this direction on the selected date
+			// (e.g. ⊙ nadir was only flown some years). Non-clickable.
+			".dw-vex-dir--off { opacity: 0.35; cursor: default; background: #f3f4f6; }",
+			".dw-vex-dir--off:hover { background: #f3f4f6; color: #444; border-color: transparent; }",
 			// Full-map overlay: the chosen oblique REPLACES the map view
 			// (fills the whole map area), with the compass floating above
 			// it (dw-vex-ctl has the higher z-index). Dates ride the shared

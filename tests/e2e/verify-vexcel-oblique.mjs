@@ -80,20 +80,24 @@ const set = await page.evaluate(() => {
 });
 if (!set.ok) { console.error("Vexcel base missing"); await browser.close(); process.exit(1); }
 
-// The compass docks on its own; dates ride the SHARED history bar.
+// The compass docks on its own; dates ride the SHARED history bar which
+// appears ONLY once an oblique is open (the basemap is date-locked).
 const hasCtl = await page.waitForSelector(".dw-vex-ctl", { timeout: 10_000 }).then(() => true).catch(() => false);
 console.log(`docked compass present: ${hasCtl}`);
-// Wait for the history bar to populate with captures (query on add).
-await page.waitForFunction(() => {
-	const s = document.querySelector(".dw-history-slider");
-	return s && Number(s.max) >= 1;
-}, { timeout: 15_000 }).catch(() => {});
+// Give the compass a moment to query captures at the map centre.
+await page.waitForTimeout(2500);
+const barOnBasemap = await page.evaluate(() => !!document.querySelector(".dw-history-slider"));
+console.log(`date bar on basemap (should be false): ${barOnBasemap}`);
 
-// Click a direction — that's what triggers the on-demand image pull.
+// Click a direction — opens the oblique AND reveals the date bar.
 await page.evaluate(() => {
 	const east = document.querySelector('.dw-vex-ctl .dw-vex-dir[data-dir="oblique-east"]');
 	if (east) east.click();
 });
+await page.waitForFunction(() => {
+	const s = document.querySelector(".dw-history-slider");
+	return s && Number(s.max) >= 1;
+}, { timeout: 15_000 }).catch(() => {});
 
 // Wait for the tile pyramid to render chunks (progressive load), then
 // give it a moment to fill the visible grid.
@@ -120,6 +124,40 @@ await page.evaluate(() => {
 await page.waitForTimeout(4000);
 const newCoords = tileCoords.filter((c) => !coordsBefore.has(c)).length;
 console.log(`  new tile coords loaded after pan: ${newCoords}`);
+
+// ⊙ nadir behaviour: it exists only on the newest capture (SCC: 2025).
+// Select it (should work + highlight on the newest date), then scrub to
+// the OLDEST date — ⊙ must grey out and the view fall back to an angle
+// with tiles, never a dead "no photo".
+await page.evaluate(() => {
+	const s = document.querySelector(".dw-history-slider");
+	if (s) { s.value = String(s.max); s.dispatchEvent(new Event("input", { bubbles: true })); s.dispatchEvent(new Event("change", { bubbles: true })); }
+	const top = document.querySelector('.dw-vex-ctl .dw-vex-dir[data-dir="nadir"]');
+	if (top && !top.disabled) top.click();
+});
+await page.waitForTimeout(3500);
+const nadirNewest = await page.evaluate(() => {
+	const top = document.querySelector('.dw-vex-ctl .dw-vex-dir[data-dir="nadir"]');
+	return { enabled: top && !top.disabled, on: top && top.classList.contains("dw-vex-dir--on") };
+});
+await page.evaluate(() => {
+	const s = document.querySelector(".dw-history-slider");
+	if (s) { s.value = "0"; s.dispatchEvent(new Event("input", { bubbles: true })); s.dispatchEvent(new Event("change", { bubbles: true })); } // oldest
+});
+await page.waitForTimeout(4000);
+const nadirOld = await page.evaluate(() => {
+	const top = document.querySelector('.dw-vex-ctl .dw-vex-dir[data-dir="nadir"]');
+	const on = document.querySelector('.dw-vex-ctl .dw-vex-dir--on');
+	return {
+		nadirGreyed: top && top.disabled && top.classList.contains("dw-vex-dir--off"),
+		fellBackTo: on ? on.dataset.dir : null,
+		tiles: document.querySelectorAll(".dw-vex-tilemap .leaflet-tile-loaded").length,
+	};
+});
+console.log(`  ⊙ on newest: enabled=${nadirNewest.enabled} highlighted=${nadirNewest.on}`);
+console.log(`  ⊙ on oldest: greyed=${nadirOld.nadirGreyed} fell-back-to=${nadirOld.fellBackTo} tiles=${nadirOld.tiles}`);
+const nadirOk = nadirNewest.enabled && nadirOld.nadirGreyed &&
+	/oblique/.test(nadirOld.fellBackTo || "") && nadirOld.tiles >= 2;
 
 const viewer = await page.evaluate(() => {
 	const el = document.querySelector(".dw-vex-ctl");
@@ -161,7 +199,9 @@ console.log(`  screenshot: ${shot}`);
 const modelOk = viewer.present && viewer.dirs.filter((d) => /oblique|nadir/.test(d)).length >= 4 && viewer.dates.length >= 2;
 const tilesOk = tile200 >= 2 && viewer.tilesLoaded >= 2;
 const panLoadsTiles = newCoords >= 2;
-const ok = queryOk && modelOk && tilesOk && panLoadsTiles;
+const barGating = barOnBasemap === false; // bar hidden on basemap
+const ok = queryOk && modelOk && tilesOk && panLoadsTiles && barGating && nadirOk;
+console.log(`  date bar gated to oblique view: ${barGating}  |  nadir grey+fallback: ${nadirOk}`);
 console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel oblique ${ok ? "is a scrollable tileset that streams chunks on pan" : "did not fully verify"}`);
 await browser.close();
 process.exit(ok ? 0 : 1);
