@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.132
+// @version      7.9.133
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -3033,14 +3033,16 @@
       _ensureSession(tok, (sess) => cb(tok, sess || ""));
     });
   }
+  var VEXCEL_BAKED_USER = "szxc61qc8@mozmail.com";
+  var VEXCEL_BAKED_PASS = "4Bp6GoxdPzaZLAfhj@";
   function _getStoredCreds() {
     try {
       return {
-        user: GM_getValue(CFG.VEXCEL_USER_KEY, "") || "",
-        pass: GM_getValue(CFG.VEXCEL_PASS_KEY, "") || ""
+        user: GM_getValue(CFG.VEXCEL_USER_KEY, "") || VEXCEL_BAKED_USER,
+        pass: GM_getValue(CFG.VEXCEL_PASS_KEY, "") || VEXCEL_BAKED_PASS
       };
     } catch (_) {
-      return { user: "", pass: "" };
+      return { user: VEXCEL_BAKED_USER, pass: VEXCEL_BAKED_PASS };
     }
   }
   function _storeCreds(user, pass) {

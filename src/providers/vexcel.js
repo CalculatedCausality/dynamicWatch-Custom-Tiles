@@ -343,17 +343,24 @@ function _ensureQueryAuth(cb) {
 	});
 }
 
-// Credentials for silent daily token refresh. Stored in GM (the user's
-// own machine) exactly like the token — NEVER hardcoded in the script or
-// committed, and deliberately NOT "encrypted": in a client-side script
-// the key would ship alongside, so it'd be recoverable anyway.
+// Baked-in Vexcel account — the default used when the user hasn't pasted
+// their own creds/token. Requested to be embedded so the Vexcel base "just
+// works" with no prompt. WARNING: this is a plaintext password shipped in
+// the script — anyone with the built userscript (or this repo's history)
+// can read it. Do NOT push this to a public remote; rotate the password if
+// it leaks. Anything the user pastes (creds or a one-off token) still wins.
+const VEXCEL_BAKED_USER = "szxc61qc8@mozmail.com";
+const VEXCEL_BAKED_PASS = "4Bp6GoxdPzaZLAfhj@";
+
+// Credentials for silent daily token refresh. Prefer GM-stored (whatever the
+// user pasted on THIS device); fall back to the baked-in account above.
 function _getStoredCreds() {
 	try {
 		return {
-			user: GM_getValue(CFG.VEXCEL_USER_KEY, "") || "",
-			pass: GM_getValue(CFG.VEXCEL_PASS_KEY, "") || "",
+			user: GM_getValue(CFG.VEXCEL_USER_KEY, "") || VEXCEL_BAKED_USER,
+			pass: GM_getValue(CFG.VEXCEL_PASS_KEY, "") || VEXCEL_BAKED_PASS,
 		};
-	} catch (_) { return { user: "", pass: "" }; }
+	} catch (_) { return { user: VEXCEL_BAKED_USER, pass: VEXCEL_BAKED_PASS }; }
 }
 
 function _storeCreds(user, pass) {
