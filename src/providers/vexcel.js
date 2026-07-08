@@ -215,9 +215,9 @@ function _storeToken(t) {
 	try { GM_setValue(CFG.VEXCEL_TOKEN_KEY, t); } catch (_) {}
 }
 
-function _promptForToken() {
+function _promptForToken(lead) {
 	const raw = window.prompt(
-		"Vexcel Aerial needs a fresh token (they expire daily).\n\n" +
+		(lead || "Vexcel Aerial needs a fresh token (they expire daily).") + "\n\n" +
 		"1. Log in at " + CFG.VEXCEL_VIEWER_URL + "\n" +
 		"2. DevTools → Network → copy any api.vexcelgroup.com request URL\n" +
 		"3. Paste it here (the whole URL is fine):",
@@ -256,7 +256,12 @@ export function fetchVexcelObliques(lat, lng, cb) {
 			}),
 			headers: { "Content-Type": "application/json" },
 		},
-		(err, data) => {
+		(err, data, raw) => {
+			// 401/403 = token rejected server-side despite a valid expiry
+			// (quota/revoked). Drop it so the UI prompts for a fresh one.
+			if (raw && (raw.status === 401 || raw.status === 403)) {
+				_storeToken(""); cb(null, "auth"); return;
+			}
 			if (err || !data) { cb(null); return; }
 			const parsed = _vexcelParseObliques(data);
 			cb(parsed.directions.length ? parsed : null);
@@ -597,9 +602,17 @@ export function createVexcelControl() {
 			ctl.model = null; ctl._fire("capturechange"); return;
 		}
 		const gen = ++ctl.gen;
-		fetchVexcelObliques(ctl.lat, ctl.lng, (model) => {
+		fetchVexcelObliques(ctl.lat, ctl.lng, (model, reason) => {
 			if (gen !== ctl.gen && model == null) { /* keep prior on stale */ }
 			ctl.model = model || null;
+			if (reason === "auth") {
+				// Token was refused (cleared by the fetch). The basemap's
+				// tile-error handler prompts for a fresh one; here just
+				// reflect it if the oblique overlay is open.
+				ctl._fire("capturechange");
+				if (ctl.isOverlayOpen()) setMsg("Vexcel token was refused — reselect the base to paste a fresh one.");
+				return;
+			}
 			if (model) {
 				if (!model.directions.some((d) => d.key === ctl.dir)) ctl.dir = model.directions[0].key;
 				if (ctl.capIdx >= model.captures.length) ctl.capIdx = 0;
@@ -725,6 +738,39 @@ export class VexcelLayerProvider extends LayerProvider {
 		});
 		layer.on("remove", () => {
 			if (_vexCtl) _vexCtl.remove();
+		});
+		// A rejected token (403 quota/revoked) still passes the JWT-expiry
+		// check, so the basemap would silently blank forever. A BURST of
+		// tile errors (whole view failing, not the odd out-of-coverage
+		// 404) means the token was refused — clear it and prompt for a
+		// fresh one, then repaint. Guarded so it prompts once per burst.
+		// Tiles are `<img>` loads whose only URL that ever 403s is the
+		// real WMTS one (the no-token fallback is a blank data URI that
+		// never errors), so a burst of tile errors ⇒ the token was
+		// refused. (The oblique query may have already cleared it, so we
+		// do NOT gate on token validity here.)
+		let errBurst = 0, errTimer = null;
+		layer.on("tileerror", () => {
+			if (!layer._map || layer._dwReprompt) return;
+			errBurst++;
+			clearTimeout(errTimer);
+			errTimer = setTimeout(() => { errBurst = 0; }, 3000);
+			if (errBurst < 8) return;
+			errBurst = 0;
+			layer._dwReprompt = true;
+			_storeToken(""); // drop the rejected token
+			const tok = _promptForToken(
+				"Vexcel refused the current token (expired or usage limit). Paste a fresh one:");
+			layer._dwReprompt = false;
+			if (_vexcelTokenValid(tok)) {
+				layer.setUrl(_vexcelTileTpl(tok));
+				layer.redraw();
+				if (_vexCtl) { _vexCtl.atKey = ""; } // force a re-query
+			} else {
+				// Cancelled / still bad — stop hammering the dead token
+				// (blank data URIs don't error, so no more prompts).
+				layer.setUrl(BLANK_TILE);
+			}
 		});
 		// 3D sync re-evaluates per sync, so a token pasted mid-session
 		// flows into the Mapbox raster source without a mode toggle.

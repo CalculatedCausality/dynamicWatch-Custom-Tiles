@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.126
+// @version      7.9.127
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -2897,9 +2897,9 @@
     } catch (_) {
     }
   }
-  function _promptForToken() {
+  function _promptForToken(lead) {
     const raw = window.prompt(
-      "Vexcel Aerial needs a fresh token (they expire daily).\n\n1. Log in at " + CFG.VEXCEL_VIEWER_URL + "\n2. DevTools → Network → copy any api.vexcelgroup.com request URL\n3. Paste it here (the whole URL is fine):",
+      (lead || "Vexcel Aerial needs a fresh token (they expire daily).") + "\n\n1. Log in at " + CFG.VEXCEL_VIEWER_URL + "\n2. DevTools → Network → copy any api.vexcelgroup.com request URL\n3. Paste it here (the whole URL is fine):",
       ""
     );
     if (raw == null) return "";
@@ -2931,7 +2931,12 @@
         }),
         headers: { "Content-Type": "application/json" }
       },
-      (err, data) => {
+      (err, data, raw) => {
+        if (raw && (raw.status === 401 || raw.status === 403)) {
+          _storeToken("");
+          cb(null, "auth");
+          return;
+        }
         if (err || !data) {
           cb(null);
           return;
@@ -3229,10 +3234,15 @@
         return;
       }
       const gen = ++ctl.gen;
-      fetchVexcelObliques(ctl.lat, ctl.lng, (model) => {
+      fetchVexcelObliques(ctl.lat, ctl.lng, (model, reason) => {
         if (gen !== ctl.gen && model == null) {
         }
         ctl.model = model || null;
+        if (reason === "auth") {
+          ctl._fire("capturechange");
+          if (ctl.isOverlayOpen()) setMsg("Vexcel token was refused — reselect the base to paste a fresh one.");
+          return;
+        }
         if (model) {
           if (!model.directions.some((d) => d.key === ctl.dir)) ctl.dir = model.directions[0].key;
           if (ctl.capIdx >= model.captures.length) ctl.capIdx = 0;
@@ -3347,6 +3357,32 @@
       });
       layer.on("remove", () => {
         if (_vexCtl) _vexCtl.remove();
+      });
+      let errBurst = 0, errTimer = null;
+      layer.on("tileerror", () => {
+        if (!layer._map || layer._dwReprompt) return;
+        errBurst++;
+        clearTimeout(errTimer);
+        errTimer = setTimeout(() => {
+          errBurst = 0;
+        }, 3e3);
+        if (errBurst < 8) return;
+        errBurst = 0;
+        layer._dwReprompt = true;
+        _storeToken("");
+        const tok = _promptForToken(
+          "Vexcel refused the current token (expired or usage limit). Paste a fresh one:"
+        );
+        layer._dwReprompt = false;
+        if (_vexcelTokenValid(tok)) {
+          layer.setUrl(_vexcelTileTpl(tok));
+          layer.redraw();
+          if (_vexCtl) {
+            _vexCtl.atKey = "";
+          }
+        } else {
+          layer.setUrl(BLANK_TILE);
+        }
       });
       layer._dwMb3DGetUrl = () => {
         const tok = _getStoredToken();
