@@ -2806,7 +2806,7 @@
   }
   function _vexcelParseObliques(data) {
     const images = {};
-    const captureSet = /* @__PURE__ */ new Map();
+    const captureMeta = /* @__PURE__ */ new Map();
     const dirSet = /* @__PURE__ */ new Set();
     for (const f of data && Array.isArray(data.features) ? data.features : []) {
       const p = f.properties || {};
@@ -2818,10 +2818,13 @@
       if (!(key in images)) {
         images[key] = { name, layer: p["source-layer"] || p.layer || "urban" };
       }
-      captureSet.set(coll, _vexcelCollectionYear(coll));
+      if (!captureMeta.has(coll)) {
+        const date = String(p["capture-date"] || "").slice(0, 10) || _vexcelCollectionYear(coll);
+        captureMeta.set(coll, { year: _vexcelCollectionYear(coll), date });
+      }
       dirSet.add(dir);
     }
-    const captures = [...captureSet.entries()].map(([collection, year]) => ({ collection, year })).sort((a, b) => b.year.localeCompare(a.year));
+    const captures = [...captureMeta.entries()].map(([collection, meta]) => ({ collection, year: meta.year, date: meta.date })).sort((a, b) => b.date.localeCompare(a.date));
     const directions = VEXCEL_DIRECTIONS.filter((d) => dirSet.has(d.key));
     return { images, captures, directions };
   }
@@ -2890,15 +2893,16 @@
     if (_vexCtl) return _vexCtl;
     const el = document.createElement("div");
     el.className = "dw-vex-ctl";
-    el.innerHTML = '<div class="dw-vex-rose"><button type="button" class="dw-vex-dir dw-vex-n" data-dir="oblique-north" title="Look from the north">N</button><button type="button" class="dw-vex-dir dw-vex-w" data-dir="oblique-west" title="Look from the west">W</button><button type="button" class="dw-vex-dir dw-vex-c" data-dir="nadir" title="Straight down (dated)">⊙</button><button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button><button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button></div><div class="dw-vex-date"><input type="range" class="dw-vex-slider" min="0" max="0" value="0" disabled><span class="dw-vex-year">Vexcel</span></div>';
+    el.innerHTML = '<div class="dw-vex-rose"><button type="button" class="dw-vex-dir dw-vex-n" data-dir="oblique-north" title="Look from the north">N</button><button type="button" class="dw-vex-dir dw-vex-w" data-dir="oblique-west" title="Look from the west">W</button><button type="button" class="dw-vex-dir dw-vex-c" data-dir="nadir" title="Straight down (dated)">⊙</button><button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button><button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button></div>';
     const overlay = document.createElement("div");
     overlay.className = "dw-vex-overlay";
     overlay.style.display = "none";
-    overlay.innerHTML = '<button type="button" class="dw-vex-close" title="Back to map">✕ Map</button><div class="dw-vex-msg"></div><img class="dw-vex-img" alt="Vexcel oblique view" style="display:none">';
+    overlay.innerHTML = '<button type="button" class="dw-vex-close" title="Back to map">✕ Map</button><div class="dw-vex-hint">drag to pan · scroll to zoom</div><div class="dw-vex-msg"></div><div class="dw-vex-imgwrap"><img class="dw-vex-img" alt="Vexcel oblique view" style="display:none"></div>';
     for (const node of [el, overlay]) {
       L.DomEvent.disableClickPropagation(node);
       L.DomEvent.disableScrollPropagation(node);
     }
+    const listeners = {};
     const ctl = {
       el,
       overlay,
@@ -2911,11 +2915,26 @@
       capIdx: 0,
       // index into model.captures (0 = newest)
       gen: 0,
-      imgObjUrl: ""
+      imgObjUrl: "",
+      on(ev, fn) {
+        (listeners[ev] = listeners[ev] || []).push(fn);
+        return ctl;
+      },
+      off(ev, fn) {
+        listeners[ev] = (listeners[ev] || []).filter((f) => f !== fn);
+        return ctl;
+      },
+      _fire(ev) {
+        for (const f of listeners[ev] || []) {
+          try {
+            f();
+          } catch (_) {
+          }
+        }
+      }
     };
-    const slider = el.querySelector(".dw-vex-slider");
-    const yearEl = el.querySelector(".dw-vex-year");
     const imgEl = overlay.querySelector(".dw-vex-img");
+    const wrapEl = overlay.querySelector(".dw-vex-imgwrap");
     const msgEl = overlay.querySelector(".dw-vex-msg");
     const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
     const revoke = () => {
@@ -2934,19 +2953,46 @@
       imgEl.style.display = t ? "none" : "";
     };
     const markActiveDir = () => dirBtns.forEach((b) => b.classList.toggle("dw-vex-dir--on", b.dataset.dir === ctl.dir));
-    const renderSlider = () => {
-      const caps = ctl.model && ctl.model.captures || [];
-      slider.max = String(Math.max(0, caps.length - 1));
-      slider.value = String(Math.max(0, caps.length - 1 - ctl.capIdx));
-      slider.disabled = caps.length <= 1;
-      yearEl.textContent = caps.length ? caps[ctl.capIdx].year : "Vexcel";
+    let zoom = 1, panX = 0, panY = 0, dragging = false, sx = 0, sy = 0;
+    const applyTransform = () => {
+      imgEl.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
     };
+    const resetView = () => {
+      zoom = 1;
+      panX = 0;
+      panY = 0;
+      applyTransform();
+    };
+    wrapEl.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+      zoom = Math.min(8, Math.max(1, zoom * factor));
+      if (zoom === 1) {
+        panX = 0;
+        panY = 0;
+      }
+      applyTransform();
+    }, { passive: false });
+    wrapEl.addEventListener("mousedown", (e) => {
+      dragging = true;
+      sx = e.clientX - panX;
+      sy = e.clientY - panY;
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      panX = e.clientX - sx;
+      panY = e.clientY - sy;
+      applyTransform();
+    });
+    window.addEventListener("mouseup", () => {
+      dragging = false;
+    });
     const load = () => {
       if (!ctl.model) return;
       const cap = ctl.model.captures[ctl.capIdx];
       const img = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
       if (!img) {
-        setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.year : "this year") + " here.");
+        setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here.");
         return;
       }
       const url = _vexcelObliqueExtractUrl(img.name, img.layer, ctl.lat, ctl.lng, _getStoredToken());
@@ -2955,7 +3001,8 @@
         return;
       }
       const gen = ++ctl.gen;
-      setMsg("Loading " + _dirLabel(ctl.dir) + " · " + cap.year + "… (large image)");
+      resetView();
+      setMsg("Loading " + _dirLabel(ctl.dir) + " · " + cap.date + "… (large image)");
       gmGet(url, { responseType: "blob", timeout: 9e4 }, (err, r) => {
         if (gen !== ctl.gen) return;
         if (err || !r || r.status < 200 || r.status >= 300) {
@@ -2970,74 +3017,80 @@
         imgEl.src = ctl.imgObjUrl;
       });
     };
-    const withModel = (then) => {
+    let refreshTimer = null;
+    const refreshCaptures = () => {
       if (!ctl._map) return;
-      if (!_vexcelTokenValid(_getStoredToken())) {
-        setMsg("Paste a Vexcel token (reselect the base) to load imagery.");
-        return;
-      }
       const c = ctl._map.getCenter();
       const key = c.lat.toFixed(5) + "," + c.lng.toFixed(5);
-      if (ctl.model && ctl.atKey === key) {
-        then();
-        return;
-      }
+      if (ctl.atKey === key) return;
       ctl.lat = c.lat;
       ctl.lng = c.lng;
       ctl.atKey = key;
+      if (!_vexcelTokenValid(_getStoredToken())) {
+        ctl.model = null;
+        ctl._fire("capturechange");
+        return;
+      }
       const gen = ++ctl.gen;
-      setMsg("Finding captures for the map centre…");
       fetchVexcelObliques(ctl.lat, ctl.lng, (model) => {
-        if (gen !== ctl.gen) return;
-        if (!model) {
-          ctl.model = null;
-          renderSlider();
-          setMsg("No Vexcel oblique here — recentre over a flown area.");
-          return;
+        if (gen !== ctl.gen && model == null) {
         }
-        ctl.model = model;
-        if (!model.directions.some((d) => d.key === ctl.dir)) ctl.dir = model.directions[0].key;
-        if (ctl.capIdx >= model.captures.length) ctl.capIdx = 0;
-        markActiveDir();
-        renderSlider();
-        then();
+        ctl.model = model || null;
+        if (model) {
+          if (!model.directions.some((d) => d.key === ctl.dir)) ctl.dir = model.directions[0].key;
+          if (ctl.capIdx >= model.captures.length) ctl.capIdx = 0;
+          markActiveDir();
+        }
+        ctl._fire("capturechange");
+        if (overlay.style.display !== "none" && model) load();
       });
+    };
+    const scheduleRefresh = () => {
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(refreshCaptures, 500);
     };
     dirBtns.forEach((b) => b.addEventListener("click", () => {
       ctl.dir = b.dataset.dir;
       markActiveDir();
-      withModel(load);
+      if (!_vexcelTokenValid(_getStoredToken())) {
+        setMsg("Paste a Vexcel token (reselect the base) to load imagery.");
+        return;
+      }
+      if (!ctl.model) {
+        setMsg("No Vexcel oblique here — recentre over a flown area.");
+        return;
+      }
+      load();
     }));
-    slider.addEventListener("input", () => {
-      const caps = ctl.model && ctl.model.captures || [];
-      if (!caps.length) return;
-      ctl.capIdx = Math.max(0, caps.length - 1 - Number(slider.value));
-      yearEl.textContent = caps[ctl.capIdx].year;
-    });
-    slider.addEventListener("change", () => {
-      if (ctl.model) load();
-    });
     overlay.querySelector(".dw-vex-close").addEventListener("click", () => {
       overlay.style.display = "none";
       ctl.gen++;
       revoke();
     });
-    const onMove = () => {
-      ctl.atKey = "";
+    ctl.getCaptureCount = () => ctl.model && ctl.model.captures.length || 0;
+    ctl.getCaptureIdx = () => ctl.capIdx;
+    ctl.getCaptureDate = (i) => {
+      const caps = ctl.model && ctl.model.captures || [];
+      return caps[i] ? caps[i].date || caps[i].year : "";
+    };
+    ctl.setCapture = (i) => {
+      ctl.capIdx = i;
+      if (overlay.style.display !== "none" && ctl.model) load();
     };
     ctl.addTo = (m) => {
       if (ctl._map) return ctl;
       ctl._map = m;
       m.getContainer().appendChild(overlay);
       m.getContainer().appendChild(el);
-      m.on("moveend", onMove);
+      m.on("moveend", scheduleRefresh);
       markActiveDir();
-      renderSlider();
+      refreshCaptures();
       return ctl;
     };
     ctl.remove = () => {
       if (!ctl._map) return ctl;
-      ctl._map.off("moveend", onMove);
+      ctl._map.off("moveend", scheduleRefresh);
+      clearTimeout(refreshTimer);
       ctl.gen++;
       revoke();
       if (el.parentNode) el.parentNode.removeChild(el);
@@ -7764,6 +7817,15 @@
         addBase(CFG.LAYER_APPLE, new AppleMapsLayerProvider(this.appleToken));
         addBase(CFG.LAYER_STAMEN_TERRAIN, new StamenTerrainLayerProvider());
         addBase(CFG.LAYER_VEXCEL, new VexcelLayerProvider());
+        const vexCtl = createVexcelControl();
+        this.vexcelHistControl = this._makeHistoryBar({
+          layer: vexCtl,
+          event: "capturechange",
+          getCount: () => vexCtl.getCaptureCount(),
+          getIdx: () => vexCtl.getCaptureIdx(),
+          setIdx: (i) => vexCtl.setCapture(i),
+          getLabel: (i) => vexCtl.getCaptureDate(i)
+        });
         const wayLyr = addBase(CFG.LAYER_WAYBACK, new WaybackLayerProvider());
         this.waybackHistControl = this._makeHistoryBar({
           layer: wayLyr,
@@ -7833,13 +7895,15 @@
           this._syncLabelsLayer(map);
           this._syncHistCompass(map);
           this._syncWaybackHistControl(map);
+          this._syncVexcelHistControl(map);
           this._syncZoomLevel(map);
         });
         map.on("layeradd", (e) => {
-          if (e.layer === this.layers[CFG.LAYER_QLD] || e.layer === this.layers[CFG.LAYER_GOOGLE] || e.layer === this.layers[CFG.LAYER_HIST] || e.layer === this.layers[CFG.LAYER_TOPO] || e.layer === this.layers[CFG.LAYER_WAYBACK]) {
+          if (e.layer === this.layers[CFG.LAYER_QLD] || e.layer === this.layers[CFG.LAYER_GOOGLE] || e.layer === this.layers[CFG.LAYER_HIST] || e.layer === this.layers[CFG.LAYER_TOPO] || e.layer === this.layers[CFG.LAYER_WAYBACK] || e.layer === this.layers[CFG.LAYER_VEXCEL]) {
             this._syncLabelsLayer(map);
             this._syncHistCompass(map);
             this._syncWaybackHistControl(map);
+            this._syncVexcelHistControl(map);
             this._syncZoomLevel(map);
           }
         });
@@ -7910,6 +7974,13 @@
       const ctrl = this.waybackHistControl;
       if (!ctrl) return;
       const active = !!(this.layers[CFG.LAYER_WAYBACK] && map.hasLayer(this.layers[CFG.LAYER_WAYBACK]));
+      if (active && !ctrl._map) ctrl.addTo(map);
+      else if (!active && ctrl._map) ctrl.remove();
+    }
+    _syncVexcelHistControl(map) {
+      const ctrl = this.vexcelHistControl;
+      if (!ctrl) return;
+      const active = !!(this.layers[CFG.LAYER_VEXCEL] && map.hasLayer(this.layers[CFG.LAYER_VEXCEL]));
       if (active && !ctrl._map) ctrl.addTo(map);
       else if (!active && ctrl._map) ctrl.remove();
     }
@@ -8403,7 +8474,11 @@
         ".dw-manager-footer { padding: 5px 8px 1px; border-top: 1px solid #ddd; margin-top: 4px; }",
         ".dw-back-link { font-size: 11px; color: #888; text-decoration: none; cursor: pointer; }",
         ".dw-back-link:hover { color: #333; text-decoration: underline; }",
-        ".dw-history-bar { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1000; display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: rgba(255,255,255,0.95); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); font-size: 11px; font-family: sans-serif; white-space: nowrap; pointer-events: auto; width: min(82vw, 720px); box-sizing: border-box; }",
+        // z-index 1160 sits just above the Vexcel full-map oblique
+        // overlay (1150) so the date bar stays usable while an oblique
+        // fills the map — and below the compass (1200). Harmless for
+        // the other time-series bars (nothing else lives at 1000-1160).
+        ".dw-history-bar { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1160; display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: rgba(255,255,255,0.95); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); font-size: 11px; font-family: sans-serif; white-space: nowrap; pointer-events: auto; width: min(82vw, 720px); box-sizing: border-box; }",
         ".dw-history-slider { flex: 1; min-width: 0; margin: 0; accent-color: #4a8; cursor: pointer; }",
         ".dw-history-slider:disabled { cursor: not-allowed; opacity: 0.4; }",
         ".dw-history-bar-label { min-width: 130px; text-align: right; color: #333; font-variant-numeric: tabular-nums; }",
@@ -8515,18 +8590,19 @@
         ".dw-vex-dir { width: 30px; height: 30px; padding: 0; font-size: 13px; font-weight: 700; background: #fff; color: #444; border: 1px solid #bbb; border-radius: 3px; cursor: pointer; }",
         ".dw-vex-dir:hover { background: #e8f0fb; color: #000; border-color: #888; }",
         ".dw-vex-dir--on { background: #2563eb; color: #fff; border-color: #2563eb; }",
-        ".dw-vex-date { display: flex; align-items: center; gap: 6px; margin-top: 8px; }",
-        ".dw-vex-slider { flex: 1; min-width: 96px; margin: 0; accent-color: #4a8; cursor: pointer; }",
-        ".dw-vex-slider:disabled { opacity: 0.4; cursor: default; }",
-        ".dw-vex-year { min-width: 40px; text-align: right; font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; color: #333; }",
         // Full-map overlay: the chosen oblique REPLACES the map view
         // (fills the whole map area), with the compass floating above
-        // it (dw-vex-ctl has the higher z-index) to switch angle/date.
-        ".dw-vex-overlay { position: absolute; inset: 0; z-index: 1150; background: #0b0b0d; display: flex; align-items: center; justify-content: center; }",
-        ".dw-vex-img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }",
-        ".dw-vex-close { position: absolute; top: 12px; left: 12px; z-index: 2; background: rgba(255,255,255,0.95); border: 1px solid #bbb; color: #333; font-size: 12px; font-weight: 600; font-family: sans-serif; line-height: 1; padding: 7px 11px; border-radius: 5px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); cursor: pointer; }",
+        // it (dw-vex-ctl has the higher z-index). Dates ride the shared
+        // history bar. The image pans (drag) + zooms (wheel) since the
+        // full frame is large and can't be cropped server-side.
+        ".dw-vex-overlay { position: absolute; inset: 0; z-index: 1150; background: #0b0b0d; display: flex; align-items: center; justify-content: center; overflow: hidden; }",
+        ".dw-vex-imgwrap { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; cursor: grab; }",
+        ".dw-vex-imgwrap:active { cursor: grabbing; }",
+        ".dw-vex-img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; transform-origin: center center; will-change: transform; user-select: none; -webkit-user-drag: none; }",
+        ".dw-vex-close { position: absolute; top: 12px; left: 12px; z-index: 3; background: rgba(255,255,255,0.95); border: 1px solid #bbb; color: #333; font-size: 12px; font-weight: 600; font-family: sans-serif; line-height: 1; padding: 7px 11px; border-radius: 5px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); cursor: pointer; }",
         ".dw-vex-close:hover { background: #fff; color: #000; }",
-        ".dw-vex-msg { padding: 20px 16px; font-size: 13px; color: #d1d5db; text-align: center; }",
+        ".dw-vex-hint { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 3; background: rgba(0,0,0,0.55); color: #e5e7eb; font-size: 11px; font-family: sans-serif; padding: 4px 10px; border-radius: 999px; pointer-events: none; }",
+        ".dw-vex-msg { position: absolute; z-index: 2; padding: 20px 16px; font-size: 13px; color: #d1d5db; text-align: center; }",
         ".dw-scc-notif-badge { color: #dc2626; font-weight: 600; }",
         ".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
         // Deep-detail section inside the application popup (assessment

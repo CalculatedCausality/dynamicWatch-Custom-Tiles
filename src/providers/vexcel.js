@@ -84,7 +84,7 @@ export function _vexcelCollectionYear(collection) {
 // layer (urban / wide-area) so extract targets the right program.
 export function _vexcelParseObliques(data) {
 	const images = {};
-	const captureSet = new Map(); // collection → year
+	const captureMeta = new Map(); // collection → { year, date }
 	const dirSet = new Set();
 	for (const f of (data && Array.isArray(data.features) ? data.features : [])) {
 		const p = f.properties || {};
@@ -96,12 +96,17 @@ export function _vexcelParseObliques(data) {
 		if (!(key in images)) {
 			images[key] = { name, layer: p["source-layer"] || p.layer || "urban" };
 		}
-		captureSet.set(coll, _vexcelCollectionYear(coll));
+		if (!captureMeta.has(coll)) {
+			// capture-date like "2019-11-29T04:23:00" → "2019-11-29".
+			const date = String(p["capture-date"] || "").slice(0, 10) ||
+				_vexcelCollectionYear(coll);
+			captureMeta.set(coll, { year: _vexcelCollectionYear(coll), date });
+		}
 		dirSet.add(dir);
 	}
-	const captures = [...captureSet.entries()]
-		.map(([collection, year]) => ({ collection, year }))
-		.sort((a, b) => b.year.localeCompare(a.year));
+	const captures = [...captureMeta.entries()]
+		.map(([collection, meta]) => ({ collection, year: meta.year, date: meta.date }))
+		.sort((a, b) => b.date.localeCompare(a.date));
 	const directions = VEXCEL_DIRECTIONS.filter((d) => dirSet.has(d.key));
 	return { images, captures, directions };
 }
@@ -192,9 +197,11 @@ let _vexCtl = null;
 
 export function createVexcelControl() {
 	if (_vexCtl) return _vexCtl;
-	// Compass control (docked, small) + a separate FULL-MAP overlay the
-	// oblique fills — clicking an angle replaces the map view with that
-	// angled image, the compass floating on top to switch angle/date.
+	// Direction compass (small, docked) + a FULL-MAP overlay the oblique
+	// fills. DATE scrubbing is delegated to the app's shared history bar
+	// (same ◀ slider ▶ + date component every other time-series layer
+	// uses) — this control exposes a capture adapter + fires
+	// "capturechange" so that bar drives it. No bespoke date slider here.
 	const el = document.createElement("div");
 	el.className = "dw-vex-ctl";
 	el.innerHTML =
@@ -204,23 +211,23 @@ export function createVexcelControl() {
 		'<button type="button" class="dw-vex-dir dw-vex-c" data-dir="nadir" title="Straight down (dated)">⊙</button>' +
 		'<button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button>' +
 		'<button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button>' +
-		"</div>" +
-		'<div class="dw-vex-date">' +
-		'<input type="range" class="dw-vex-slider" min="0" max="0" value="0" disabled>' +
-		'<span class="dw-vex-year">Vexcel</span>' +
 		"</div>";
 	const overlay = document.createElement("div");
 	overlay.className = "dw-vex-overlay";
 	overlay.style.display = "none";
 	overlay.innerHTML =
 		'<button type="button" class="dw-vex-close" title="Back to map">✕ Map</button>' +
+		'<div class="dw-vex-hint">drag to pan · scroll to zoom</div>' +
 		'<div class="dw-vex-msg"></div>' +
-		'<img class="dw-vex-img" alt="Vexcel oblique view" style="display:none">';
+		'<div class="dw-vex-imgwrap"><img class="dw-vex-img" alt="Vexcel oblique view" style="display:none"></div>';
 	for (const node of [el, overlay]) {
 		L.DomEvent.disableClickPropagation(node);
 		L.DomEvent.disableScrollPropagation(node);
 	}
 
+	// Tiny event emitter so the app's _makeHistoryBar can bind
+	// on/off("capturechange") exactly like it does for a real layer.
+	const listeners = {};
 	const ctl = {
 		el, overlay, _map: null,
 		lat: 0, lng: 0, atKey: "",
@@ -229,17 +236,18 @@ export function createVexcelControl() {
 		capIdx: 0,       // index into model.captures (0 = newest)
 		gen: 0,
 		imgObjUrl: "",
+		on(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); return ctl; },
+		off(ev, fn) { listeners[ev] = (listeners[ev] || []).filter((f) => f !== fn); return ctl; },
+		_fire(ev) { for (const f of listeners[ev] || []) { try { f(); } catch (_) {} } },
 	};
-	const slider  = el.querySelector(".dw-vex-slider");
-	const yearEl  = el.querySelector(".dw-vex-year");
 	const imgEl   = overlay.querySelector(".dw-vex-img");
+	const wrapEl  = overlay.querySelector(".dw-vex-imgwrap");
 	const msgEl   = overlay.querySelector(".dw-vex-msg");
 	const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
 
 	const revoke = () => {
 		if (ctl.imgObjUrl) { try { URL.revokeObjectURL(ctl.imgObjUrl); } catch (_) {} ctl.imgObjUrl = ""; }
 	};
-	// Any message/image implies the full-map overlay is up.
 	const setMsg = (t) => {
 		overlay.style.display = "";
 		msgEl.textContent = t;
@@ -249,24 +257,39 @@ export function createVexcelControl() {
 	const markActiveDir = () => dirBtns.forEach((b) =>
 		b.classList.toggle("dw-vex-dir--on", b.dataset.dir === ctl.dir));
 
-	const renderSlider = () => {
-		const caps = (ctl.model && ctl.model.captures) || [];
-		slider.max = String(Math.max(0, caps.length - 1));
-		slider.value = String(Math.max(0, caps.length - 1 - ctl.capIdx));
-		slider.disabled = caps.length <= 1;
-		yearEl.textContent = caps.length ? caps[ctl.capIdx].year : "Vexcel";
+	/* -- image pan/zoom (the full frame is huge and un-croppable server
+	 * side, so let the user navigate to their spot) ------------------- */
+	let zoom = 1, panX = 0, panY = 0, dragging = false, sx = 0, sy = 0;
+	const applyTransform = () => {
+		imgEl.style.transform =
+			`translate(${panX}px, ${panY}px) scale(${zoom})`;
 	};
+	const resetView = () => { zoom = 1; panX = 0; panY = 0; applyTransform(); };
+	wrapEl.addEventListener("wheel", (e) => {
+		e.preventDefault();
+		const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+		zoom = Math.min(8, Math.max(1, zoom * factor));
+		if (zoom === 1) { panX = 0; panY = 0; }
+		applyTransform();
+	}, { passive: false });
+	wrapEl.addEventListener("mousedown", (e) => { dragging = true; sx = e.clientX - panX; sy = e.clientY - panY; });
+	window.addEventListener("mousemove", (e) => {
+		if (!dragging) return;
+		panX = e.clientX - sx; panY = e.clientY - sy; applyTransform();
+	});
+	window.addEventListener("mouseup", () => { dragging = false; });
 
-	// Pull the currently-selected oblique into the panel.
+	// Pull the currently-selected oblique into the overlay.
 	const load = () => {
 		if (!ctl.model) return;
 		const cap = ctl.model.captures[ctl.capIdx];
 		const img = cap && ctl.model.images[ctl.dir + "@" + cap.collection];
-		if (!img) { setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.year : "this year") + " here."); return; }
+		if (!img) { setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here."); return; }
 		const url = _vexcelObliqueExtractUrl(img.name, img.layer, ctl.lat, ctl.lng, _getStoredToken());
 		if (!url) { setMsg("Vexcel token expired — reselect the base to refresh it."); return; }
 		const gen = ++ctl.gen;
-		setMsg("Loading " + _dirLabel(ctl.dir) + " · " + cap.year + "… (large image)");
+		resetView();
+		setMsg("Loading " + _dirLabel(ctl.dir) + " · " + cap.date + "… (large image)");
 		gmGet(url, { responseType: "blob", timeout: 90000 }, (err, r) => {
 			if (gen !== ctl.gen) return;
 			if (err || !r || r.status < 200 || r.status >= 300) {
@@ -282,69 +305,77 @@ export function createVexcelControl() {
 		});
 	};
 
-	// Ensure we have the capture model for the CURRENT map centre, then
-	// run `then`. Queries on demand (only when a control is used), so a
-	// bare pan never triggers a fetch or a "no imagery" message.
-	const withModel = (then) => {
+	// Query captures at the current map centre and refresh the date bar.
+	// Cheap + un-throttled, so safe to run on every settle. Does NOT open
+	// the overlay — that only happens on an explicit direction click.
+	let refreshTimer = null;
+	const refreshCaptures = () => {
 		if (!ctl._map) return;
-		if (!_vexcelTokenValid(_getStoredToken())) {
-			setMsg("Paste a Vexcel token (reselect the base) to load imagery.");
-			return;
-		}
 		const c = ctl._map.getCenter();
 		const key = c.lat.toFixed(5) + "," + c.lng.toFixed(5);
-		if (ctl.model && ctl.atKey === key) { then(); return; }
+		if (ctl.atKey === key) return;
 		ctl.lat = c.lat; ctl.lng = c.lng; ctl.atKey = key;
+		if (!_vexcelTokenValid(_getStoredToken())) {
+			ctl.model = null; ctl._fire("capturechange"); return;
+		}
 		const gen = ++ctl.gen;
-		setMsg("Finding captures for the map centre…");
 		fetchVexcelObliques(ctl.lat, ctl.lng, (model) => {
-			if (gen !== ctl.gen) return;
-			if (!model) {
-				ctl.model = null; renderSlider();
-				setMsg("No Vexcel oblique here — recentre over a flown area.");
-				return;
+			if (gen !== ctl.gen && model == null) { /* keep prior on stale */ }
+			ctl.model = model || null;
+			if (model) {
+				if (!model.directions.some((d) => d.key === ctl.dir)) ctl.dir = model.directions[0].key;
+				if (ctl.capIdx >= model.captures.length) ctl.capIdx = 0;
+				markActiveDir();
 			}
-			ctl.model = model;
-			if (!model.directions.some((d) => d.key === ctl.dir)) ctl.dir = model.directions[0].key;
-			if (ctl.capIdx >= model.captures.length) ctl.capIdx = 0;
-			markActiveDir(); renderSlider();
-			then();
+			ctl._fire("capturechange"); // history bar re-reads count/idx/label
+			// If the overlay is already open, refresh it for the new centre.
+			if (overlay.style.display !== "none" && model) load();
 		});
+	};
+	const scheduleRefresh = () => {
+		clearTimeout(refreshTimer);
+		refreshTimer = setTimeout(refreshCaptures, 500);
 	};
 
 	dirBtns.forEach((b) => b.addEventListener("click", () => {
 		ctl.dir = b.dataset.dir;
 		markActiveDir();
-		withModel(load);
+		if (!_vexcelTokenValid(_getStoredToken())) { setMsg("Paste a Vexcel token (reselect the base) to load imagery."); return; }
+		if (!ctl.model) { setMsg("No Vexcel oblique here — recentre over a flown area."); return; }
+		load();
 	}));
-	slider.addEventListener("input", () => {
-		const caps = (ctl.model && ctl.model.captures) || [];
-		if (!caps.length) return;
-		ctl.capIdx = Math.max(0, caps.length - 1 - Number(slider.value));
-		yearEl.textContent = caps[ctl.capIdx].year;
-	});
-	slider.addEventListener("change", () => { if (ctl.model) load(); });
 	overlay.querySelector(".dw-vex-close").addEventListener("click", () => {
 		overlay.style.display = "none";  // back to the live map
 		ctl.gen++;
 		revoke();
 	});
-	// A pan invalidates the cached model so the next click re-queries
-	// the new centre — but nothing fetches until the user asks.
-	const onMove = () => { ctl.atKey = ""; };
+
+	// -- history-bar adapter (dates) --------------------------------
+	ctl.getCaptureCount = () => (ctl.model && ctl.model.captures.length) || 0;
+	ctl.getCaptureIdx   = () => ctl.capIdx;
+	ctl.getCaptureDate  = (i) => {
+		const caps = (ctl.model && ctl.model.captures) || [];
+		return caps[i] ? (caps[i].date || caps[i].year) : "";
+	};
+	ctl.setCapture = (i) => {
+		ctl.capIdx = i;
+		if (overlay.style.display !== "none" && ctl.model) load();
+	};
 
 	ctl.addTo = (m) => {
 		if (ctl._map) return ctl;
 		ctl._map = m;
 		m.getContainer().appendChild(overlay);
 		m.getContainer().appendChild(el);
-		m.on("moveend", onMove);
-		markActiveDir(); renderSlider();
+		m.on("moveend", scheduleRefresh);
+		markActiveDir();
+		refreshCaptures();
 		return ctl;
 	};
 	ctl.remove = () => {
 		if (!ctl._map) return ctl;
-		ctl._map.off("moveend", onMove);
+		ctl._map.off("moveend", scheduleRefresh);
+		clearTimeout(refreshTimer);
 		ctl.gen++;
 		revoke();
 		if (el.parentNode) el.parentNode.removeChild(el);

@@ -78,11 +78,16 @@ const set = await page.evaluate(() => {
 });
 if (!set.ok) { console.error("Vexcel base missing"); await browser.close(); process.exit(1); }
 
-// The compass docks on its own (passive — no auto-fetch on pan).
+// The compass docks on its own; dates ride the SHARED history bar.
 const hasCtl = await page.waitForSelector(".dw-vex-ctl", { timeout: 10_000 }).then(() => true).catch(() => false);
 console.log(`docked compass present: ${hasCtl}`);
+// Wait for the history bar to populate with captures (query on add).
+await page.waitForFunction(() => {
+	const s = document.querySelector(".dw-history-slider");
+	return s && Number(s.max) >= 1;
+}, { timeout: 15_000 }).catch(() => {});
 
-// Click a direction — that's what triggers the on-demand query + pull.
+// Click a direction — that's what triggers the on-demand image pull.
 await page.evaluate(() => {
 	const east = document.querySelector('.dw-vex-ctl .dw-vex-dir[data-dir="oblique-east"]');
 	if (east) east.click();
@@ -98,7 +103,7 @@ const viewer = await page.evaluate(() => {
 	const el = document.querySelector(".dw-vex-ctl");
 	if (!el) return { present: false };
 	const dirs = [...el.querySelectorAll(".dw-vex-dir")].map((b) => b.dataset.dir);
-	const slider = el.querySelector(".dw-vex-slider");
+	const slider = document.querySelector(".dw-history-slider");
 	const captureCount = slider ? Number(slider.max) + 1 : 0;
 	const ov = document.querySelector(".dw-vex-overlay");
 	const img = ov && ov.querySelector(".dw-vex-img");
@@ -108,7 +113,7 @@ const viewer = await page.evaluate(() => {
 		dirs,
 		dates: Array.from({ length: captureCount }, (_, i) => String(i)),
 		sliderEnabled: slider && !slider.disabled,
-		year: (el.querySelector(".dw-vex-year") || {}).textContent,
+		year: (document.querySelector(".dw-history-bar-label") || {}).textContent,
 		imgShown: img && img.style.display !== "none" && !!img.src,
 		msg: msg && msg.style.display !== "none" ? msg.textContent : "",
 	};

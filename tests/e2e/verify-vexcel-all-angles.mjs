@@ -117,7 +117,7 @@ for (const a of ANGLES) {
 		const on  = ctl.querySelector(".dw-vex-dir--on");
 		return {
 			activeDir: on ? on.dataset.dir : null,
-			year: (ctl.querySelector(".dw-vex-year") || {}).textContent,
+			year: (document.querySelector(".dw-history-bar-label") || {}).textContent,
 			overlayShown: ov.style.display !== "none",
 			natW: img ? img.naturalWidth : 0,
 			natH: img ? img.naturalHeight : 0,

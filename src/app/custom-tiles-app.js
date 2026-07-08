@@ -15,7 +15,7 @@ import {
 	buildAppleTileUrl,
 } from "../providers/raster-providers.js";
 import { StamenTerrainLayerProvider } from "../providers/stamen-terrain.js";
-import { VexcelLayerProvider } from "../providers/vexcel.js";
+import { VexcelLayerProvider, createVexcelControl } from "../providers/vexcel.js";
 import { WaybackLayerProvider } from "../providers/wayback.js";
 import {
 	QldHistoricalLayerProvider,
@@ -236,6 +236,17 @@ export class CustomTilesApp {
 			addBase(CFG.LAYER_STAMEN_TERRAIN, new StamenTerrainLayerProvider());
 
 			addBase(CFG.LAYER_VEXCEL, new VexcelLayerProvider());
+			// Vexcel dates ride the SAME shared history bar every other
+			// time-series base uses. The compass (direction) is Vexcel-only
+			// and stays separate; this bar just scrubs the capture dates.
+			const vexCtl = createVexcelControl();
+			this.vexcelHistControl = this._makeHistoryBar({
+				layer: vexCtl, event: "capturechange",
+				getCount: () => vexCtl.getCaptureCount(),
+				getIdx:   () => vexCtl.getCaptureIdx(),
+				setIdx:   (i) => vexCtl.setCapture(i),
+				getLabel: (i) => vexCtl.getCaptureDate(i),
+			});
 			const wayLyr = addBase(CFG.LAYER_WAYBACK, new WaybackLayerProvider());
 			this.waybackHistControl = this._makeHistoryBar({
 				layer: wayLyr, event: "histchange",
@@ -305,6 +316,7 @@ export class CustomTilesApp {
 				this._syncLabelsLayer(map);
 				this._syncHistCompass(map);
 				this._syncWaybackHistControl(map);
+				this._syncVexcelHistControl(map);
 				this._syncZoomLevel(map);
 			});
 			map.on("layeradd", (e) => {
@@ -313,11 +325,13 @@ export class CustomTilesApp {
 					e.layer === this.layers[CFG.LAYER_GOOGLE]  ||
 					e.layer === this.layers[CFG.LAYER_HIST]    ||
 					e.layer === this.layers[CFG.LAYER_TOPO]    ||
-					e.layer === this.layers[CFG.LAYER_WAYBACK]
+					e.layer === this.layers[CFG.LAYER_WAYBACK] ||
+					e.layer === this.layers[CFG.LAYER_VEXCEL]
 				) {
 					this._syncLabelsLayer(map);
 					this._syncHistCompass(map);
 					this._syncWaybackHistControl(map);
+					this._syncVexcelHistControl(map);
 					this._syncZoomLevel(map);
 				}
 			});
@@ -411,6 +425,17 @@ export class CustomTilesApp {
 		const active = !!(
 			this.layers[CFG.LAYER_WAYBACK] &&
 			map.hasLayer(this.layers[CFG.LAYER_WAYBACK])
+		);
+		if (active && !ctrl._map) ctrl.addTo(map);
+		else if (!active && ctrl._map) ctrl.remove();
+	}
+
+	_syncVexcelHistControl(map) {
+		const ctrl = this.vexcelHistControl;
+		if (!ctrl) return;
+		const active = !!(
+			this.layers[CFG.LAYER_VEXCEL] &&
+			map.hasLayer(this.layers[CFG.LAYER_VEXCEL])
 		);
 		if (active && !ctrl._map) ctrl.addTo(map);
 		else if (!active && ctrl._map) ctrl.remove();
@@ -985,7 +1010,11 @@ export class CustomTilesApp {
 			".dw-manager-footer { padding: 5px 8px 1px; border-top: 1px solid #ddd; margin-top: 4px; }",
 			".dw-back-link { font-size: 11px; color: #888; text-decoration: none; cursor: pointer; }",
 			".dw-back-link:hover { color: #333; text-decoration: underline; }",
-			".dw-history-bar { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1000; display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: rgba(255,255,255,0.95); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); font-size: 11px; font-family: sans-serif; white-space: nowrap; pointer-events: auto; width: min(82vw, 720px); box-sizing: border-box; }",
+			// z-index 1160 sits just above the Vexcel full-map oblique
+			// overlay (1150) so the date bar stays usable while an oblique
+			// fills the map — and below the compass (1200). Harmless for
+			// the other time-series bars (nothing else lives at 1000-1160).
+			".dw-history-bar { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1160; display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: rgba(255,255,255,0.95); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); font-size: 11px; font-family: sans-serif; white-space: nowrap; pointer-events: auto; width: min(82vw, 720px); box-sizing: border-box; }",
 			".dw-history-slider { flex: 1; min-width: 0; margin: 0; accent-color: #4a8; cursor: pointer; }",
 			".dw-history-slider:disabled { cursor: not-allowed; opacity: 0.4; }",
 			".dw-history-bar-label { min-width: 130px; text-align: right; color: #333; font-variant-numeric: tabular-nums; }",
@@ -1097,18 +1126,19 @@ export class CustomTilesApp {
 			".dw-vex-dir { width: 30px; height: 30px; padding: 0; font-size: 13px; font-weight: 700; background: #fff; color: #444; border: 1px solid #bbb; border-radius: 3px; cursor: pointer; }",
 			".dw-vex-dir:hover { background: #e8f0fb; color: #000; border-color: #888; }",
 			".dw-vex-dir--on { background: #2563eb; color: #fff; border-color: #2563eb; }",
-			".dw-vex-date { display: flex; align-items: center; gap: 6px; margin-top: 8px; }",
-			".dw-vex-slider { flex: 1; min-width: 96px; margin: 0; accent-color: #4a8; cursor: pointer; }",
-			".dw-vex-slider:disabled { opacity: 0.4; cursor: default; }",
-			".dw-vex-year { min-width: 40px; text-align: right; font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; color: #333; }",
 			// Full-map overlay: the chosen oblique REPLACES the map view
 			// (fills the whole map area), with the compass floating above
-			// it (dw-vex-ctl has the higher z-index) to switch angle/date.
-			".dw-vex-overlay { position: absolute; inset: 0; z-index: 1150; background: #0b0b0d; display: flex; align-items: center; justify-content: center; }",
-			".dw-vex-img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }",
-			".dw-vex-close { position: absolute; top: 12px; left: 12px; z-index: 2; background: rgba(255,255,255,0.95); border: 1px solid #bbb; color: #333; font-size: 12px; font-weight: 600; font-family: sans-serif; line-height: 1; padding: 7px 11px; border-radius: 5px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); cursor: pointer; }",
+			// it (dw-vex-ctl has the higher z-index). Dates ride the shared
+			// history bar. The image pans (drag) + zooms (wheel) since the
+			// full frame is large and can't be cropped server-side.
+			".dw-vex-overlay { position: absolute; inset: 0; z-index: 1150; background: #0b0b0d; display: flex; align-items: center; justify-content: center; overflow: hidden; }",
+			".dw-vex-imgwrap { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; cursor: grab; }",
+			".dw-vex-imgwrap:active { cursor: grabbing; }",
+			".dw-vex-img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; transform-origin: center center; will-change: transform; user-select: none; -webkit-user-drag: none; }",
+			".dw-vex-close { position: absolute; top: 12px; left: 12px; z-index: 3; background: rgba(255,255,255,0.95); border: 1px solid #bbb; color: #333; font-size: 12px; font-weight: 600; font-family: sans-serif; line-height: 1; padding: 7px 11px; border-radius: 5px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); cursor: pointer; }",
 			".dw-vex-close:hover { background: #fff; color: #000; }",
-			".dw-vex-msg { padding: 20px 16px; font-size: 13px; color: #d1d5db; text-align: center; }",
+			".dw-vex-hint { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 3; background: rgba(0,0,0,0.55); color: #e5e7eb; font-size: 11px; font-family: sans-serif; padding: 4px 10px; border-radius: 999px; pointer-events: none; }",
+			".dw-vex-msg { position: absolute; z-index: 2; padding: 20px 16px; font-size: 13px; color: #d1d5db; text-align: center; }",
 			".dw-scc-notif-badge { color: #dc2626; font-weight: 600; }",
 			".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
 			// Deep-detail section inside the application popup (assessment
