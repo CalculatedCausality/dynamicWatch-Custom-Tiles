@@ -397,9 +397,13 @@ function _fetchVexcelObliques(lat, lng, token, cb) {
 		},
 		(err, data, raw) => {
 			// 401/403 = token rejected server-side despite a valid expiry
-			// (quota/revoked). Drop it so the UI prompts for a fresh one.
+			// (quota/revoked). Do NOT clear the token here — `_ensureTokenSilent`
+			// already refreshed an EXPIRED one, so a 403 means quota-capped,
+			// and clearing would just make the basemap re-mint in a loop.
+			// Report "auth" so the caller can show a message; the basemap's
+			// give-up logic owns stopping the retries.
 			if (raw && (raw.status === 401 || raw.status === 403)) {
-				_storeToken(""); cb(null, "auth"); return;
+				cb(null, "auth"); return;
 			}
 			if (err || !data) { cb(null); return; }
 			const parsed = _vexcelParseObliques(data);
@@ -482,7 +486,8 @@ export function createVexcelControl() {
 		'<button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button>' +
 		'<button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button>' +
 		"</div>" +
-		'<button type="button" class="dw-vex-ir" title="Toggle near-infrared (vegetation shows red)">IR</button>';
+		'<button type="button" class="dw-vex-ir" title="Toggle near-infrared (vegetation shows red)">IR</button>' +
+		'<div class="dw-vex-basemsg" style="display:none"></div>';
 	const overlay = document.createElement("div");
 	overlay.className = "dw-vex-overlay";
 	overlay.style.display = "none";
@@ -514,6 +519,14 @@ export function createVexcelControl() {
 		on(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); return ctl; },
 		off(ev, fn) { listeners[ev] = (listeners[ev] || []).filter((f) => f !== fn); return ctl; },
 		_fire(ev) { for (const f of listeners[ev] || []) { try { f(); } catch (_) {} } },
+		// Surface a base-layer status note under the compass (e.g. the
+		// account is quota-capped). Empty/falsy hides it.
+		setBaseMsg(text) {
+			const n = el.querySelector(".dw-vex-basemsg");
+			if (!n) return;
+			n.textContent = text || "";
+			n.style.display = text ? "block" : "none";
+		},
 	};
 	const mapEl   = overlay.querySelector(".dw-vex-tilemap");
 	const msgEl   = overlay.querySelector(".dw-vex-msg");
@@ -867,6 +880,8 @@ export class VexcelLayerProvider extends LayerProvider {
 		// a page-load prompt would be obnoxious and the token may well
 		// have rotated since the last session.
 		layer.on("add", (e) => {
+			layer._dwAuthTries = 0; // fresh activation → allow one re-auth
+			layer._dwAuthGaveUp = false;
 			const apply = (tok) => {
 				if (!_vexcelTokenValid(tok)) return;
 				const tpl = _vexcelTileTpl(tok);
@@ -883,6 +898,18 @@ export class VexcelLayerProvider extends LayerProvider {
 		});
 		layer.on("remove", () => {
 			if (_vexCtl) _vexCtl.remove();
+		});
+		// A real tile painted ⇒ token+account are fine → re-arm re-auth
+		// and clear any status notice. NOTE: Leaflet fires "tileload" for
+		// the errorTileUrl fallback too (it's a data: URI that "loads"),
+		// so we must ignore those — otherwise the give-up counter resets
+		// every failed tile and the storm never converges.
+		layer.on("tileload", (e) => {
+			const src = (e && e.tile && e.tile.src) || "";
+			if (src.slice(0, 5) === "data:") return; // blank fallback, not a real paint
+			layer._dwAuthTries = 0;
+			layer._dwAuthGaveUp = false;
+			if (_vexCtl && _vexCtl.setBaseMsg) _vexCtl.setBaseMsg("");
 		});
 		// A rejected token (403 quota/revoked) still passes the JWT-expiry
 		// check, so the basemap would silently blank forever. A BURST of
@@ -902,6 +929,29 @@ export class VexcelLayerProvider extends LayerProvider {
 			errTimer = setTimeout(() => { errBurst = 0; }, 3000);
 			if (errBurst < 8) return;
 			errBurst = 0;
+			if (layer._dwAuthGaveUp) return; // already blanked; don't loop
+			// CRITICAL: a freshly-minted token still passes the JWT-expiry
+			// check, so if we ALREADY re-authed once and tiles STILL storm,
+			// the token isn't the problem — the account is quota-capped (or
+			// there's no coverage here). Re-minting again would loop forever
+			// (this is the 643-request 403 storm). Give up: blank + notify,
+			// re-armed only by a successful tileload or a base re-toggle.
+			if (layer._dwAuthTries >= 1 && _vexcelTokenValid(_getStoredToken())) {
+				layer._dwAuthGaveUp = true;
+				layer.setUrl(BLANK_TILE);
+				// Could be a real 403 (account usage limit) OR a 404 (this
+				// area isn't flown) — the <img> error doesn't tell us which,
+				// so keep the note honest about both.
+				if (_vexCtl && _vexCtl.setBaseMsg) {
+					_vexCtl.setBaseMsg(
+						"No Vexcel imagery loaded here — either this area isn't " +
+						"covered, or the account hit its usage limit. Try another " +
+						"area, or again later.");
+				}
+				console.warn("[CustomTiles] Vexcel: fresh token still errors — " +
+					"no coverage or account quota-capped; stopping retries.");
+				return;
+			}
 			layer._dwReprompt = true;
 			_storeToken(""); // drop the rejected token
 			// Silently re-mint via stored creds first; only prompt if we
@@ -912,6 +962,7 @@ export class VexcelLayerProvider extends LayerProvider {
 				(tok) => {
 					layer._dwReprompt = false;
 					if (_vexcelTokenValid(tok)) {
+						layer._dwAuthTries++;
 						layer.setUrl(_vexcelTileTpl(tok));
 						layer.redraw();
 						if (_vexCtl) { _vexCtl.atKey = ""; } // force a re-query

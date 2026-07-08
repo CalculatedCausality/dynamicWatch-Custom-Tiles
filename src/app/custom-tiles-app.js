@@ -1150,6 +1150,7 @@ export class CustomTilesApp {
 			".dw-vex-ir:hover:not(.dw-vex-dir--off) { background: #fdecec; color: #b91c1c; border-color: #dca; }",
 			".dw-vex-ir--on { background: #dc2626; color: #fff; border-color: #dc2626; }",
 			".dw-vex-ir--on:hover { background: #dc2626 !important; color: #fff !important; }",
+			".dw-vex-basemsg { max-width: 150px; margin: 6px auto 0; padding: 5px 7px; font-size: 10.5px; line-height: 1.35; color: #7a2e2e; background: #fdecec; border: 1px solid #f0c0c0; border-radius: 3px; text-align: center; }",
 			// Full-map overlay: the chosen oblique REPLACES the map view
 			// (fills the whole map area), with the compass floating above
 			// it (dw-vex-ctl has the higher z-index). Dates ride the shared

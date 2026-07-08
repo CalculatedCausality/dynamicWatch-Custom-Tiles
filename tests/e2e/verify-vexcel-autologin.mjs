@@ -22,11 +22,16 @@ const browser = await chromium.launch({ headless: !process.env.HEADED,
 	args: ["--disable-web-security", "--disable-features=IsolateOrigins,site-per-process"] });
 const context = await browser.newContext({ storageState: STATE_PATH, viewport: { width: 1200, height: 800 } });
 
-let authPost = null, tileOk = 0, tile403 = 0;
+let authPost = null, tileOk = 0, tile403 = 0, authPosts = 0;
+const t0 = Date.now();
+const tileTimes = []; // ms-from-start of every WMTS tile request
 context.on("response", (r) => {
 	const u = r.url();
-	if (/admin\.vexcelgroup\.com\/api\/auth\/authenticate/.test(u)) authPost = r.status();
-	if (/api\.vexcelgroup\.com\/v2\/ortho\/wmts/.test(u)) { r.status() === 403 ? tile403++ : (r.status() < 300 && tileOk++); }
+	if (/admin\.vexcelgroup\.com\/api\/auth\/authenticate/.test(u)) { authPost = r.status(); authPosts++; }
+	if (/api\.vexcelgroup\.com\/v2\/ortho\/wmts/.test(u)) {
+		tileTimes.push(Date.now() - t0);
+		r.status() === 403 ? tile403++ : (r.status() < 300 && tileOk++);
+	}
 });
 
 await context.addInitScript({ content: readFileSync(resolve(__dirname, "lib", "bootstrap.js"), "utf8") });
@@ -60,7 +65,14 @@ await page.waitForFunction(() => {
 	try { const t = localStorage.getItem("GM:dw_vexcel_token") || ""; return t.replace(/^"|"$/g, "").split(".").length === 3; }
 	catch (_) { return false; }
 }, { timeout: 20_000 }).catch(() => {});
-await page.waitForTimeout(4000);
+// Watch for CONVERGENCE: when the account is quota-capped the storm used
+// to loop forever (643+ requests). The give-up logic must stop it. Sit
+// idle 12 s and confirm no new tile requests fire in the final window.
+await page.waitForTimeout(12000);
+const settleWindow = 5000;
+const now = Date.now() - t0;
+const recentTiles = tileTimes.filter((t) => t > now - settleWindow).length;
+const converged = recentTiles === 0;
 
 const tokenStored = await page.evaluate(() => {
 	try { return (localStorage.getItem("GM:dw_vexcel_token") || "").replace(/^"|"$/g, "").split(".").length === 3; }
@@ -68,9 +80,10 @@ const tokenStored = await page.evaluate(() => {
 });
 
 console.log(`\n=== Vexcel credential auto-login ===`);
-console.log(`  authenticate POST status: ${authPost}`);
+console.log(`  authenticate POST status: ${authPost}  (${authPosts} login call(s))`);
 console.log(`  token minted & stored:    ${tokenStored}`);
-console.log(`  basemap tiles OK / 403:   ${tileOk} / ${tile403}`);
+console.log(`  basemap tiles OK / 403:   ${tileOk} / ${tile403}  (${tileTimes.length} total)`);
+console.log(`  converged (0 tile reqs in last ${settleWindow / 1000}s): ${converged}  [${recentTiles} recent]`);
 console.log(`  prompted user (should be false): ${prompted}`);
 // The part THIS code owns: creds silently mint & store a valid JWT with
 // no prompt. Whether Vexcel then serves imagery is gated by the account's
@@ -79,11 +92,21 @@ console.log(`  prompted user (should be false): ${prompted}`);
 // don't fail the mechanism on it.
 const loginOk = authPost === 200 && tokenStored && !prompted;
 const imageryOk = tileOk > 0;
+// When quota-capped, the storm MUST converge (give-up logic) and MUST NOT
+// re-login endlessly (lockout risk). A couple of login calls is expected.
+const boundedLogins = authPosts <= 3;
 if (loginOk && !imageryOk) {
 	console.log(`\n⚠ login OK but imagery 403 — the Vexcel ACCOUNT is quota-capped ` +
 		`server-side right now (a fresh token can't fix that; it lifts over time).`);
 }
-console.log(`\n${loginOk ? "✓ PASS — creds auto-minted a token, no prompt" +
-	(imageryOk ? " and painted tiles" : " (imagery quota-capped, see above)") : "✗ FAIL"}`);
+const ok = loginOk && (imageryOk || (converged && boundedLogins));
+if (loginOk && !imageryOk && !converged) {
+	console.log(`\n✗ storm did NOT converge — still requesting tiles (would loop). ` +
+		`Give-up logic failed.`);
+}
+console.log(`\n${ok
+	? "✓ PASS — creds auto-minted a token, no prompt" +
+		(imageryOk ? " and painted tiles" : " (imagery quota-capped; storm converged, no loop)")
+	: "✗ FAIL"}`);
 await browser.close();
-process.exit(loginOk ? 0 : 1);
+process.exit(ok ? 0 : 1);

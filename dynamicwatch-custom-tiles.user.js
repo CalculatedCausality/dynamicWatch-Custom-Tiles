@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.128
+// @version      7.9.129
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -3086,7 +3086,6 @@
       },
       (err, data, raw) => {
         if (raw && (raw.status === 401 || raw.status === 403)) {
-          _storeToken("");
           cb(null, "auth");
           return;
         }
@@ -3150,7 +3149,7 @@
     if (_vexCtl) return _vexCtl;
     const el = document.createElement("div");
     el.className = "dw-vex-ctl";
-    el.innerHTML = '<div class="dw-vex-rose"><button type="button" class="dw-vex-dir dw-vex-n" data-dir="oblique-north" title="Look from the north">N</button><button type="button" class="dw-vex-dir dw-vex-w" data-dir="oblique-west" title="Look from the west">W</button><button type="button" class="dw-vex-dir dw-vex-c" data-dir="nadir" title="Straight down (dated)">⊙</button><button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button><button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button></div><button type="button" class="dw-vex-ir" title="Toggle near-infrared (vegetation shows red)">IR</button>';
+    el.innerHTML = '<div class="dw-vex-rose"><button type="button" class="dw-vex-dir dw-vex-n" data-dir="oblique-north" title="Look from the north">N</button><button type="button" class="dw-vex-dir dw-vex-w" data-dir="oblique-west" title="Look from the west">W</button><button type="button" class="dw-vex-dir dw-vex-c" data-dir="nadir" title="Straight down (dated)">⊙</button><button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button><button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button></div><button type="button" class="dw-vex-ir" title="Toggle near-infrared (vegetation shows red)">IR</button><div class="dw-vex-basemsg" style="display:none"></div>';
     const overlay = document.createElement("div");
     overlay.className = "dw-vex-overlay";
     overlay.style.display = "none";
@@ -3193,6 +3192,14 @@
           } catch (_) {
           }
         }
+      },
+      // Surface a base-layer status note under the compass (e.g. the
+      // account is quota-capped). Empty/falsy hides it.
+      setBaseMsg(text) {
+        const n = el.querySelector(".dw-vex-basemsg");
+        if (!n) return;
+        n.textContent = text || "";
+        n.style.display = text ? "block" : "none";
       }
     };
     const mapEl = overlay.querySelector(".dw-vex-tilemap");
@@ -3501,6 +3508,8 @@
         }
       );
       layer.on("add", (e) => {
+        layer._dwAuthTries = 0;
+        layer._dwAuthGaveUp = false;
         const apply = (tok) => {
           if (!_vexcelTokenValid(tok)) return;
           const tpl = _vexcelTileTpl(tok);
@@ -3518,6 +3527,13 @@
       layer.on("remove", () => {
         if (_vexCtl) _vexCtl.remove();
       });
+      layer.on("tileload", (e) => {
+        const src = e && e.tile && e.tile.src || "";
+        if (src.slice(0, 5) === "data:") return;
+        layer._dwAuthTries = 0;
+        layer._dwAuthGaveUp = false;
+        if (_vexCtl && _vexCtl.setBaseMsg) _vexCtl.setBaseMsg("");
+      });
       let errBurst = 0, errTimer = null;
       layer.on("tileerror", () => {
         if (!layer._map || layer._dwReprompt) return;
@@ -3528,6 +3544,18 @@
         }, 3e3);
         if (errBurst < 8) return;
         errBurst = 0;
+        if (layer._dwAuthGaveUp) return;
+        if (layer._dwAuthTries >= 1 && _vexcelTokenValid(_getStoredToken())) {
+          layer._dwAuthGaveUp = true;
+          layer.setUrl(BLANK_TILE);
+          if (_vexCtl && _vexCtl.setBaseMsg) {
+            _vexCtl.setBaseMsg(
+              "No Vexcel imagery loaded here — either this area isn't covered, or the account hit its usage limit. Try another area, or again later."
+            );
+          }
+          console.warn("[CustomTiles] Vexcel: fresh token still errors — no coverage or account quota-capped; stopping retries.");
+          return;
+        }
         layer._dwReprompt = true;
         _storeToken("");
         _ensureAuthedToken(
@@ -3535,6 +3563,7 @@
           (tok) => {
             layer._dwReprompt = false;
             if (_vexcelTokenValid(tok)) {
+              layer._dwAuthTries++;
               layer.setUrl(_vexcelTileTpl(tok));
               layer.redraw();
               if (_vexCtl) {
@@ -9019,6 +9048,7 @@
         ".dw-vex-ir:hover:not(.dw-vex-dir--off) { background: #fdecec; color: #b91c1c; border-color: #dca; }",
         ".dw-vex-ir--on { background: #dc2626; color: #fff; border-color: #dc2626; }",
         ".dw-vex-ir--on:hover { background: #dc2626 !important; color: #fff !important; }",
+        ".dw-vex-basemsg { max-width: 150px; margin: 6px auto 0; padding: 5px 7px; font-size: 10.5px; line-height: 1.35; color: #7a2e2e; background: #fdecec; border: 1px solid #f0c0c0; border-radius: 3px; text-align: center; }",
         // Full-map overlay: the chosen oblique REPLACES the map view
         // (fills the whole map area), with the compass floating above
         // it (dw-vex-ctl has the higher z-index). Dates ride the shared
