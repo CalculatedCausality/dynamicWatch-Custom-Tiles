@@ -77,6 +77,14 @@
 				if (!ok) {
 					console.warn("[TM-shim] @connect VIOLATION: GM request to " +
 						host + " — real Tampermonkey would block this");
+					// When enforcing, actually refuse — so a diagnostic can
+					// reproduce the real "blocked → feature fails" behaviour.
+					if (window.__dwConnectEnforce) {
+						if (typeof opts.onerror === "function") {
+							opts.onerror({ error: "@connect blocked: " + host, status: 0 });
+						}
+						return { abort() {} };
+					}
 				}
 			}
 		} catch (_) {}

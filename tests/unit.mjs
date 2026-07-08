@@ -2,9 +2,17 @@
 // Catches regressions in tile projection, MVT decode, point-in-polygon,
 // colour utilities, and the INTVL hover-helper logic. No network.
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { loadHelpers } from "./_loader.mjs";
 
 const dw = loadHelpers();
+
+const _BUILT_SCRIPT = readFileSync(
+	resolve(dirname(fileURLToPath(import.meta.url)), "..", "dynamicwatch-custom-tiles.user.js"),
+	"utf8",
+);
 
 // -- Test runner -------------------------------------------------------
 
@@ -1130,6 +1138,29 @@ t("_vexcelObliqueExtractUrl builds a token-scoped, layer-aware URL", () => {
 	eq(dw._vexcelObliqueExtractUrl("img", "urban", 0, 0, "expired"), "",
 		"invalid token → empty");
 	eq(dw._vexcelObliqueExtractUrl("", "urban", 0, 0, jwt), "", "missing image → empty");
+});
+
+// ---- @connect coverage (real-Tampermonkey GM_xmlhttpRequest gate) ----
+// The e2e harness swaps GM_xmlhttpRequest for a plain fetch, so it can't
+// catch a missing @connect — but real Tampermonkey BLOCKS any GM request
+// to a host not in the allowlist. Every host reached via gmGet/gmJsonGet
+// (query/extract/detail/docs APIs) MUST be declared, or the feature
+// silently fails in the field while all tests pass. This guards that.
+t("@connect covers every host the providers GM-fetch from", () => {
+	const declared = new Set(
+		[..._BUILT_SCRIPT.matchAll(/@connect\s+(\S+)/g)].map((m) => m[1]),
+	);
+	// Hosts fetched through GM_xmlhttpRequest (NOT <img> tile hosts,
+	// which the browser loads directly and @connect doesn't gate).
+	const required = [
+		"api.vexcelgroup.com",              // Vexcel oblique query + extract
+		"geopublic.scc.qld.gov.au",         // SCC applications GeoJSON query
+		"developmenti.sunshinecoast.qld.gov.au", // Development.i detail/filter
+		"publicdocs.scc.qld.gov.au",        // SCC lodged-document repository
+	];
+	for (const host of required) {
+		assert(declared.has(host), `@connect missing for GM-fetched host: ${host}`);
+	}
 });
 
 // -- Summary -----------------------------------------------------------
