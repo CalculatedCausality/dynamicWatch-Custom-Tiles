@@ -74,6 +74,34 @@ const now = Date.now() - t0;
 const recentTiles = tileTimes.filter((t) => t > now - settleWindow).length;
 const converged = recentTiles === 0;
 
+// Now stress it like a real user: after give-up, PAN and ZOOM around and
+// confirm the storm does NOT resume (give-up must survive map interaction,
+// not just an idle map). This is the real-world "10,532 requests" case.
+const beforeInteract = tileTimes.length;
+for (let i = 0; i < 4; i++) {
+	await page.mouse.move(400, 400);
+	await page.mouse.down();
+	await page.mouse.move(400 + (i % 2 ? -220 : 220), 400 + (i < 2 ? 180 : -180), { steps: 8 });
+	await page.mouse.up();
+	await page.waitForTimeout(700);
+}
+await page.evaluate(() => window._dwLayerCtrl._map.setZoom(18));
+await page.waitForTimeout(1500);
+await page.evaluate(() => window._dwLayerCtrl._map.setZoom(16));
+await page.waitForTimeout(3000);
+const tilesDuringInteract = tileTimes.length - beforeInteract;
+// A handful of tiles may fire as new areas scroll in before give-up
+// re-triggers, but it must NOT be a storm.
+const heldUnderInteraction = tilesDuringInteract < 30;
+
+// The date bar must resolve to a definite state, not spin "Loading…"
+// forever when the point has no imagery / the account is quota-capped.
+const barLabel = await page.evaluate(() => {
+	const n = document.querySelector(".dw-history-bar-label");
+	return n ? (n.textContent || "").trim() : "(no bar)";
+});
+const barResolved = barLabel !== "" && !/^Loading/i.test(barLabel);
+
 const tokenStored = await page.evaluate(() => {
 	try { return (localStorage.getItem("GM:dw_vexcel_token") || "").replace(/^"|"$/g, "").split(".").length === 3; }
 	catch (_) { return false; }
@@ -84,6 +112,8 @@ console.log(`  authenticate POST status: ${authPost}  (${authPosts} login call(s
 console.log(`  token minted & stored:    ${tokenStored}`);
 console.log(`  basemap tiles OK / 403:   ${tileOk} / ${tile403}  (${tileTimes.length} total)`);
 console.log(`  converged (0 tile reqs in last ${settleWindow / 1000}s): ${converged}  [${recentTiles} recent]`);
+console.log(`  tiles during pan+zoom stress: ${tilesDuringInteract}  (held: ${heldUnderInteraction})`);
+console.log(`  date-bar label: "${barLabel}"  (resolved, not stuck loading: ${barResolved})`);
 console.log(`  prompted user (should be false): ${prompted}`);
 // The part THIS code owns: creds silently mint & store a valid JWT with
 // no prompt. Whether Vexcel then serves imagery is gated by the account's
@@ -99,7 +129,7 @@ if (loginOk && !imageryOk) {
 	console.log(`\n⚠ login OK but imagery 403 — the Vexcel ACCOUNT is quota-capped ` +
 		`server-side right now (a fresh token can't fix that; it lifts over time).`);
 }
-const ok = loginOk && (imageryOk || (converged && boundedLogins));
+const ok = loginOk && barResolved && (imageryOk || (converged && boundedLogins && heldUnderInteraction));
 if (loginOk && !imageryOk && !converged) {
 	console.log(`\n✗ storm did NOT converge — still requesting tiles (would loop). ` +
 		`Give-up logic failed.`);

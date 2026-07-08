@@ -246,6 +246,7 @@ export class CustomTilesApp {
 				getIdx:   () => vexCtl.getCaptureIdx(),
 				setIdx:   (i) => vexCtl.setCapture(i),
 				getLabel: (i) => vexCtl.getCaptureDate(i),
+				getState: () => vexCtl.getCaptureState(),
 			});
 			// The date bar only makes sense while an oblique is open (the
 			// flat basemap is date-locked), so show/hide it as the oblique
@@ -921,7 +922,13 @@ export class CustomTilesApp {
 		L.DomEvent.disableScrollPropagation(bar);
 
 		const formatLabel = (lab, idx, count) => {
-			if (!count) return "Loading\u2026";
+			if (!count) {
+				// If the adapter reports a resolved-but-empty state, say so
+				// instead of spinning "Loading\u2026" forever (e.g. no Vexcel
+				// imagery at this point, or the account is quota-capped).
+				const state = adapter.getState ? adapter.getState() : "loading";
+				return state === "loading" ? "Loading\u2026" : "No imagery here";
+			}
 			const s = lab ? String(lab) : "?";
 			const trimmed =
 				s.length > 10 && /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;

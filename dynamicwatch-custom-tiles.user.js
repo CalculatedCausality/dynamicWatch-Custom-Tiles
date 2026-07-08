@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.129
+// @version      7.9.130
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -3176,6 +3176,8 @@
       // "rgb" | "irg" (near-infrared)
       capIdx: 0,
       // index into model.captures (0 = newest)
+      queried: false,
+      // has the capture query at the current point resolved?
       gen: 0,
       on(ev, fn) {
         (listeners[ev] = listeners[ev] || []).push(fn);
@@ -3390,16 +3392,20 @@
       ctl.lat = c.lat;
       ctl.lng = c.lng;
       ctl.atKey = key;
-      if (!_vexcelTokenValid(_getStoredToken())) {
+      if (!_vexcelTokenValid(_getStoredToken()) && !_hasCreds()) {
         ctl.model = null;
+        ctl.queried = true;
         ctl._fire("capturechange");
         return;
       }
+      ctl.queried = false;
+      ctl._fire("capturechange");
       const gen = ++ctl.gen;
       fetchVexcelObliques(ctl.lat, ctl.lng, (model, reason) => {
         if (gen !== ctl.gen && model == null) {
         }
         ctl.model = model || null;
+        ctl.queried = true;
         if (reason === "auth") {
           ctl._fire("capturechange");
           if (ctl.isOverlayOpen()) setMsg("Vexcel token was refused — reselect the base to paste a fresh one.");
@@ -3446,6 +3452,7 @@
     });
     ctl.getCaptureCount = () => ctl.model && ctl.model.captures.length || 0;
     ctl.getCaptureIdx = () => ctl.capIdx;
+    ctl.getCaptureState = () => !ctl.queried ? "loading" : ctl.getCaptureCount() ? "ready" : "empty";
     ctl.getCaptureDate = (i) => {
       const caps = ctl.model && ctl.model.captures || [];
       return caps[i] ? caps[i].date || caps[i].year : "";
@@ -8269,7 +8276,8 @@
           getCount: () => vexCtl.getCaptureCount(),
           getIdx: () => vexCtl.getCaptureIdx(),
           setIdx: (i) => vexCtl.setCapture(i),
-          getLabel: (i) => vexCtl.getCaptureDate(i)
+          getLabel: (i) => vexCtl.getCaptureDate(i),
+          getState: () => vexCtl.getCaptureState()
         });
         vexCtl.on("overlaytoggle", () => this._syncVexcelHistControl(map));
         const wayLyr = addBase(CFG.LAYER_WAYBACK, new WaybackLayerProvider());
@@ -8827,7 +8835,10 @@
       L.DomEvent.disableClickPropagation(bar);
       L.DomEvent.disableScrollPropagation(bar);
       const formatLabel = (lab, idx, count) => {
-        if (!count) return "Loading…";
+        if (!count) {
+          const state = adapter.getState ? adapter.getState() : "loading";
+          return state === "loading" ? "Loading…" : "No imagery here";
+        }
         const s = lab ? String(lab) : "?";
         const trimmed = s.length > 10 && /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
         return count > 1 ? `${trimmed}  ${idx + 1}/${count}` : trimmed;

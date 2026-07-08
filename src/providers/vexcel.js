@@ -515,6 +515,7 @@ export function createVexcelControl() {
 		dir: "nadir",
 		band: "rgb",     // "rgb" | "irg" (near-infrared)
 		capIdx: 0,       // index into model.captures (0 = newest)
+		queried: false,  // has the capture query at the current point resolved?
 		gen: 0,
 		on(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); return ctl; },
 		off(ev, fn) { listeners[ev] = (listeners[ev] || []).filter((f) => f !== fn); return ctl; },
@@ -752,13 +753,15 @@ export function createVexcelControl() {
 		const key = c.lat.toFixed(5) + "," + c.lng.toFixed(5);
 		if (ctl.atKey === key) return;
 		ctl.lat = c.lat; ctl.lng = c.lng; ctl.atKey = key;
-		if (!_vexcelTokenValid(_getStoredToken())) {
-			ctl.model = null; ctl._fire("capturechange"); return;
+		if (!_vexcelTokenValid(_getStoredToken()) && !_hasCreds()) {
+			ctl.model = null; ctl.queried = true; ctl._fire("capturechange"); return;
 		}
+		ctl.queried = false; ctl._fire("capturechange"); // show "Loading…" while in flight
 		const gen = ++ctl.gen;
 		fetchVexcelObliques(ctl.lat, ctl.lng, (model, reason) => {
 			if (gen !== ctl.gen && model == null) { /* keep prior on stale */ }
 			ctl.model = model || null;
+			ctl.queried = true;
 			if (reason === "auth") {
 				// Token was refused (cleared by the fetch). The basemap's
 				// tile-error handler prompts for a fresh one; here just
@@ -808,6 +811,11 @@ export function createVexcelControl() {
 	// -- history-bar adapter (dates) --------------------------------
 	ctl.getCaptureCount = () => (ctl.model && ctl.model.captures.length) || 0;
 	ctl.getCaptureIdx   = () => ctl.capIdx;
+	// "loading" until the first query resolves, then "ready" (has captures)
+	// or "empty" — so the date bar can stop showing "Loading…" forever when
+	// a point has no imagery (or the account is quota-capped).
+	ctl.getCaptureState = () =>
+		!ctl.queried ? "loading" : (ctl.getCaptureCount() ? "ready" : "empty");
 	ctl.getCaptureDate  = (i) => {
 		const caps = (ctl.model && ctl.model.captures) || [];
 		return caps[i] ? (caps[i].date || caps[i].year) : "";
