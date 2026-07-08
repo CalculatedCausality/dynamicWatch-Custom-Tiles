@@ -42,6 +42,16 @@ export const CFG = {
 	VEXCEL_WMTS_BASE: "https://api.vexcelgroup.com/v2/ortho/wmts",
 	VEXCEL_TOKEN_KEY: "dw_vexcel_token",
 	VEXCEL_VIEWER_URL: "https://anz-viewer.vexcelgroup.com",
+	// Auto-login (opt-in): the viewer mints its ~24 h JWT via
+	// POST admin.vexcelgroup.com/api/auth/authenticate {username,password,
+	// application} → {data:{token}}. Credentials live in GM storage on the
+	// user's own machine ONLY (same trust model as the token) — never in
+	// the script or git. Lets the daily token refresh silently.
+	VEXCEL_ADMIN_BASE: "https://admin.vexcelgroup.com",
+	VEXCEL_USER_KEY: "dw_vexcel_user",
+	VEXCEL_PASS_KEY: "dw_vexcel_pass",
+	VEXCEL_APP_KEY: "anz",
+	VEXCEL_APP_HDR: "viewer-app",
 	// Esri's reference overlays — the label/road tile pair designed to
 	// sit on World Imagery. Auto-synced onto the Wayback base the same
 	// way QLD Labels/Roads pair with the QLD bases. Keyless XYZ.

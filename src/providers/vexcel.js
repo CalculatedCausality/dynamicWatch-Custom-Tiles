@@ -215,6 +215,143 @@ function _storeToken(t) {
 	try { GM_setValue(CFG.VEXCEL_TOKEN_KEY, t); } catch (_) {}
 }
 
+// Credentials for silent daily token refresh. Stored in GM (the user's
+// own machine) exactly like the token — NEVER hardcoded in the script or
+// committed, and deliberately NOT "encrypted": in a client-side script
+// the key would ship alongside, so it'd be recoverable anyway.
+function _getStoredCreds() {
+	try {
+		return {
+			user: GM_getValue(CFG.VEXCEL_USER_KEY, "") || "",
+			pass: GM_getValue(CFG.VEXCEL_PASS_KEY, "") || "",
+		};
+	} catch (_) { return { user: "", pass: "" }; }
+}
+
+function _storeCreds(user, pass) {
+	try {
+		GM_setValue(CFG.VEXCEL_USER_KEY, user || "");
+		GM_setValue(CFG.VEXCEL_PASS_KEY, pass || "");
+	} catch (_) {}
+}
+
+function _hasCreds() { const c = _getStoredCreds(); return !!(c.user && c.pass); }
+
+// Detect a "user:password" login string vs a pasted token/URL. Creds =
+// has a colon, an "@" in the part before it, and isn't an http(s) URL.
+export function _vexcelIsCredString(s) {
+	s = String(s || "").trim();
+	const i = s.indexOf(":");
+	return i > 0 && s.slice(0, i).indexOf("@") > 0 && !/^https?:/i.test(s);
+}
+
+// Exchange stored credentials for a fresh JWT. Guards against the two
+// ways this could hammer the auth endpoint (→ account lockout): an
+// in-flight coalescer (parallel 403s share one login) and a 15 s
+// cooldown (sequential retries back off). Bad creds are CLEARED so we
+// fall back to prompting instead of looping. cb(token|null, reason).
+let _loginInFlight = null;
+let _loginCooldownUntil = 0;
+export function _vexcelLogin(cb) {
+	cb = cb || function () {};
+	const creds = _getStoredCreds();
+	if (!creds.user || !creds.pass) { cb(null, "nocreds"); return; }
+	if (_loginInFlight) { _loginInFlight.push(cb); return; }
+	const now = (typeof Date !== "undefined" && Date.now) ? Date.now() : 0;
+	if (now && now < _loginCooldownUntil) { cb(null, "cooldown"); return; }
+	_loginCooldownUntil = now + 15000;
+	_loginInFlight = [cb];
+	const done = (tok, reason) => {
+		const waiters = _loginInFlight; _loginInFlight = null;
+		for (const w of waiters) { try { w(tok, reason); } catch (_) {} }
+	};
+	gmJsonGet(
+		CFG.VEXCEL_ADMIN_BASE + "/api/auth/authenticate",
+		{
+			method: "POST",
+			data: JSON.stringify({
+				username: creds.user, password: creds.pass,
+				application: CFG.VEXCEL_APP_KEY,
+			}),
+			headers: {
+				"Content-Type": "application/json",
+				"X-App-Key": CFG.VEXCEL_APP_HDR,
+			},
+		},
+		(err, data, raw) => {
+			const status = raw ? raw.status : 0;
+			// Rejected credentials — drop them so we don't retry into a
+			// lockout; the caller then prompts for fresh ones.
+			if (status === 401 || status === 403) {
+				_storeCreds("", ""); done(null, "badcreds"); return;
+			}
+			if (err || !data) { done(null, "neterr"); return; } // transient
+			const tok = data.data && data.data.token;
+			if (!_vexcelTokenValid(tok)) {
+				_storeCreds("", ""); done(null, "badcreds"); return;
+			}
+			_storeToken(tok);
+			_loginCooldownUntil = 0; // success unblocks retries immediately
+			done(tok, null);
+		},
+	);
+}
+
+// Get a usable token WITHOUT ever prompting: valid stored token, else a
+// silent auto-login with stored creds, else null. Used by the async
+// query/frame paths so they self-heal when the basemap path re-auths.
+function _ensureTokenSilent(cb) {
+	const tok = _getStoredToken();
+	if (_vexcelTokenValid(tok)) { cb(tok); return; }
+	if (_hasCreds()) { _vexcelLogin((t) => cb(t || null)); return; }
+	cb(null);
+}
+
+// Get a usable token, prompting the user as a last resort. Prefers a
+// silent auto-login; only prompts when there are no creds or they were
+// rejected. Transient failures stay silent (retry on the next event).
+function _ensureAuthedToken(lead, cb) {
+	const tok = _getStoredToken();
+	if (_vexcelTokenValid(tok)) { cb(tok); return; }
+	if (_hasCreds()) {
+		_vexcelLogin((newTok, reason) => {
+			if (newTok) { cb(newTok); return; }
+			if (reason === "neterr" || reason === "cooldown") { cb(null, reason); return; }
+			_promptForVexcelAuth(lead, (t2) => cb(t2 || null));
+		});
+		return;
+	}
+	_promptForVexcelAuth(lead, (t2) => cb(t2 || null));
+}
+
+// One prompt that accepts EITHER "email:password" (stored for silent
+// daily refresh, then logged in) OR a pasted token/URL (one-off). Async
+// because the credential path performs a network login. cb(token|null).
+function _promptForVexcelAuth(lead, cb) {
+	cb = cb || function () {};
+	const raw = window.prompt(
+		(lead || "Vexcel Aerial sign-in.") + "\n\n" +
+		"Enter your Vexcel login as  email:password  — stored on THIS device " +
+		"only and used to auto-refresh the daily token.\n\n" +
+		"…or paste a one-off api.vexcelgroup.com token/URL instead " +
+		"(log in at " + CFG.VEXCEL_VIEWER_URL + ").",
+		"",
+	);
+	if (raw == null) { cb(null); return; } // cancelled — don't nag this add
+	const s = raw.trim();
+	if (_vexcelIsCredString(s)) {
+		const i = s.indexOf(":");
+		_storeCreds(s.slice(0, i).trim(), s.slice(i + 1).trim());
+		_vexcelLogin((tok) => cb(_vexcelTokenValid(tok) ? tok : null));
+		return;
+	}
+	const tok = _vexcelParseToken(s);
+	if (tok) _storeToken(tok);
+	cb(_vexcelTokenValid(tok) ? tok : null);
+}
+
+// Back-compat shim: some call sites still expect a synchronous
+// token-only prompt. Kept for the frame/query fallbacks.
 function _promptForToken(lead) {
 	const raw = window.prompt(
 		(lead || "Vexcel Aerial needs a fresh token (they expire daily).") + "\n\n" +
@@ -234,7 +371,9 @@ function _promptForToken(lead) {
 // Queries both programs (wide-area + urban) so rural/edge points that
 // only have wide-area coverage still resolve.
 export function fetchVexcelObliques(lat, lng, cb) {
-	const token = _getStoredToken();
+	_ensureTokenSilent((token) => _fetchVexcelObliques(lat, lng, token, cb));
+}
+function _fetchVexcelObliques(lat, lng, token, cb) {
 	if (!_vexcelTokenValid(token)) { cb(null); return; }
 	gmJsonGet(
 		CFG.VEXCEL_API_BASE + "/v2/oriented/query?token=" +
@@ -278,7 +417,9 @@ function _dirLabel(key) {
 // ground point — used while panning to pull the ADJACENT frame as the
 // view crosses the current frame's edge.
 export function fetchVexcelFrame(lng, lat, collection, dir, band, cb) {
-	const token = _getStoredToken();
+	_ensureTokenSilent((token) => _fetchVexcelFrame(lng, lat, collection, dir, band, token, cb));
+}
+function _fetchVexcelFrame(lng, lat, collection, dir, band, token, cb) {
 	if (!_vexcelTokenValid(token)) { cb(null); return; }
 	gmJsonGet(
 		CFG.VEXCEL_API_BASE + "/v2/oriented/query?token=" + encodeURIComponent(token),
@@ -726,12 +867,16 @@ export class VexcelLayerProvider extends LayerProvider {
 		// a page-load prompt would be obnoxious and the token may well
 		// have rotated since the last session.
 		layer.on("add", (e) => {
-			let tok = _getStoredToken();
-			if (!_vexcelTokenValid(tok)) tok = _promptForToken();
-			if (_vexcelTokenValid(tok)) {
+			const apply = (tok) => {
+				if (!_vexcelTokenValid(tok)) return;
 				const tpl = _vexcelTileTpl(tok);
-				if (layer._url !== tpl) layer.setUrl(tpl);
-			}
+				if (layer._url !== tpl) { layer.setUrl(tpl); layer.redraw(); }
+			};
+			const cur = _getStoredToken();
+			// Valid token → paint now; otherwise silently auto-login with
+			// stored creds (or prompt for creds/token the first time).
+			if (_vexcelTokenValid(cur)) apply(cur);
+			else _ensureAuthedToken(undefined, apply);
 			// Show the docked imagery compass (N/E/S/W/⊙ + date slider).
 			const map = e && e.target && e.target._map;
 			if (map) createVexcelControl().addTo(map);
@@ -759,18 +904,24 @@ export class VexcelLayerProvider extends LayerProvider {
 			errBurst = 0;
 			layer._dwReprompt = true;
 			_storeToken(""); // drop the rejected token
-			const tok = _promptForToken(
-				"Vexcel refused the current token (expired or usage limit). Paste a fresh one:");
-			layer._dwReprompt = false;
-			if (_vexcelTokenValid(tok)) {
-				layer.setUrl(_vexcelTileTpl(tok));
-				layer.redraw();
-				if (_vexCtl) { _vexCtl.atKey = ""; } // force a re-query
-			} else {
-				// Cancelled / still bad — stop hammering the dead token
-				// (blank data URIs don't error, so no more prompts).
-				layer.setUrl(BLANK_TILE);
-			}
+			// Silently re-mint via stored creds first; only prompt if we
+			// have none / they're rejected. `_dwReprompt` gates re-entry
+			// until this resolves.
+			_ensureAuthedToken(
+				"Vexcel refused the current token (expired or usage limit).",
+				(tok) => {
+					layer._dwReprompt = false;
+					if (_vexcelTokenValid(tok)) {
+						layer.setUrl(_vexcelTileTpl(tok));
+						layer.redraw();
+						if (_vexCtl) { _vexCtl.atKey = ""; } // force a re-query
+					} else {
+						// Cancelled / still bad — stop hammering the dead
+						// token (blank data URIs don't error → no re-prompt).
+						layer.setUrl(BLANK_TILE);
+					}
+				},
+			);
 		});
 		// 3D sync re-evaluates per sync, so a token pasted mid-session
 		// flows into the Mapbox raster source without a mode toggle.

@@ -1075,6 +1075,18 @@ t("_vexcelParseToken accepts bare JWT, URL, curl blob; rejects junk", () => {
 	eq(dw._vexcelParseToken(""), "", "empty rejected");
 });
 
+t("_vexcelIsCredString tells email:password from a token/URL paste", () => {
+	const jwt = fakeJwt(9999999999);
+	assert(dw._vexcelIsCredString("user@mozmail.com:s3cr3t"), "email:pass = creds");
+	assert(dw._vexcelIsCredString("  a@b.co:pa:ss  "), "colon in password still creds");
+	assert(!dw._vexcelIsCredString(jwt), "bare JWT is not creds");
+	assert(!dw._vexcelIsCredString(
+		`https://api.vexcelgroup.com/v2/x?token=${jwt}`), "URL is not creds (has ://)");
+	assert(!dw._vexcelIsCredString("nopass"), "no colon is not creds");
+	assert(!dw._vexcelIsCredString("noatsign:pw"), "no @ before colon is not creds");
+	assert(!dw._vexcelIsCredString(""), "empty is not creds");
+});
+
 t("_vexcelTokenExp / _vexcelTokenValid decode expiry", () => {
 	const future = Math.floor(Date.now() / 1000) + 3600;
 	const past = Math.floor(Date.now() / 1000) - 3600;

@@ -43,6 +43,7 @@ const HELPERS = [
 	"_vexcelCollectionYear", "_vexcelParseObliques", "_vexcelObliqueExtractUrl",
 	"_vexcelObliqueTileBase", "_vexcelMaxDownsample", "_vexcelBand",
 	"_vexcelFootprint", "_vexcelBilinear", "_vexcelInvBilinear",
+	"_vexcelIsCredString",
 	// Layer-provider factories
 	"LayerProvider", "tileProvider", "tokenTileProvider",
 	"arcgisExportProvider", "pollingDataLayer", "oimIcon",

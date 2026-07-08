@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.127
+// @version      7.9.128
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -17,6 +17,7 @@
 // @connect      developmenti.sunshinecoast.qld.gov.au
 // @connect      publicdocs.scc.qld.gov.au
 // @connect      api.vexcelgroup.com
+// @connect      admin.vexcelgroup.com
 // @connect      connecttile.garmin.com
 // @connect      strava.com
 // @connect      content-a.strava.com
@@ -80,6 +81,16 @@
     VEXCEL_WMTS_BASE: "https://api.vexcelgroup.com/v2/ortho/wmts",
     VEXCEL_TOKEN_KEY: "dw_vexcel_token",
     VEXCEL_VIEWER_URL: "https://anz-viewer.vexcelgroup.com",
+    // Auto-login (opt-in): the viewer mints its ~24 h JWT via
+    // POST admin.vexcelgroup.com/api/auth/authenticate {username,password,
+    // application} → {data:{token}}. Credentials live in GM storage on the
+    // user's own machine ONLY (same trust model as the token) — never in
+    // the script or git. Lets the daily token refresh silently.
+    VEXCEL_ADMIN_BASE: "https://admin.vexcelgroup.com",
+    VEXCEL_USER_KEY: "dw_vexcel_user",
+    VEXCEL_PASS_KEY: "dw_vexcel_pass",
+    VEXCEL_APP_KEY: "anz",
+    VEXCEL_APP_HDR: "viewer-app",
     // Esri's reference overlays — the label/road tile pair designed to
     // sit on World Imagery. Auto-synced onto the Wayback base the same
     // way QLD Labels/Roads pair with the QLD bases. Keyless XYZ.
@@ -2897,18 +2908,160 @@
     } catch (_) {
     }
   }
-  function _promptForToken(lead) {
+  function _getStoredCreds() {
+    try {
+      return {
+        user: GM_getValue(CFG.VEXCEL_USER_KEY, "") || "",
+        pass: GM_getValue(CFG.VEXCEL_PASS_KEY, "") || ""
+      };
+    } catch (_) {
+      return { user: "", pass: "" };
+    }
+  }
+  function _storeCreds(user, pass) {
+    try {
+      GM_setValue(CFG.VEXCEL_USER_KEY, user || "");
+      GM_setValue(CFG.VEXCEL_PASS_KEY, pass || "");
+    } catch (_) {
+    }
+  }
+  function _hasCreds() {
+    const c = _getStoredCreds();
+    return !!(c.user && c.pass);
+  }
+  function _vexcelIsCredString(s) {
+    s = String(s || "").trim();
+    const i = s.indexOf(":");
+    return i > 0 && s.slice(0, i).indexOf("@") > 0 && !/^https?:/i.test(s);
+  }
+  var _loginInFlight = null;
+  var _loginCooldownUntil = 0;
+  function _vexcelLogin(cb) {
+    cb = cb || function() {
+    };
+    const creds = _getStoredCreds();
+    if (!creds.user || !creds.pass) {
+      cb(null, "nocreds");
+      return;
+    }
+    if (_loginInFlight) {
+      _loginInFlight.push(cb);
+      return;
+    }
+    const now = typeof Date !== "undefined" && Date.now ? Date.now() : 0;
+    if (now && now < _loginCooldownUntil) {
+      cb(null, "cooldown");
+      return;
+    }
+    _loginCooldownUntil = now + 15e3;
+    _loginInFlight = [cb];
+    const done = (tok, reason) => {
+      const waiters = _loginInFlight;
+      _loginInFlight = null;
+      for (const w of waiters) {
+        try {
+          w(tok, reason);
+        } catch (_) {
+        }
+      }
+    };
+    gmJsonGet(
+      CFG.VEXCEL_ADMIN_BASE + "/api/auth/authenticate",
+      {
+        method: "POST",
+        data: JSON.stringify({
+          username: creds.user,
+          password: creds.pass,
+          application: CFG.VEXCEL_APP_KEY
+        }),
+        headers: {
+          "Content-Type": "application/json",
+          "X-App-Key": CFG.VEXCEL_APP_HDR
+        }
+      },
+      (err, data, raw) => {
+        const status = raw ? raw.status : 0;
+        if (status === 401 || status === 403) {
+          _storeCreds("", "");
+          done(null, "badcreds");
+          return;
+        }
+        if (err || !data) {
+          done(null, "neterr");
+          return;
+        }
+        const tok = data.data && data.data.token;
+        if (!_vexcelTokenValid(tok)) {
+          _storeCreds("", "");
+          done(null, "badcreds");
+          return;
+        }
+        _storeToken(tok);
+        _loginCooldownUntil = 0;
+        done(tok, null);
+      }
+    );
+  }
+  function _ensureTokenSilent(cb) {
+    const tok = _getStoredToken();
+    if (_vexcelTokenValid(tok)) {
+      cb(tok);
+      return;
+    }
+    if (_hasCreds()) {
+      _vexcelLogin((t) => cb(t || null));
+      return;
+    }
+    cb(null);
+  }
+  function _ensureAuthedToken(lead, cb) {
+    const tok = _getStoredToken();
+    if (_vexcelTokenValid(tok)) {
+      cb(tok);
+      return;
+    }
+    if (_hasCreds()) {
+      _vexcelLogin((newTok, reason) => {
+        if (newTok) {
+          cb(newTok);
+          return;
+        }
+        if (reason === "neterr" || reason === "cooldown") {
+          cb(null, reason);
+          return;
+        }
+        _promptForVexcelAuth(lead, (t2) => cb(t2 || null));
+      });
+      return;
+    }
+    _promptForVexcelAuth(lead, (t2) => cb(t2 || null));
+  }
+  function _promptForVexcelAuth(lead, cb) {
+    cb = cb || function() {
+    };
     const raw = window.prompt(
-      (lead || "Vexcel Aerial needs a fresh token (they expire daily).") + "\n\n1. Log in at " + CFG.VEXCEL_VIEWER_URL + "\n2. DevTools → Network → copy any api.vexcelgroup.com request URL\n3. Paste it here (the whole URL is fine):",
+      (lead || "Vexcel Aerial sign-in.") + "\n\nEnter your Vexcel login as  email:password  — stored on THIS device only and used to auto-refresh the daily token.\n\n…or paste a one-off api.vexcelgroup.com token/URL instead (log in at " + CFG.VEXCEL_VIEWER_URL + ").",
       ""
     );
-    if (raw == null) return "";
-    const tok = _vexcelParseToken(raw);
+    if (raw == null) {
+      cb(null);
+      return;
+    }
+    const s = raw.trim();
+    if (_vexcelIsCredString(s)) {
+      const i = s.indexOf(":");
+      _storeCreds(s.slice(0, i).trim(), s.slice(i + 1).trim());
+      _vexcelLogin((tok2) => cb(_vexcelTokenValid(tok2) ? tok2 : null));
+      return;
+    }
+    const tok = _vexcelParseToken(s);
     if (tok) _storeToken(tok);
-    return tok;
+    cb(_vexcelTokenValid(tok) ? tok : null);
   }
   function fetchVexcelObliques(lat, lng, cb) {
-    const token = _getStoredToken();
+    _ensureTokenSilent((token) => _fetchVexcelObliques(lat, lng, token, cb));
+  }
+  function _fetchVexcelObliques(lat, lng, token, cb) {
     if (!_vexcelTokenValid(token)) {
       cb(null);
       return;
@@ -2951,7 +3104,9 @@
     return d ? d.label : key;
   }
   function fetchVexcelFrame(lng, lat, collection, dir, band, cb) {
-    const token = _getStoredToken();
+    _ensureTokenSilent((token) => _fetchVexcelFrame(lng, lat, collection, dir, band, token, cb));
+  }
+  function _fetchVexcelFrame(lng, lat, collection, dir, band, token, cb) {
     if (!_vexcelTokenValid(token)) {
       cb(null);
       return;
@@ -3346,12 +3501,17 @@
         }
       );
       layer.on("add", (e) => {
-        let tok = _getStoredToken();
-        if (!_vexcelTokenValid(tok)) tok = _promptForToken();
-        if (_vexcelTokenValid(tok)) {
+        const apply = (tok) => {
+          if (!_vexcelTokenValid(tok)) return;
           const tpl = _vexcelTileTpl(tok);
-          if (layer._url !== tpl) layer.setUrl(tpl);
-        }
+          if (layer._url !== tpl) {
+            layer.setUrl(tpl);
+            layer.redraw();
+          }
+        };
+        const cur = _getStoredToken();
+        if (_vexcelTokenValid(cur)) apply(cur);
+        else _ensureAuthedToken(void 0, apply);
         const map = e && e.target && e.target._map;
         if (map) createVexcelControl().addTo(map);
       });
@@ -3370,19 +3530,21 @@
         errBurst = 0;
         layer._dwReprompt = true;
         _storeToken("");
-        const tok = _promptForToken(
-          "Vexcel refused the current token (expired or usage limit). Paste a fresh one:"
-        );
-        layer._dwReprompt = false;
-        if (_vexcelTokenValid(tok)) {
-          layer.setUrl(_vexcelTileTpl(tok));
-          layer.redraw();
-          if (_vexCtl) {
-            _vexCtl.atKey = "";
+        _ensureAuthedToken(
+          "Vexcel refused the current token (expired or usage limit).",
+          (tok) => {
+            layer._dwReprompt = false;
+            if (_vexcelTokenValid(tok)) {
+              layer.setUrl(_vexcelTileTpl(tok));
+              layer.redraw();
+              if (_vexCtl) {
+                _vexCtl.atKey = "";
+              }
+            } else {
+              layer.setUrl(BLANK_TILE);
+            }
           }
-        } else {
-          layer.setUrl(BLANK_TILE);
-        }
+        );
       });
       layer._dwMb3DGetUrl = () => {
         const tok = _getStoredToken();
@@ -9031,6 +9193,7 @@
         _vexcelFootprint,
         _vexcelBilinear,
         _vexcelInvBilinear,
+        _vexcelIsCredString,
         LayerProvider,
         tileProvider,
         tokenTileProvider,

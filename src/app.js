@@ -27,6 +27,7 @@ import {
 	_vexcelFootprint,
 	_vexcelBilinear,
 	_vexcelInvBilinear,
+	_vexcelIsCredString,
 	_vexcelParseObliques,
 	_vexcelParseToken,
 	_vexcelTileTpl,
@@ -119,6 +120,7 @@ export function bootUserscript() {
 			_vexcelCollectionYear, _vexcelParseObliques, _vexcelObliqueExtractUrl,
 			_vexcelObliqueTileBase, _vexcelMaxDownsample, _vexcelBand,
 			_vexcelFootprint, _vexcelBilinear, _vexcelInvBilinear,
+			_vexcelIsCredString,
 			LayerProvider, tileProvider, tokenTileProvider,
 			arcgisExportProvider, pollingDataLayer, oimIcon,
 		};

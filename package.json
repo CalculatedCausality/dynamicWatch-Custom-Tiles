@@ -29,6 +29,7 @@
     "e2e:vexcel-oblique:headed": "npm run build && HEADED=1 node tests/e2e/verify-vexcel-oblique.mjs",
     "e2e:vexcel-angles": "npm run build && node tests/e2e/verify-vexcel-all-angles.mjs",
     "e2e:vexcel-reprompt": "npm run build && node tests/e2e/verify-vexcel-reprompt.mjs",
+    "e2e:vexcel-autologin": "npm run build && node tests/e2e/verify-vexcel-autologin.mjs",
     "e2e:waze": "npm run build && node tests/e2e/verify-waze.mjs",
     "e2e:waze:headed": "npm run build && HEADED=1 node tests/e2e/verify-waze.mjs"
   },
