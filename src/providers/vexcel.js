@@ -642,37 +642,82 @@ export function fetchVexcelOrthoDates(lat, lng, cb) {
 	});
 }
 
+// Pull dynamic.watch's drawn route as an array of paths, each a list of
+// [lng,lat] ground points. The route lives in leafletPlan.lines → segments →
+// seg.polyline (an L.Polyline of the routed, road-snapped path). leafletPlan
+// is a PAGE global, so reach it via unsafeWindow (the userscript sandbox
+// can't see it on plain window) — the same bridge the app uses elsewhere.
+export function _dwGetRoutePaths() {
+	try {
+		const pageWin = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+		const lp = pageWin.leafletPlan;
+		if (!lp || !Array.isArray(lp.lines)) return [];
+		const paths = [];
+		for (const line of lp.lines) {
+			if (!Array.isArray(line)) continue;
+			for (const seg of line) {
+				const pl = seg && seg.polyline;
+				if (!pl || typeof pl.getLatLngs !== "function") continue;
+				const lls = pl.getLatLngs();
+				const flat = Array.isArray(lls[0]) ? lls.flat(Infinity) : lls;
+				if (flat.length) paths.push(flat.map((ll) => [ll.lng, ll.lat]));
+			}
+		}
+		return paths;
+	} catch (_) { return []; }
+}
+
 export function createVexcelControl() {
 	if (_vexCtl) return _vexCtl;
-	// A tiny docked control for the flat Vexcel base: an infrared toggle,
-	// nothing more. Capture DATES ride the app's shared history bar via the
-	// adapter below (getCaptureCount/…/setCapture + "capturechange") — the
-	// same bar Wayback and QLD Historical use — so Vexcel behaves like a
-	// normal dated base map: no compass, no full-map overlay. (The angled
-	// oblique viewer was removed; obliques are perspective photos that can't
-	// be reprojected onto the flat map, so they don't belong here.)
+	// Docked control for the Vexcel base:
+	//   • an IR toggle for the flat straight-down imagery (&bands=irg)
+	//   • a compass rose (N/E/S/W/⊙) that opens the OBLIQUE viewer
+	// Capture DATES ride the app's shared history bar (the adapter below);
+	// the flat base is a normal dated tile layer. Clicking a compass angle
+	// opens a full-map oblique for the current date + the dynamic.watch route
+	// PROJECTED onto the photo (each ground point mapped into the oblique's
+	// pixel space via the frame footprint), so the drawn line sits where it
+	// really is on the angled image.
 	const el = document.createElement("div");
 	el.className = "dw-vex-ctl";
 	el.innerHTML =
-		'<button type="button" class="dw-vex-ir" title="Toggle near-infrared (vegetation shows red)">IR</button>' +
+		'<div class="dw-vex-rose">' +
+		'<button type="button" class="dw-vex-dir dw-vex-n" data-dir="oblique-north" title="Look from the north">N</button>' +
+		'<button type="button" class="dw-vex-dir dw-vex-w" data-dir="oblique-west" title="Look from the west">W</button>' +
+		'<button type="button" class="dw-vex-dir dw-vex-c" data-dir="nadir" title="Straight down">⊙</button>' +
+		'<button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button>' +
+		'<button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button>' +
+		"</div>" +
+		'<button type="button" class="dw-vex-ir" title="Toggle near-infrared on the flat map (vegetation shows red)">IR</button>' +
 		'<div class="dw-vex-basemsg" style="display:none"></div>';
-	L.DomEvent.disableClickPropagation(el);
-	L.DomEvent.disableScrollPropagation(el);
+	const overlay = document.createElement("div");
+	overlay.className = "dw-vex-overlay";
+	overlay.style.display = "none";
+	overlay.innerHTML =
+		'<button type="button" class="dw-vex-close" title="Back to map">✕ Map</button>' +
+		'<div class="dw-vex-hint">drag to pan · scroll to zoom · red line = your route</div>' +
+		'<div class="dw-vex-msg"></div>' +
+		'<div class="dw-vex-tilemap"></div>';
+	for (const node of [el, overlay]) {
+		L.DomEvent.disableClickPropagation(node);
+		L.DomEvent.disableScrollPropagation(node);
+	}
 
 	const listeners = {};
 	const ctl = {
-		el, _map: null,
+		el, overlay, _map: null,
 		lat: 0, lng: 0, atKey: "",
-		captures: [],   // [{collection, year}] newest-first
+		captures: [],    // flat ortho dates [{collection, year}] newest-first
 		capIdx: 0,
-		band: "rgb",    // "rgb" | "irg" (near-infrared)
-		queried: false, // has the dates query at the current point resolved?
+		band: "rgb",     // flat IR band
+		obModel: null,   // oblique model {images, captures, directions} at centre
+		obAtKey: "",     // centre the oblique model was queried for
+		dir: "nadir",    // active oblique direction
+		queried: false,  // flat dates query resolved?
 		gen: 0,
 		on(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); return ctl; },
 		off(ev, fn) { listeners[ev] = (listeners[ev] || []).filter((f) => f !== fn); return ctl; },
 		_fire(ev) { for (const f of listeners[ev] || []) { try { f(); } catch (_) {} } },
-		// Surface a base-layer status note under the IR button (e.g. account
-		// refused / no coverage). Empty/falsy hides it.
 		setBaseMsg(text) {
 			const n = el.querySelector(".dw-vex-basemsg");
 			if (!n) return;
@@ -680,40 +725,254 @@ export function createVexcelControl() {
 			n.style.display = text ? "block" : "none";
 		},
 	};
-	const irBtn = el.querySelector(".dw-vex-ir");
+	const mapEl   = overlay.querySelector(".dw-vex-tilemap");
+	const msgEl   = overlay.querySelector(".dw-vex-msg");
+	const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
+	const irBtn   = el.querySelector(".dw-vex-ir");
 
+	const curCollection = () => {
+		const cap = ctl.captures[ctl.capIdx];
+		return cap ? cap.collection : "";
+	};
+	// The oblique cell {rgb?, irg?} for a direction at the current date.
+	const cellFor = (dir) => {
+		if (!ctl.obModel) return null;
+		return ctl.obModel.images[dir + "@" + curCollection()] || null;
+	};
+
+	const setMsg = (t) => {
+		const wasClosed = overlay.style.display === "none";
+		overlay.style.display = "";
+		msgEl.textContent = t;
+		msgEl.style.display = t ? "" : "none";
+		if (wasClosed) ctl._fire("overlaytoggle");
+	};
+	ctl.isOverlayOpen = () => overlay.style.display !== "none";
+
+	// -- flat IR toggle ------------------------------------------------
 	const updateIrBtn = () => {
 		if (irBtn) irBtn.classList.toggle("dw-vex-ir--on", ctl.band === "irg");
 	};
-	// IR works at every date on the flat ortho (&bands=irg), so it's always
-	// enabled; toggling swaps the base layer's band and repaints in place.
 	if (irBtn) irBtn.addEventListener("click", () => {
 		ctl.band = ctl.band === "irg" ? "rgb" : "irg";
 		if (_vexLayer && _vexLayer._dwSetBand) _vexLayer._dwSetBand(ctl.band);
 		updateIrBtn();
 	});
 
-	// -- history-bar adapter (capture dates) --------------------------
+	// -- oblique tile pyramid + route overlay --------------------------
+	ctl._imgMap = null;
+	ctl._tileLayer = null;
+	ctl._routeLayer = null;
+	ctl._frame = null;         // { name, layer, w, h, corners, collection, maxZ }
+	ctl._suppressMove = false;
+	const ensureImgMap = () => {
+		if (ctl._imgMap) return ctl._imgMap;
+		ctl._imgMap = L.map(mapEl, {
+			crs: L.CRS.Simple, attributionControl: false,
+			zoomControl: true, minZoom: 0,
+		});
+		ctl._imgMap.on("moveend", onInnerMove);
+		return ctl._imgMap;
+	};
+	const dropTiles = () => {
+		if (ctl._tileLayer && ctl._imgMap) { ctl._imgMap.removeLayer(ctl._tileLayer); ctl._tileLayer = null; }
+	};
+
+	// Project the dynamic.watch route into the current frame's pixel space
+	// and draw it (red) on the oblique. Points outside the frame footprint
+	// are clipped (bilinear extrapolation past the quad is meaningless), so
+	// the line breaks where it leaves the photo.
+	const drawRoute = () => {
+		if (ctl._routeLayer && ctl._imgMap) { ctl._imgMap.removeLayer(ctl._routeLayer); ctl._routeLayer = null; }
+		const f = ctl._frame, map = ctl._imgMap;
+		if (!f || !f.corners || !map) return;
+		const paths = _dwGetRoutePaths();
+		if (!paths.length) return;
+		const segs = [];
+		for (const path of paths) {
+			let run = [];
+			for (const [lng, lat] of path) {
+				const uv = _vexcelInvBilinear(f.corners, lng, lat);
+				const u = uv[0], v = uv[1];
+				if (u < -0.02 || u > 1.02 || v < -0.02 || v > 1.02) {
+					if (run.length > 1) segs.push(run);
+					run = [];
+					continue;
+				}
+				run.push(map.unproject([u * f.w, v * f.h], f.maxZ));
+			}
+			if (run.length > 1) segs.push(run);
+		}
+		if (!segs.length) return;
+		ctl._routeLayer = L.layerGroup(segs.map((s) =>
+			L.polyline(s, { color: "#ff2d2d", weight: 3, opacity: 0.9,
+				lineJoin: "round", lineCap: "round" }))).addTo(map);
+	};
+
+	const loadFrame = (frame, opts) => {
+		opts = opts || {};
+		const base = _vexcelObliqueTileBase(
+			frame.name, frame.layer, _getStoredToken(), _getStoredSession());
+		if (!base) { setMsg("Vexcel session expired — reselect the base to refresh it."); return; }
+		setMsg(""); // opens the overlay + hides the message
+		const w = frame.w || 10560, h = frame.h || 14144;
+		const TS = 256;
+		const sizes = [];
+		let s = L.point(w, h);
+		sizes.push(s);
+		while (s.x > TS || s.y > TS) { s = s.divideBy(2).ceil(); sizes.push(s); }
+		sizes.reverse();
+		const maxZ = sizes.length - 1;
+		const grids = sizes.map((p) => L.point(Math.ceil(p.x / TS), Math.ceil(p.y / TS)));
+
+		const map = ensureImgMap();
+		map.setMinZoom(0); map.setMaxZoom(maxZ); map.invalidateSize();
+
+		dropTiles();
+		// GM-fetch + blob-bridge (oriented/tile needs session + the viewer
+		// Origin header, which an <img> can't send).
+		const hdrs = _vexcelOriginHeaders({ Accept: "image/jpeg,image/*,*/*;q=0.8" });
+		const TileCls = L.GridLayer.extend({
+			createTile(coords, done) {
+				const img = document.createElement("img");
+				img.setAttribute("role", "presentation");
+				const ds = maxZ - coords.z; // 0 = native, maxZ = coarsest
+				const url = base + "&downsample=" + ds + "&tile-x=" + coords.x + "&tile-y=" + coords.y;
+				img._dwHandle = gmGet(url, { responseType: "arraybuffer", headers: hdrs }, (err, r) => {
+					img._dwHandle = null;
+					if (err || !r || r.status !== 200) { img.src = BLANK_TILE; done(null, img); return; }
+					const blob = new Blob([r.response], { type: "image/jpeg" });
+					const objUrl = URL.createObjectURL(blob);
+					img.onload = () => { URL.revokeObjectURL(objUrl); done(null, img); };
+					img.onerror = () => { URL.revokeObjectURL(objUrl); img.src = BLANK_TILE; done(null, img); };
+					img.src = objUrl;
+				});
+				return img;
+			},
+			_isValidTile(coords) {
+				const g = grids[coords.z];
+				return !!g && coords.x >= 0 && coords.y >= 0 && coords.x < g.x && coords.y < g.y;
+			},
+		});
+		ctl._tileLayer = new TileCls({ tileSize: TS, minZoom: 0, maxZoom: maxZ, noWrap: true }).addTo(map);
+		wireTileAbort(ctl._tileLayer);
+
+		const bounds = L.latLngBounds(map.unproject([0, h], maxZ), map.unproject([w, 0], maxZ));
+		map.setMaxBounds(bounds.pad(0.1));
+		ctl._frame = Object.assign({ collection: frame.collection, maxZ, w, h }, frame);
+
+		const keepZ = opts.keepZoom && map.getZoom();
+		let center = bounds.getCenter(), z;
+		if (opts.center && frame.corners) {
+			const uv = _vexcelInvBilinear(frame.corners, opts.center[0], opts.center[1]);
+			center = map.unproject([uv[0] * w, uv[1] * h], maxZ);
+			z = keepZ || Math.min(maxZ, Math.max(map.getBoundsZoom(bounds, false), maxZ - 1));
+		} else {
+			z = Math.min(maxZ, Math.max(map.getBoundsZoom(bounds, false), maxZ - 1));
+		}
+		ctl._suppressMove = true;
+		map.setView(center, z, { animate: false });
+		drawRoute();
+		markActiveDir();
+	};
+
+	// Show the selected direction + date as an oblique frame.
+	const load = () => {
+		if (!ctl.obModel) { setMsg("No Vexcel oblique here — recentre over a flown area."); return; }
+		const cell = cellFor(ctl.dir);
+		const img = cell ? (cell.rgb || cell.irg) : null;
+		if (!img) {
+			dropTiles();
+			if (ctl._routeLayer && ctl._imgMap) { ctl._imgMap.removeLayer(ctl._routeLayer); ctl._routeLayer = null; }
+			setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (curCollection() || "this date") + " here.");
+			ctl._frame = null;
+			return;
+		}
+		loadFrame(Object.assign({ collection: curCollection() }, img));
+	};
+
+	// Continuous panning: settle → pull the neighbouring frame best-centred
+	// under the view and switch to it (keeping the ground point centred).
+	let panTimer = null;
+	const onInnerMove = () => {
+		if (ctl._suppressMove) { ctl._suppressMove = false; return; }
+		const f = ctl._frame;
+		if (!f || !f.corners || !ctl.obModel) return;
+		clearTimeout(panTimer);
+		panTimer = setTimeout(() => {
+			const map = ctl._imgMap;
+			if (!map || !ctl.isOverlayOpen()) return;
+			const pt = map.project(map.getCenter(), f.maxZ);
+			const u = Math.max(0, Math.min(1, pt.x / f.w));
+			const v = Math.max(0, Math.min(1, pt.y / f.h));
+			const ground = _vexcelBilinear(f.corners, u, v);
+			fetchVexcelFrame(ground[0], ground[1], curCollection(), ctl.dir, "rgb", (fr) => {
+				if (!fr || !fr.name || !ctl.isOverlayOpen()) return;
+				if (fr.name === f.name) { drawRoute(); return; }
+				loadFrame(Object.assign({ collection: curCollection() }, fr), { center: ground, keepZoom: true });
+			});
+		}, 300);
+	};
+
+	// Grey out any direction with no photo for the current date; highlight
+	// the active one only while the overlay is open.
+	const dirHasPhoto = (dir) => { const c = cellFor(dir); return !!(c && (c.rgb || c.irg)); };
+	function markActiveDir() {
+		dirBtns.forEach((b) => {
+			const has = dirHasPhoto(b.dataset.dir);
+			b.classList.toggle("dw-vex-dir--on", ctl.isOverlayOpen() && b.dataset.dir === ctl.dir && has);
+			b.classList.toggle("dw-vex-dir--off", !!ctl.obModel && !has);
+			b.disabled = !!ctl.obModel && !has;
+		});
+	}
+
+	// Ensure the oblique model for the current centre, then run cb().
+	const ensureObModel = (cb) => {
+		const key = ctl.lat.toFixed(5) + "," + ctl.lng.toFixed(5);
+		if (ctl.obModel && ctl.obAtKey === key) { cb(); return; }
+		setMsg("Loading oblique imagery…");
+		fetchVexcelObliques(ctl.lat, ctl.lng, (model) => {
+			ctl.obModel = model || null;
+			ctl.obAtKey = key;
+			markActiveDir();
+			cb();
+		});
+	};
+
+	dirBtns.forEach((b) => b.addEventListener("click", () => {
+		if (b.disabled) return;
+		if (!_vexcelTokenValid(_getStoredToken()) && !_hasCreds()) {
+			setMsg("Sign in to Vexcel (reselect the base) to load imagery."); return;
+		}
+		ctl.dir = b.dataset.dir;
+		setMsg("Loading oblique imagery…");
+		ensureObModel(() => { markActiveDir(); load(); });
+	}));
+
+	overlay.querySelector(".dw-vex-close").addEventListener("click", () => {
+		overlay.style.display = "none";
+		ctl.gen++;
+		markActiveDir();
+		ctl._fire("overlaytoggle");
+	});
+
+	// -- history-bar adapter (flat capture dates) ----------------------
 	ctl.getCaptureCount = () => ctl.captures.length;
 	ctl.getCaptureIdx   = () => ctl.capIdx;
-	// "loading" until the first query resolves, then "ready" (has dates) or
-	// "empty" — so the bar stops spinning "Loading…" where there's no cover.
-	ctl.getCaptureState = () =>
-		!ctl.queried ? "loading" : (ctl.captures.length ? "ready" : "empty");
+	ctl.getCaptureState = () => !ctl.queried ? "loading" : (ctl.captures.length ? "ready" : "empty");
 	ctl.getCaptureDate  = (i) => (ctl.captures[i] ? ctl.captures[i].year : "");
 	ctl.setCapture = (i) => {
 		ctl.capIdx = i;
 		const cap = ctl.captures[i];
-		// index 0 = newest = current-best; pass "" so the tile URL omits
-		// order-by (identical bytes, one fewer param). Other indices scrub to
-		// that collection's capture date.
 		if (_vexLayer && _vexLayer._dwSetCollection) {
 			_vexLayer._dwSetCollection(i === 0 ? "" : (cap ? cap.collection : ""));
 		}
+		// If the oblique overlay is open, reload it for the newly-picked date.
+		if (ctl.isOverlayOpen()) { markActiveDir(); load(); }
 	};
 
-	// Query the capture dates available at the current map centre and refresh
-	// the date bar. Cheap + un-throttled, so safe to run on every settle.
+	// Query the flat capture dates at the current map centre (drives the date
+	// bar + the flat base). Oblique data is fetched lazily on compass click.
 	let refreshTimer = null;
 	const refreshCaptures = () => {
 		if (!ctl._map) return;
@@ -721,30 +980,30 @@ export function createVexcelControl() {
 		const key = c.lat.toFixed(4) + "," + c.lng.toFixed(4);
 		if (ctl.atKey === key) return;
 		ctl.lat = c.lat; ctl.lng = c.lng; ctl.atKey = key;
+		ctl.obModel = null; ctl.obAtKey = ""; // invalidate obliques for the new centre
 		if (!_vexcelTokenValid(_getStoredToken()) && !_hasCreds()) {
 			ctl.captures = []; ctl.queried = true; ctl._fire("capturechange"); return;
 		}
-		ctl.queried = false; ctl._fire("capturechange"); // show "Loading…" in flight
+		ctl.queried = false; ctl._fire("capturechange");
 		const gen = ++ctl.gen;
 		fetchVexcelOrthoDates(ctl.lat, ctl.lng, (caps) => {
 			if (gen !== ctl.gen) return;
 			ctl.captures = caps || [];
 			ctl.queried = true;
 			if (ctl.capIdx >= ctl.captures.length) ctl.capIdx = 0;
-			ctl._fire("capturechange"); // history bar re-reads count/idx/label
+			ctl._fire("capturechange");
 		});
 	};
-	const scheduleRefresh = () => {
-		clearTimeout(refreshTimer);
-		refreshTimer = setTimeout(refreshCaptures, 500);
-	};
+	const scheduleRefresh = () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(refreshCaptures, 500); };
 
 	ctl.addTo = (m) => {
 		if (ctl._map) return ctl;
 		ctl._map = m;
+		m.getContainer().appendChild(overlay);
 		m.getContainer().appendChild(el);
 		m.on("moveend", scheduleRefresh);
 		updateIrBtn();
+		markActiveDir();
 		refreshCaptures();
 		return ctl;
 	};
@@ -753,7 +1012,9 @@ export function createVexcelControl() {
 		ctl._map.off("moveend", scheduleRefresh);
 		clearTimeout(refreshTimer);
 		ctl.gen++;
+		if (ctl._imgMap) { try { ctl._imgMap.remove(); } catch (_) {} ctl._imgMap = null; ctl._tileLayer = null; ctl._routeLayer = null; }
 		if (el.parentNode) el.parentNode.removeChild(el);
+		if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
 		ctl._map = null;
 		return ctl;
 	};
