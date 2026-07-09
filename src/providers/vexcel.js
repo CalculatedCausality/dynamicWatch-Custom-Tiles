@@ -958,7 +958,10 @@ export function createVexcelControl() {
 		if (irBtn.disabled || !irAvail()) return;
 		ctl.band = ctl.band === "irg" ? "rgb" : "irg";
 		updateIrBtn();
-		if (ctl.isOverlayOpen()) load();
+		// Always load() — like the direction buttons — so clicking IR from
+		// the flat basemap OPENS the nadir oblique in infrared instead of
+		// silently flipping a hidden flag (which reads as a dead button).
+		load();
 	});
 	overlay.querySelector(".dw-vex-close").addEventListener("click", () => {
 		overlay.style.display = "none";  // back to the live map
