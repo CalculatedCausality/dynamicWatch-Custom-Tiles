@@ -610,60 +610,69 @@ function _fetchVexcelFrame(lng, lat, collection, dir, band, token, session, cb) 
  * the panel — "⊙" is the closest thing to dated 2D (nadir).
  */
 let _vexCtl = null;
+let _vexLayer = null; // the base tile layer, so the control can drive date/band
+
+// Flat-ortho capture dates at a point, newest-first — drives the date slider.
+// Uses /v2/ortho/collections (final-ortho product), which lists every
+// collection covering the point; the year is derived from the collection id.
+export function fetchVexcelOrthoDates(lat, lng, cb) {
+	_ensureQueryAuth((token, session) => {
+		if (!token) { cb(null); return; }
+		gmJsonGet(
+			CFG.VEXCEL_API_BASE + "/v2/ortho/collections?wkt=" +
+				encodeURIComponent(`POINT(${Number(lng)} ${Number(lat)})`) +
+				"&srid=4326&layer=urban,wide-area&session=" +
+				encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
+			{ headers: _vexcelOriginHeaders() },
+			(err, data, raw) => {
+				if (raw && (raw.status === 401 || raw.status === 403)) { cb(null, "auth"); return; }
+				if (err || !data || !Array.isArray(data.features)) { cb(null); return; }
+				const seen = new Set(), caps = [];
+				for (const f of data.features) {
+					const c = f.properties && f.properties.collection;
+					if (!c || seen.has(c)) continue;
+					seen.add(c);
+					caps.push({ collection: c, year: _vexcelCollectionYear(c) });
+				}
+				// Newest first (year desc); the slider's index 0 = current-best.
+				caps.sort((a, b) => String(b.year).localeCompare(String(a.year)));
+				cb(caps.length ? caps : null);
+			},
+		);
+	});
+}
 
 export function createVexcelControl() {
 	if (_vexCtl) return _vexCtl;
-	// Direction compass (small, docked) + a FULL-MAP overlay the oblique
-	// fills. DATE scrubbing is delegated to the app's shared history bar
-	// (same ◀ slider ▶ + date component every other time-series layer
-	// uses) — this control exposes a capture adapter + fires
-	// "capturechange" so that bar drives it. No bespoke date slider here.
+	// A tiny docked control for the flat Vexcel base: an infrared toggle,
+	// nothing more. Capture DATES ride the app's shared history bar via the
+	// adapter below (getCaptureCount/…/setCapture + "capturechange") — the
+	// same bar Wayback and QLD Historical use — so Vexcel behaves like a
+	// normal dated base map: no compass, no full-map overlay. (The angled
+	// oblique viewer was removed; obliques are perspective photos that can't
+	// be reprojected onto the flat map, so they don't belong here.)
 	const el = document.createElement("div");
 	el.className = "dw-vex-ctl";
 	el.innerHTML =
-		'<div class="dw-vex-rose">' +
-		'<button type="button" class="dw-vex-dir dw-vex-n" data-dir="oblique-north" title="Look from the north">N</button>' +
-		'<button type="button" class="dw-vex-dir dw-vex-w" data-dir="oblique-west" title="Look from the west">W</button>' +
-		'<button type="button" class="dw-vex-dir dw-vex-c" data-dir="nadir" title="Straight down (dated)">⊙</button>' +
-		'<button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button>' +
-		'<button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button>' +
-		"</div>" +
 		'<button type="button" class="dw-vex-ir" title="Toggle near-infrared (vegetation shows red)">IR</button>' +
 		'<div class="dw-vex-basemsg" style="display:none"></div>';
-	const overlay = document.createElement("div");
-	overlay.className = "dw-vex-overlay";
-	overlay.style.display = "none";
-	overlay.innerHTML =
-		'<button type="button" class="dw-vex-close" title="Back to map">✕ Map</button>' +
-		'<div class="dw-vex-hint">drag to pan · scroll to zoom</div>' +
-		'<div class="dw-vex-msg"></div>' +
-		'<div class="dw-vex-tilemap"></div>';
-	for (const node of [el, overlay]) {
-		L.DomEvent.disableClickPropagation(node);
-		L.DomEvent.disableScrollPropagation(node);
-	}
+	L.DomEvent.disableClickPropagation(el);
+	L.DomEvent.disableScrollPropagation(el);
 
-	// Tiny event emitter so the app's _makeHistoryBar can bind
-	// on/off("capturechange") exactly like it does for a real layer.
 	const listeners = {};
 	const ctl = {
-		el, overlay, _map: null,
+		el, _map: null,
 		lat: 0, lng: 0, atKey: "",
-		model: null,
-		// Default to the straight-down nadir (⊙) — it matches the flat
-		// basemap orientation, so entering the dated viewer feels like
-		// "the same view, but through time". Falls back to an oblique
-		// angle on dates/areas without nadir (SCC: nadir is 2025 only).
-		dir: "nadir",
-		band: "rgb",     // "rgb" | "irg" (near-infrared)
-		capIdx: 0,       // index into model.captures (0 = newest)
-		queried: false,  // has the capture query at the current point resolved?
+		captures: [],   // [{collection, year}] newest-first
+		capIdx: 0,
+		band: "rgb",    // "rgb" | "irg" (near-infrared)
+		queried: false, // has the dates query at the current point resolved?
 		gen: 0,
 		on(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); return ctl; },
 		off(ev, fn) { listeners[ev] = (listeners[ev] || []).filter((f) => f !== fn); return ctl; },
 		_fire(ev) { for (const f of listeners[ev] || []) { try { f(); } catch (_) {} } },
-		// Surface a base-layer status note under the compass (e.g. the
-		// account is quota-capped). Empty/falsy hides it.
+		// Surface a base-layer status note under the IR button (e.g. account
+		// refused / no coverage). Empty/falsy hides it.
 		setBaseMsg(text) {
 			const n = el.querySelector(".dw-vex-basemsg");
 			if (!n) return;
@@ -671,272 +680,58 @@ export function createVexcelControl() {
 			n.style.display = text ? "block" : "none";
 		},
 	};
-	const mapEl   = overlay.querySelector(".dw-vex-tilemap");
-	const msgEl   = overlay.querySelector(".dw-vex-msg");
-	const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
-	const irBtn   = el.querySelector(".dw-vex-ir");
+	const irBtn = el.querySelector(".dw-vex-ir");
 
-	// Cell {rgb?, irg?} for a direction at the current date; the image
-	// for the active band (falling back to rgb).
-	const cellFor = (dir) => {
-		const cap = ctl.model && ctl.model.captures[ctl.capIdx];
-		return cap ? ctl.model.images[dir + "@" + cap.collection] : null;
-	};
-	const curImage = () => {
-		const cell = cellFor(ctl.dir);
-		return cell ? (cell[ctl.band] || cell.rgb) : null;
-	};
-	const irAvail = () => {
-		const cell = cellFor(ctl.dir);
-		return !!(cell && cell.irg);
-	};
-
-	// setMsg opens the overlay; fire "overlaytoggle" on the closed→open
-	// transition so the app can show the date bar (which only makes sense
-	// while an oblique is up — the flat basemap is date-locked).
-	const setMsg = (t) => {
-		const wasClosed = overlay.style.display === "none";
-		overlay.style.display = "";
-		msgEl.textContent = t;
-		msgEl.style.display = t ? "" : "none";
-		if (wasClosed) ctl._fire("overlaytoggle");
-	};
-	ctl.isOverlayOpen = () => overlay.style.display !== "none";
-
-	// Which directions actually have a photo at the current capture date.
-	// N/E/S/W exist every flown year; nadir (⊙) only some (SCC: 2025), so
-	// ⊙ is disabled on years without it rather than dead-ending in a "no
-	// photo" message.
-	const dirHasPhoto = (dir) => {
-		const cell = cellFor(dir);
-		return !!(cell && (cell.rgb || cell.irg));
-	};
-	const availDirs = () => {
-		if (!ctl.model) return [];
-		return ctl.model.directions.filter((d) => dirHasPhoto(d.key));
-	};
-	// Reflect the IR toggle state: highlighted when active, greyed when
-	// the current direction+date has no infrared band (SCC: nadir 2025
-	// only). Auto-reverts to rgb if IR isn't available here.
 	const updateIrBtn = () => {
-		if (!irBtn) return;
-		const avail = irAvail();
-		if (!avail && ctl.band === "irg") ctl.band = "rgb";
-		irBtn.disabled = !avail;
-		irBtn.classList.toggle("dw-vex-dir--off", !avail);
-		irBtn.classList.toggle("dw-vex-ir--on", ctl.band === "irg" && avail);
+		if (irBtn) irBtn.classList.toggle("dw-vex-ir--on", ctl.band === "irg");
 	};
-	// Highlight the active direction ONLY while an oblique is open (on the
-	// flat basemap no angle is "selected"); grey out any with no photo for
-	// the current date so ⊙ can't dead-end on a year it wasn't flown.
-	const markActiveDir = () => {
-		dirBtns.forEach((b) => {
-			const has = dirHasPhoto(b.dataset.dir);
-			b.classList.toggle("dw-vex-dir--on",
-				ctl.isOverlayOpen() && b.dataset.dir === ctl.dir && has);
-			b.classList.toggle("dw-vex-dir--off", !!ctl.model && !has);
-			b.disabled = !!ctl.model && !has;
-		});
+	// IR works at every date on the flat ortho (&bands=irg), so it's always
+	// enabled; toggling swaps the base layer's band and repaints in place.
+	if (irBtn) irBtn.addEventListener("click", () => {
+		ctl.band = ctl.band === "irg" ? "rgb" : "irg";
+		if (_vexLayer && _vexLayer._dwSetBand) _vexLayer._dwSetBand(ctl.band);
 		updateIrBtn();
-	};
+	});
 
-	// The oblique renders as a Leaflet image pyramid (CRS.Simple): 256px
-	// JPEG tiles from /v2/oriented/tile load progressively as you pan/zoom
-	// — no more one giant download. Created lazily (needs a sized div).
-	ctl._imgMap = null;
-	ctl._tileLayer = null;
-	const ensureImgMap = () => {
-		if (ctl._imgMap) return ctl._imgMap;
-		ctl._imgMap = L.map(mapEl, {
-			crs: L.CRS.Simple,
-			attributionControl: false,
-			zoomControl: true,
-			minZoom: 0,
-		});
-		// Continuous panning: settle → maybe switch to the adjacent frame.
-		ctl._imgMap.on("moveend", onInnerMove);
-		return ctl._imgMap;
-	};
-
-	const dropTiles = () => {
-		if (ctl._tileLayer && ctl._imgMap) {
-			ctl._imgMap.removeLayer(ctl._tileLayer);
-			ctl._tileLayer = null;
+	// -- history-bar adapter (capture dates) --------------------------
+	ctl.getCaptureCount = () => ctl.captures.length;
+	ctl.getCaptureIdx   = () => ctl.capIdx;
+	// "loading" until the first query resolves, then "ready" (has dates) or
+	// "empty" — so the bar stops spinning "Loading…" where there's no cover.
+	ctl.getCaptureState = () =>
+		!ctl.queried ? "loading" : (ctl.captures.length ? "ready" : "empty");
+	ctl.getCaptureDate  = (i) => (ctl.captures[i] ? ctl.captures[i].year : "");
+	ctl.setCapture = (i) => {
+		ctl.capIdx = i;
+		const cap = ctl.captures[i];
+		// index 0 = newest = current-best; pass "" so the tile URL omits
+		// order-by (identical bytes, one fewer param). Other indices scrub to
+		// that collection's capture date.
+		if (_vexLayer && _vexLayer._dwSetCollection) {
+			_vexLayer._dwSetCollection(i === 0 ? "" : (cap ? cap.collection : ""));
 		}
 	};
 
-	ctl._frame = null;       // { name, layer, w, h, corners, collection, maxZ }
-	ctl._suppressMove = false;
-
-	// Render one oblique frame as a fresh tile pyramid. opts.center =
-	// [lng,lat] to keep that ground point centred (used when panning
-	// switches to a neighbouring frame); otherwise open zoomed-in on the
-	// frame centre.
-	const loadFrame = (frame, opts) => {
-		opts = opts || {};
-		const base = _vexcelObliqueTileBase(
-			frame.name, frame.layer, _getStoredToken(), _getStoredSession());
-		if (!base) { setMsg("Vexcel token expired — reselect the base to refresh it."); return; }
-		setMsg(""); // opens the overlay (fires overlaytoggle) + hides msg
-		const w = frame.w || 10560, h = frame.h || 14144;
-
-		// Zoomify-style pyramid: level 0 = coarsest (~1 tile), maxZoom =
-		// native. gridSize[z] bounds the valid tile grid per level.
-		const TS = 256;
-		const sizes = [];
-		let s = L.point(w, h);
-		sizes.push(s);
-		while (s.x > TS || s.y > TS) { s = s.divideBy(2).ceil(); sizes.push(s); }
-		sizes.reverse();
-		const maxZ = sizes.length - 1;
-		const grids = sizes.map((p) =>
-			L.point(Math.ceil(p.x / TS), Math.ceil(p.y / TS)));
-
-		const map = ensureImgMap();
-		map.setMinZoom(0);
-		map.setMaxZoom(maxZ);
-		map.invalidateSize();
-
-		dropTiles();
-		// GM-fetched + blob-bridged (like the basemap) because /oriented/tile
-		// needs the viewer Origin header + session, which an <img> can't send.
-		const TileCls = L.GridLayer.extend({
-			createTile(coords, done) {
-				const img = document.createElement("img");
-				img.setAttribute("role", "presentation");
-				const ds = maxZ - coords.z; // 0 = native, maxZ = coarsest
-				const url = base + "&downsample=" + ds +
-					"&tile-x=" + coords.x + "&tile-y=" + coords.y;
-				img._dwHandle = gmGet(url, {
-					responseType: "arraybuffer",
-					headers: _vexcelOriginHeaders({ Accept: "image/jpeg,image/*,*/*;q=0.8" }),
-				}, (err, r) => {
-					img._dwHandle = null;
-					if (err || !r || r.status !== 200) { img.src = BLANK_TILE; done(null, img); return; }
-					const blob = new Blob([r.response], { type: "image/jpeg" });
-					const objUrl = URL.createObjectURL(blob);
-					img.onload = () => { URL.revokeObjectURL(objUrl); done(null, img); };
-					img.onerror = () => { URL.revokeObjectURL(objUrl); img.src = BLANK_TILE; done(null, img); };
-					img.src = objUrl;
-				});
-				return img;
-			},
-			_isValidTile(coords) {
-				const g = grids[coords.z];
-				return !!g && coords.x >= 0 && coords.y >= 0 &&
-					coords.x < g.x && coords.y < g.y;
-			},
-		});
-		ctl._tileLayer = new TileCls({
-			tileSize: TS, minZoom: 0, maxZoom: maxZ, noWrap: true,
-		}).addTo(map);
-		wireTileAbort(ctl._tileLayer);
-
-		// Image pixels [0..w]×[0..h] at native zoom; CRS.Simple flips y
-		// so SW=(0,h), NE=(w,0).
-		const bounds = L.latLngBounds(
-			map.unproject([0, h], maxZ), map.unproject([w, 0], maxZ));
-		map.setMaxBounds(bounds.pad(0.1));
-
-		ctl._frame = Object.assign({ collection: frame.collection, maxZ, w, h }, frame);
-
-		// View: keep the panned-to ground point centred when switching
-		// frames (so the pan feels continuous); else open zoomed-in on
-		// the frame centre.
-		const keepZ = opts.keepZoom && map.getZoom();
-		let center = bounds.getCenter(), z;
-		if (opts.center && frame.corners) {
-			const [u, v] = _vexcelInvBilinear(frame.corners, opts.center[0], opts.center[1]);
-			center = map.unproject([u * w, v * h], maxZ);
-			z = keepZ || Math.min(maxZ, Math.max(map.getBoundsZoom(bounds, false), maxZ - 1));
-		} else {
-			z = Math.min(maxZ, Math.max(map.getBoundsZoom(bounds, false), maxZ - 1));
-		}
-		// Arm one skip: the programmatic setView below fires a moveend we
-		// must ignore (else it re-queries and can loop). onInnerMove clears
-		// the flag on that first moveend; real pans then flow through.
-		ctl._suppressMove = true;
-		map.setView(center, z, { animate: false });
-		markActiveDir();
-	};
-
-	// Show the currently-selected direction+date+band as an oblique frame.
-	const load = () => {
-		if (!ctl.model) return;
-		const cap = ctl.model.captures[ctl.capIdx];
-		const img = curImage();
-		if (!img) {
-			dropTiles();
-			setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here.");
-			ctl._frame = null;
-			return;
-		}
-		loadFrame(Object.assign({ collection: cap.collection }, img));
-	};
-
-	// Continuous panning: when the inner view settles, map its centre
-	// pixel → ground via the frame footprint and pull the frame best
-	// centred there. If it's a NEIGHBOUR, switch to it (keeping the
-	// ground point centred) so you can scroll across the whole survey.
-	let panTimer = null;
-	const onInnerMove = () => {
-		if (ctl._suppressMove) { ctl._suppressMove = false; return; } // skip the programmatic setView
-		const f = ctl._frame;
-		if (!f || !f.corners || !ctl.model) return;
-		clearTimeout(panTimer);
-		panTimer = setTimeout(() => {
-			const map = ctl._imgMap;
-			if (!map || !ctl.isOverlayOpen()) return;
-			const pt = map.project(map.getCenter(), f.maxZ);
-			const u = Math.max(0, Math.min(1, pt.x / f.w));
-			const v = Math.max(0, Math.min(1, pt.y / f.h));
-			const ground = _vexcelBilinear(f.corners, u, v);
-			const cap = ctl.model.captures[ctl.capIdx];
-			if (!cap) return;
-			fetchVexcelFrame(ground[0], ground[1], cap.collection, ctl.dir, ctl.band, (fr) => {
-				if (!fr || !fr.name || !ctl.isOverlayOpen()) return;
-				if (fr.name === f.name) return;            // same frame — nothing to do
-				loadFrame(Object.assign({ collection: cap.collection }, fr),
-					{ center: ground, keepZoom: true });
-			});
-		}, 300);
-	};
-
-	// Query captures at the current map centre and refresh the date bar.
-	// Cheap + un-throttled, so safe to run on every settle. Does NOT open
-	// the overlay — that only happens on an explicit direction click.
+	// Query the capture dates available at the current map centre and refresh
+	// the date bar. Cheap + un-throttled, so safe to run on every settle.
 	let refreshTimer = null;
 	const refreshCaptures = () => {
 		if (!ctl._map) return;
 		const c = ctl._map.getCenter();
-		const key = c.lat.toFixed(5) + "," + c.lng.toFixed(5);
+		const key = c.lat.toFixed(4) + "," + c.lng.toFixed(4);
 		if (ctl.atKey === key) return;
 		ctl.lat = c.lat; ctl.lng = c.lng; ctl.atKey = key;
 		if (!_vexcelTokenValid(_getStoredToken()) && !_hasCreds()) {
-			ctl.model = null; ctl.queried = true; ctl._fire("capturechange"); return;
+			ctl.captures = []; ctl.queried = true; ctl._fire("capturechange"); return;
 		}
-		ctl.queried = false; ctl._fire("capturechange"); // show "Loading…" while in flight
+		ctl.queried = false; ctl._fire("capturechange"); // show "Loading…" in flight
 		const gen = ++ctl.gen;
-		fetchVexcelObliques(ctl.lat, ctl.lng, (model, reason) => {
-			if (gen !== ctl.gen && model == null) { /* keep prior on stale */ }
-			ctl.model = model || null;
+		fetchVexcelOrthoDates(ctl.lat, ctl.lng, (caps) => {
+			if (gen !== ctl.gen) return;
+			ctl.captures = caps || [];
 			ctl.queried = true;
-			if (reason === "auth") {
-				// Token was refused (cleared by the fetch). The basemap's
-				// tile-error handler prompts for a fresh one; here just
-				// reflect it if the oblique overlay is open.
-				ctl._fire("capturechange");
-				if (ctl.isOverlayOpen()) setMsg("Vexcel token was refused — reselect the base to paste a fresh one.");
-				return;
-			}
-			if (model) {
-				if (!model.directions.some((d) => d.key === ctl.dir)) ctl.dir = model.directions[0].key;
-				if (ctl.capIdx >= model.captures.length) ctl.capIdx = 0;
-				markActiveDir();
-			}
+			if (ctl.capIdx >= ctl.captures.length) ctl.capIdx = 0;
 			ctl._fire("capturechange"); // history bar re-reads count/idx/label
-			// If the overlay is already open, refresh it for the new centre.
-			if (overlay.style.display !== "none" && model) load();
 		});
 	};
 	const scheduleRefresh = () => {
@@ -944,67 +739,12 @@ export function createVexcelControl() {
 		refreshTimer = setTimeout(refreshCaptures, 500);
 	};
 
-	dirBtns.forEach((b) => b.addEventListener("click", () => {
-		if (b.disabled) return; // greyed — no photo for this date
-		if (!_vexcelTokenValid(_getStoredToken())) { setMsg("Paste a Vexcel token (reselect the base) to load imagery."); return; }
-		if (!ctl.model) { setMsg("No Vexcel oblique here — recentre over a flown area."); return; }
-		ctl.dir = b.dataset.dir;
-		markActiveDir();
-		load();
-	}));
-	// IR toggle: swap the active band (rgb ⇄ near-infrared) and reload the
-	// current view. Only enabled where an IR band exists (SCC: nadir 2025).
-	if (irBtn) irBtn.addEventListener("click", () => {
-		if (irBtn.disabled || !irAvail()) return;
-		ctl.band = ctl.band === "irg" ? "rgb" : "irg";
-		updateIrBtn();
-		// Always load() — like the direction buttons — so clicking IR from
-		// the flat basemap OPENS the nadir oblique in infrared instead of
-		// silently flipping a hidden flag (which reads as a dead button).
-		load();
-	});
-	overlay.querySelector(".dw-vex-close").addEventListener("click", () => {
-		overlay.style.display = "none";  // back to the live map
-		ctl.gen++;
-		markActiveDir();            // clear the highlight (no oblique open)
-		ctl._fire("overlaytoggle"); // hide the date bar with the oblique
-	});
-
-	// -- history-bar adapter (dates) --------------------------------
-	ctl.getCaptureCount = () => (ctl.model && ctl.model.captures.length) || 0;
-	ctl.getCaptureIdx   = () => ctl.capIdx;
-	// "loading" until the first query resolves, then "ready" (has captures)
-	// or "empty" — so the date bar can stop showing "Loading…" forever when
-	// a point has no imagery (or the account is quota-capped).
-	ctl.getCaptureState = () =>
-		!ctl.queried ? "loading" : (ctl.getCaptureCount() ? "ready" : "empty");
-	ctl.getCaptureDate  = (i) => {
-		const caps = (ctl.model && ctl.model.captures) || [];
-		return caps[i] ? (caps[i].date || caps[i].year) : "";
-	};
-	ctl.setCapture = (i) => {
-		ctl.capIdx = i;
-		if (!ctl.model) return;
-		// The chosen date may not have the current direction (e.g. ⊙
-		// nadir on a pre-2025 year) — fall back to an available angle so
-		// scrubbing always shows imagery rather than a dead "no photo".
-		if (!dirHasPhoto(ctl.dir)) {
-			const avail = availDirs();
-			if (avail.length) ctl.dir = avail[0].key;
-		}
-		markActiveDir();
-		// Scrubbing a date shows that date's imagery — open the oblique
-		// even from the basemap (whose own tiles are date-locked).
-		load();
-	};
-
 	ctl.addTo = (m) => {
 		if (ctl._map) return ctl;
 		ctl._map = m;
-		m.getContainer().appendChild(overlay);
 		m.getContainer().appendChild(el);
 		m.on("moveend", scheduleRefresh);
-		markActiveDir();
+		updateIrBtn();
 		refreshCaptures();
 		return ctl;
 	};
@@ -1013,9 +753,7 @@ export function createVexcelControl() {
 		ctl._map.off("moveend", scheduleRefresh);
 		clearTimeout(refreshTimer);
 		ctl.gen++;
-		if (ctl._imgMap) { try { ctl._imgMap.remove(); } catch (_) {} ctl._imgMap = null; ctl._tileLayer = null; }
 		if (el.parentNode) el.parentNode.removeChild(el);
-		if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
 		ctl._map = null;
 		return ctl;
 	};
@@ -1041,18 +779,26 @@ export class VexcelLayerProvider extends LayerProvider {
 			Referer: spoofOrigin + "/",
 			Accept: "image/jpeg,image/*,*/*;q=0.8",
 		};
-		// Concrete per-tile WMTS getTile URL with both credentials; "" until
-		// a session exists (then the layer redraws), so we never fire a
-		// doomed token-only request.
+		// Concrete per-tile URL on the viewer's world-layer /ortho/tile
+		// endpoint (256px, same tiles as wmts but — unlike wmts — it honours
+		// date + band params). "" until a session exists (then the layer
+		// redraws), so we never fire a doomed token-only request.
+		//   layer._dwVexColl : ""=newest, else order-by that collection (date)
+		//   layer._dwVexBand : "rgb" | "irg" (near-infrared, &bands=irg)
 		const tileUrl = (z, x, y) => {
 			const tok = _getStoredToken(), sess = _getStoredSession();
 			if (!_vexcelTokenValid(tok) || !sess) return "";
-			return CFG.VEXCEL_WMTS_BASE +
-				"?service=wmts&request=getTile&layer=urban&Style=RGB" +
-				"&TileMatrixSet=urban&TileMatrix=" + z + "&TileRow=" + y +
-				"&TileCol=" + x + "&format=image/jpeg" +
+			let u = CFG.VEXCEL_API_BASE + "/v2/ortho/tile?zoom=" + z +
+				"&tile-x=" + x + "&tile-y=" + y +
+				"&interpolation=true&layer=urban,wide-area" +
 				"&session=" + encodeURIComponent(sess) +
 				"&token=" + encodeURIComponent(tok);
+			if (layer._dwVexColl) {
+				u += "&order-by=" + encodeURIComponent(layer._dwVexColl) +
+					",collection-last-capture-date-desc";
+			}
+			if (layer._dwVexBand === "irg") u += "&bands=irg";
+			return u;
 		};
 
 		const VexGrid = L.GridLayer.extend({
@@ -1099,6 +845,20 @@ export class VexcelLayerProvider extends LayerProvider {
 				' rel="noreferrer">Vexcel Imaging</a>',
 		});
 		wireTileAbort(layer);
+		// Date (collection) + band state, driven by the docked control. ""
+		// collection = current-best (newest); a set collection scrubs to that
+		// capture date. Setters redraw only on a real change.
+		layer._dwVexColl = "";
+		layer._dwVexBand = "rgb";
+		layer._dwSetCollection = (c) => {
+			if ((c || "") === layer._dwVexColl) return;
+			layer._dwVexColl = c || "";
+			layer.redraw();
+		};
+		layer._dwSetBand = (b) => {
+			if (b !== layer._dwVexBand) { layer._dwVexBand = b; layer.redraw(); }
+		};
+		_vexLayer = layer; // so the control can drive date/band
 
 		// Auth happens when the base is SELECTED, not at boot — a page-load
 		// prompt would be obnoxious and the token may have rotated. Mint the
@@ -1114,7 +874,7 @@ export class VexcelLayerProvider extends LayerProvider {
 			const cur = _getStoredToken();
 			if (_vexcelTokenValid(cur)) ready(cur);
 			else _ensureAuthedToken(undefined, ready); // silent auto-login / prompt
-			// Show the docked imagery compass (N/E/S/W/⊙ + date slider).
+			// Show the docked IR toggle (dates ride the shared history bar).
 			const map = e && e.target && e.target._map;
 			if (map) createVexcelControl().addTo(map);
 		});

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.9.134
+// @version      7.9.135
 // @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -3185,138 +3185,60 @@
     if (tok) _storeToken(tok);
     cb(_vexcelTokenValid(tok) ? tok : null);
   }
-  function fetchVexcelObliques(lat, lng, cb) {
-    _ensureQueryAuth((token, session) => {
-      if (!token) {
-        cb(null);
-        return;
-      }
-      _fetchVexcelObliques(lat, lng, token, session, cb);
-    });
-  }
-  function _fetchVexcelObliques(lat, lng, token, session, cb) {
-    if (!_vexcelTokenValid(token)) {
-      cb(null);
-      return;
-    }
-    gmJsonGet(
-      CFG.VEXCEL_API_BASE + "/v2/oriented/query?session=" + encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
-      {
-        method: "POST",
-        data: JSON.stringify({
-          wkt: `POINT(${Number(lng)} ${Number(lat)})`,
-          srid: "4326",
-          layer: "wide-area,urban",
-          // Both bands (rgb + irg) so the viewer can offer an IR
-          // toggle; parse buckets them by the image-name suffix.
-          // image-center-distance-asc → the first image per cell is
-          // the one whose frame is centred nearest the clicked point,
-          // so the user's spot sits near the middle of the oblique.
-          "order-by": "image-center-distance-asc",
-          include: "collection,capture-date,product-type,image-name,source-layer,raster-size-width,raster-size-height,geometry"
-        }),
-        headers: _vexcelOriginHeaders({ "Content-Type": "application/json" })
-      },
-      (err, data, raw) => {
-        if (raw && (raw.status === 401 || raw.status === 403)) {
-          cb(null, "auth");
-          return;
-        }
-        if (err || !data) {
-          cb(null);
-          return;
-        }
-        const parsed = _vexcelParseObliques(data);
-        cb(parsed.directions.length ? parsed : null);
-      }
-    );
-  }
-  function _dirLabel(key) {
-    const d = VEXCEL_DIRECTIONS.find((x) => x.key === key);
-    return d ? d.label : key;
-  }
-  function fetchVexcelFrame(lng, lat, collection, dir, band, cb) {
-    _ensureQueryAuth((token, session) => {
-      if (!token) {
-        cb(null);
-        return;
-      }
-      _fetchVexcelFrame(lng, lat, collection, dir, band, token, session, cb);
-    });
-  }
-  function _fetchVexcelFrame(lng, lat, collection, dir, band, token, session, cb) {
-    if (!_vexcelTokenValid(token)) {
-      cb(null);
-      return;
-    }
-    gmJsonGet(
-      CFG.VEXCEL_API_BASE + "/v2/oriented/query?session=" + encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
-      {
-        method: "POST",
-        data: JSON.stringify({
-          wkt: `POINT(${Number(lng)} ${Number(lat)})`,
-          srid: "4326",
-          layer: "wide-area,urban",
-          collection,
-          "product-type": dir,
-          bands: band || "rgb",
-          "order-by": "image-center-distance-asc",
-          "total-records": 1,
-          include: "image-name,source-layer,raster-size-width,raster-size-height,geometry"
-        }),
-        headers: _vexcelOriginHeaders({ "Content-Type": "application/json" })
-      },
-      (err, data) => {
-        const f = !err && data && Array.isArray(data.features) && data.features[0];
-        if (!f) {
-          cb(null);
-          return;
-        }
-        const p = f.properties || {};
-        cb({
-          name: p["image-name"],
-          layer: p["source-layer"] || "urban",
-          w: Number(p["raster-size-width"]) || 0,
-          h: Number(p["raster-size-height"]) || 0,
-          corners: _vexcelFootprint(f.geometry)
-        });
-      }
-    );
-  }
   var _vexCtl = null;
+  var _vexLayer = null;
+  function fetchVexcelOrthoDates(lat, lng, cb) {
+    _ensureQueryAuth((token, session) => {
+      if (!token) {
+        cb(null);
+        return;
+      }
+      gmJsonGet(
+        CFG.VEXCEL_API_BASE + "/v2/ortho/collections?wkt=" + encodeURIComponent(`POINT(${Number(lng)} ${Number(lat)})`) + "&srid=4326&layer=urban,wide-area&session=" + encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
+        { headers: _vexcelOriginHeaders() },
+        (err, data, raw) => {
+          if (raw && (raw.status === 401 || raw.status === 403)) {
+            cb(null, "auth");
+            return;
+          }
+          if (err || !data || !Array.isArray(data.features)) {
+            cb(null);
+            return;
+          }
+          const seen = /* @__PURE__ */ new Set(), caps = [];
+          for (const f of data.features) {
+            const c = f.properties && f.properties.collection;
+            if (!c || seen.has(c)) continue;
+            seen.add(c);
+            caps.push({ collection: c, year: _vexcelCollectionYear(c) });
+          }
+          caps.sort((a, b) => String(b.year).localeCompare(String(a.year)));
+          cb(caps.length ? caps : null);
+        }
+      );
+    });
+  }
   function createVexcelControl() {
     if (_vexCtl) return _vexCtl;
     const el = document.createElement("div");
     el.className = "dw-vex-ctl";
-    el.innerHTML = '<div class="dw-vex-rose"><button type="button" class="dw-vex-dir dw-vex-n" data-dir="oblique-north" title="Look from the north">N</button><button type="button" class="dw-vex-dir dw-vex-w" data-dir="oblique-west" title="Look from the west">W</button><button type="button" class="dw-vex-dir dw-vex-c" data-dir="nadir" title="Straight down (dated)">⊙</button><button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button><button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button></div><button type="button" class="dw-vex-ir" title="Toggle near-infrared (vegetation shows red)">IR</button><div class="dw-vex-basemsg" style="display:none"></div>';
-    const overlay = document.createElement("div");
-    overlay.className = "dw-vex-overlay";
-    overlay.style.display = "none";
-    overlay.innerHTML = '<button type="button" class="dw-vex-close" title="Back to map">✕ Map</button><div class="dw-vex-hint">drag to pan · scroll to zoom</div><div class="dw-vex-msg"></div><div class="dw-vex-tilemap"></div>';
-    for (const node of [el, overlay]) {
-      L.DomEvent.disableClickPropagation(node);
-      L.DomEvent.disableScrollPropagation(node);
-    }
+    el.innerHTML = '<button type="button" class="dw-vex-ir" title="Toggle near-infrared (vegetation shows red)">IR</button><div class="dw-vex-basemsg" style="display:none"></div>';
+    L.DomEvent.disableClickPropagation(el);
+    L.DomEvent.disableScrollPropagation(el);
     const listeners = {};
     const ctl = {
       el,
-      overlay,
       _map: null,
       lat: 0,
       lng: 0,
       atKey: "",
-      model: null,
-      // Default to the straight-down nadir (⊙) — it matches the flat
-      // basemap orientation, so entering the dated viewer feels like
-      // "the same view, but through time". Falls back to an oblique
-      // angle on dates/areas without nadir (SCC: nadir is 2025 only).
-      dir: "nadir",
+      captures: [],
+      // [{collection, year}] newest-first
+      capIdx: 0,
       band: "rgb",
       // "rgb" | "irg" (near-infrared)
-      capIdx: 0,
-      // index into model.captures (0 = newest)
       queried: false,
-      // has the capture query at the current point resolved?
+      // has the dates query at the current point resolved?
       gen: 0,
       on(ev, fn) {
         (listeners[ev] = listeners[ev] || []).push(fn);
@@ -3334,8 +3256,8 @@
           }
         }
       },
-      // Surface a base-layer status note under the compass (e.g. the
-      // account is quota-capped). Empty/falsy hides it.
+      // Surface a base-layer status note under the IR button (e.g. account
+      // refused / no coverage). Empty/falsy hides it.
       setBaseMsg(text) {
         const n = el.querySelector(".dw-vex-basemsg");
         if (!n) return;
@@ -3343,222 +3265,37 @@
         n.style.display = text ? "block" : "none";
       }
     };
-    const mapEl = overlay.querySelector(".dw-vex-tilemap");
-    const msgEl = overlay.querySelector(".dw-vex-msg");
-    const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
     const irBtn = el.querySelector(".dw-vex-ir");
-    const cellFor = (dir) => {
-      const cap = ctl.model && ctl.model.captures[ctl.capIdx];
-      return cap ? ctl.model.images[dir + "@" + cap.collection] : null;
-    };
-    const curImage = () => {
-      const cell = cellFor(ctl.dir);
-      return cell ? cell[ctl.band] || cell.rgb : null;
-    };
-    const irAvail = () => {
-      const cell = cellFor(ctl.dir);
-      return !!(cell && cell.irg);
-    };
-    const setMsg = (t) => {
-      const wasClosed = overlay.style.display === "none";
-      overlay.style.display = "";
-      msgEl.textContent = t;
-      msgEl.style.display = t ? "" : "none";
-      if (wasClosed) ctl._fire("overlaytoggle");
-    };
-    ctl.isOverlayOpen = () => overlay.style.display !== "none";
-    const dirHasPhoto = (dir) => {
-      const cell = cellFor(dir);
-      return !!(cell && (cell.rgb || cell.irg));
-    };
-    const availDirs = () => {
-      if (!ctl.model) return [];
-      return ctl.model.directions.filter((d) => dirHasPhoto(d.key));
-    };
     const updateIrBtn = () => {
-      if (!irBtn) return;
-      const avail = irAvail();
-      if (!avail && ctl.band === "irg") ctl.band = "rgb";
-      irBtn.disabled = !avail;
-      irBtn.classList.toggle("dw-vex-dir--off", !avail);
-      irBtn.classList.toggle("dw-vex-ir--on", ctl.band === "irg" && avail);
+      if (irBtn) irBtn.classList.toggle("dw-vex-ir--on", ctl.band === "irg");
     };
-    const markActiveDir = () => {
-      dirBtns.forEach((b) => {
-        const has = dirHasPhoto(b.dataset.dir);
-        b.classList.toggle(
-          "dw-vex-dir--on",
-          ctl.isOverlayOpen() && b.dataset.dir === ctl.dir && has
-        );
-        b.classList.toggle("dw-vex-dir--off", !!ctl.model && !has);
-        b.disabled = !!ctl.model && !has;
-      });
+    if (irBtn) irBtn.addEventListener("click", () => {
+      ctl.band = ctl.band === "irg" ? "rgb" : "irg";
+      if (_vexLayer && _vexLayer._dwSetBand) _vexLayer._dwSetBand(ctl.band);
       updateIrBtn();
-    };
-    ctl._imgMap = null;
-    ctl._tileLayer = null;
-    const ensureImgMap = () => {
-      if (ctl._imgMap) return ctl._imgMap;
-      ctl._imgMap = L.map(mapEl, {
-        crs: L.CRS.Simple,
-        attributionControl: false,
-        zoomControl: true,
-        minZoom: 0
-      });
-      ctl._imgMap.on("moveend", onInnerMove);
-      return ctl._imgMap;
-    };
-    const dropTiles = () => {
-      if (ctl._tileLayer && ctl._imgMap) {
-        ctl._imgMap.removeLayer(ctl._tileLayer);
-        ctl._tileLayer = null;
+    });
+    ctl.getCaptureCount = () => ctl.captures.length;
+    ctl.getCaptureIdx = () => ctl.capIdx;
+    ctl.getCaptureState = () => !ctl.queried ? "loading" : ctl.captures.length ? "ready" : "empty";
+    ctl.getCaptureDate = (i) => ctl.captures[i] ? ctl.captures[i].year : "";
+    ctl.setCapture = (i) => {
+      ctl.capIdx = i;
+      const cap = ctl.captures[i];
+      if (_vexLayer && _vexLayer._dwSetCollection) {
+        _vexLayer._dwSetCollection(i === 0 ? "" : cap ? cap.collection : "");
       }
-    };
-    ctl._frame = null;
-    ctl._suppressMove = false;
-    const loadFrame = (frame, opts) => {
-      opts = opts || {};
-      const base = _vexcelObliqueTileBase(
-        frame.name,
-        frame.layer,
-        _getStoredToken(),
-        _getStoredSession()
-      );
-      if (!base) {
-        setMsg("Vexcel token expired — reselect the base to refresh it.");
-        return;
-      }
-      setMsg("");
-      const w = frame.w || 10560, h = frame.h || 14144;
-      const TS = 256;
-      const sizes = [];
-      let s = L.point(w, h);
-      sizes.push(s);
-      while (s.x > TS || s.y > TS) {
-        s = s.divideBy(2).ceil();
-        sizes.push(s);
-      }
-      sizes.reverse();
-      const maxZ = sizes.length - 1;
-      const grids = sizes.map((p) => L.point(Math.ceil(p.x / TS), Math.ceil(p.y / TS)));
-      const map = ensureImgMap();
-      map.setMinZoom(0);
-      map.setMaxZoom(maxZ);
-      map.invalidateSize();
-      dropTiles();
-      const TileCls = L.GridLayer.extend({
-        createTile(coords, done) {
-          const img = document.createElement("img");
-          img.setAttribute("role", "presentation");
-          const ds = maxZ - coords.z;
-          const url = base + "&downsample=" + ds + "&tile-x=" + coords.x + "&tile-y=" + coords.y;
-          img._dwHandle = gmGet(url, {
-            responseType: "arraybuffer",
-            headers: _vexcelOriginHeaders({ Accept: "image/jpeg,image/*,*/*;q=0.8" })
-          }, (err, r) => {
-            img._dwHandle = null;
-            if (err || !r || r.status !== 200) {
-              img.src = BLANK_TILE;
-              done(null, img);
-              return;
-            }
-            const blob = new Blob([r.response], { type: "image/jpeg" });
-            const objUrl = URL.createObjectURL(blob);
-            img.onload = () => {
-              URL.revokeObjectURL(objUrl);
-              done(null, img);
-            };
-            img.onerror = () => {
-              URL.revokeObjectURL(objUrl);
-              img.src = BLANK_TILE;
-              done(null, img);
-            };
-            img.src = objUrl;
-          });
-          return img;
-        },
-        _isValidTile(coords) {
-          const g = grids[coords.z];
-          return !!g && coords.x >= 0 && coords.y >= 0 && coords.x < g.x && coords.y < g.y;
-        }
-      });
-      ctl._tileLayer = new TileCls({
-        tileSize: TS,
-        minZoom: 0,
-        maxZoom: maxZ,
-        noWrap: true
-      }).addTo(map);
-      wireTileAbort(ctl._tileLayer);
-      const bounds = L.latLngBounds(
-        map.unproject([0, h], maxZ),
-        map.unproject([w, 0], maxZ)
-      );
-      map.setMaxBounds(bounds.pad(0.1));
-      ctl._frame = Object.assign({ collection: frame.collection, maxZ, w, h }, frame);
-      const keepZ = opts.keepZoom && map.getZoom();
-      let center = bounds.getCenter(), z;
-      if (opts.center && frame.corners) {
-        const [u, v] = _vexcelInvBilinear(frame.corners, opts.center[0], opts.center[1]);
-        center = map.unproject([u * w, v * h], maxZ);
-        z = keepZ || Math.min(maxZ, Math.max(map.getBoundsZoom(bounds, false), maxZ - 1));
-      } else {
-        z = Math.min(maxZ, Math.max(map.getBoundsZoom(bounds, false), maxZ - 1));
-      }
-      ctl._suppressMove = true;
-      map.setView(center, z, { animate: false });
-      markActiveDir();
-    };
-    const load = () => {
-      if (!ctl.model) return;
-      const cap = ctl.model.captures[ctl.capIdx];
-      const img = curImage();
-      if (!img) {
-        dropTiles();
-        setMsg("No " + _dirLabel(ctl.dir) + " photo for " + (cap ? cap.date : "this date") + " here.");
-        ctl._frame = null;
-        return;
-      }
-      loadFrame(Object.assign({ collection: cap.collection }, img));
-    };
-    let panTimer = null;
-    const onInnerMove = () => {
-      if (ctl._suppressMove) {
-        ctl._suppressMove = false;
-        return;
-      }
-      const f = ctl._frame;
-      if (!f || !f.corners || !ctl.model) return;
-      clearTimeout(panTimer);
-      panTimer = setTimeout(() => {
-        const map = ctl._imgMap;
-        if (!map || !ctl.isOverlayOpen()) return;
-        const pt = map.project(map.getCenter(), f.maxZ);
-        const u = Math.max(0, Math.min(1, pt.x / f.w));
-        const v = Math.max(0, Math.min(1, pt.y / f.h));
-        const ground = _vexcelBilinear(f.corners, u, v);
-        const cap = ctl.model.captures[ctl.capIdx];
-        if (!cap) return;
-        fetchVexcelFrame(ground[0], ground[1], cap.collection, ctl.dir, ctl.band, (fr) => {
-          if (!fr || !fr.name || !ctl.isOverlayOpen()) return;
-          if (fr.name === f.name) return;
-          loadFrame(
-            Object.assign({ collection: cap.collection }, fr),
-            { center: ground, keepZoom: true }
-          );
-        });
-      }, 300);
     };
     let refreshTimer = null;
     const refreshCaptures = () => {
       if (!ctl._map) return;
       const c = ctl._map.getCenter();
-      const key = c.lat.toFixed(5) + "," + c.lng.toFixed(5);
+      const key = c.lat.toFixed(4) + "," + c.lng.toFixed(4);
       if (ctl.atKey === key) return;
       ctl.lat = c.lat;
       ctl.lng = c.lng;
       ctl.atKey = key;
       if (!_vexcelTokenValid(_getStoredToken()) && !_hasCreds()) {
-        ctl.model = null;
+        ctl.captures = [];
         ctl.queried = true;
         ctl._fire("capturechange");
         return;
@@ -3566,79 +3303,24 @@
       ctl.queried = false;
       ctl._fire("capturechange");
       const gen = ++ctl.gen;
-      fetchVexcelObliques(ctl.lat, ctl.lng, (model, reason) => {
-        if (gen !== ctl.gen && model == null) {
-        }
-        ctl.model = model || null;
+      fetchVexcelOrthoDates(ctl.lat, ctl.lng, (caps) => {
+        if (gen !== ctl.gen) return;
+        ctl.captures = caps || [];
         ctl.queried = true;
-        if (reason === "auth") {
-          ctl._fire("capturechange");
-          if (ctl.isOverlayOpen()) setMsg("Vexcel token was refused — reselect the base to paste a fresh one.");
-          return;
-        }
-        if (model) {
-          if (!model.directions.some((d) => d.key === ctl.dir)) ctl.dir = model.directions[0].key;
-          if (ctl.capIdx >= model.captures.length) ctl.capIdx = 0;
-          markActiveDir();
-        }
+        if (ctl.capIdx >= ctl.captures.length) ctl.capIdx = 0;
         ctl._fire("capturechange");
-        if (overlay.style.display !== "none" && model) load();
       });
     };
     const scheduleRefresh = () => {
       clearTimeout(refreshTimer);
       refreshTimer = setTimeout(refreshCaptures, 500);
     };
-    dirBtns.forEach((b) => b.addEventListener("click", () => {
-      if (b.disabled) return;
-      if (!_vexcelTokenValid(_getStoredToken())) {
-        setMsg("Paste a Vexcel token (reselect the base) to load imagery.");
-        return;
-      }
-      if (!ctl.model) {
-        setMsg("No Vexcel oblique here — recentre over a flown area.");
-        return;
-      }
-      ctl.dir = b.dataset.dir;
-      markActiveDir();
-      load();
-    }));
-    if (irBtn) irBtn.addEventListener("click", () => {
-      if (irBtn.disabled || !irAvail()) return;
-      ctl.band = ctl.band === "irg" ? "rgb" : "irg";
-      updateIrBtn();
-      load();
-    });
-    overlay.querySelector(".dw-vex-close").addEventListener("click", () => {
-      overlay.style.display = "none";
-      ctl.gen++;
-      markActiveDir();
-      ctl._fire("overlaytoggle");
-    });
-    ctl.getCaptureCount = () => ctl.model && ctl.model.captures.length || 0;
-    ctl.getCaptureIdx = () => ctl.capIdx;
-    ctl.getCaptureState = () => !ctl.queried ? "loading" : ctl.getCaptureCount() ? "ready" : "empty";
-    ctl.getCaptureDate = (i) => {
-      const caps = ctl.model && ctl.model.captures || [];
-      return caps[i] ? caps[i].date || caps[i].year : "";
-    };
-    ctl.setCapture = (i) => {
-      ctl.capIdx = i;
-      if (!ctl.model) return;
-      if (!dirHasPhoto(ctl.dir)) {
-        const avail = availDirs();
-        if (avail.length) ctl.dir = avail[0].key;
-      }
-      markActiveDir();
-      load();
-    };
     ctl.addTo = (m) => {
       if (ctl._map) return ctl;
       ctl._map = m;
-      m.getContainer().appendChild(overlay);
       m.getContainer().appendChild(el);
       m.on("moveend", scheduleRefresh);
-      markActiveDir();
+      updateIrBtn();
       refreshCaptures();
       return ctl;
     };
@@ -3647,16 +3329,7 @@
       ctl._map.off("moveend", scheduleRefresh);
       clearTimeout(refreshTimer);
       ctl.gen++;
-      if (ctl._imgMap) {
-        try {
-          ctl._imgMap.remove();
-        } catch (_) {
-        }
-        ctl._imgMap = null;
-        ctl._tileLayer = null;
-      }
       if (el.parentNode) el.parentNode.removeChild(el);
-      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
       ctl._map = null;
       return ctl;
     };
@@ -3674,7 +3347,12 @@
       const tileUrl = (z, x, y) => {
         const tok = _getStoredToken(), sess = _getStoredSession();
         if (!_vexcelTokenValid(tok) || !sess) return "";
-        return CFG.VEXCEL_WMTS_BASE + "?service=wmts&request=getTile&layer=urban&Style=RGB&TileMatrixSet=urban&TileMatrix=" + z + "&TileRow=" + y + "&TileCol=" + x + "&format=image/jpeg&session=" + encodeURIComponent(sess) + "&token=" + encodeURIComponent(tok);
+        let u = CFG.VEXCEL_API_BASE + "/v2/ortho/tile?zoom=" + z + "&tile-x=" + x + "&tile-y=" + y + "&interpolation=true&layer=urban,wide-area&session=" + encodeURIComponent(sess) + "&token=" + encodeURIComponent(tok);
+        if (layer._dwVexColl) {
+          u += "&order-by=" + encodeURIComponent(layer._dwVexColl) + ",collection-last-capture-date-desc";
+        }
+        if (layer._dwVexBand === "irg") u += "&bands=irg";
+        return u;
       };
       const VexGrid = L.GridLayer.extend({
         createTile(coords, done) {
@@ -3726,6 +3404,20 @@
         attribution: '&copy; <a href="https://www.vexcelgroup.com/" target="_blank" rel="noreferrer">Vexcel Imaging</a>'
       });
       wireTileAbort(layer);
+      layer._dwVexColl = "";
+      layer._dwVexBand = "rgb";
+      layer._dwSetCollection = (c) => {
+        if ((c || "") === layer._dwVexColl) return;
+        layer._dwVexColl = c || "";
+        layer.redraw();
+      };
+      layer._dwSetBand = (b) => {
+        if (b !== layer._dwVexBand) {
+          layer._dwVexBand = b;
+          layer.redraw();
+        }
+      };
+      _vexLayer = layer;
       layer.on("add", (e) => {
         layer._dwAuthTries = 0;
         layer._dwAuthGaveUp = false;
@@ -8509,7 +8201,6 @@
           getLabel: (i) => vexCtl.getCaptureDate(i),
           getState: () => vexCtl.getCaptureState()
         });
-        vexCtl.on("overlaytoggle", () => this._syncVexcelHistControl(map));
         const wayLyr = addBase(CFG.LAYER_WAYBACK, new WaybackLayerProvider());
         this.waybackHistControl = this._makeHistoryBar({
           layer: wayLyr,

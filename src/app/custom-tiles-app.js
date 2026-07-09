@@ -248,10 +248,9 @@ export class CustomTilesApp {
 				getLabel: (i) => vexCtl.getCaptureDate(i),
 				getState: () => vexCtl.getCaptureState(),
 			});
-			// The date bar only makes sense while an oblique is open (the
-			// flat basemap is date-locked), so show/hide it as the oblique
-			// overlay toggles — not merely when the Vexcel base is active.
-			vexCtl.on("overlaytoggle", () => this._syncVexcelHistControl(map));
+			// The flat Vexcel base is itself date-aware now (scrubbing swaps
+			// the ortho collection), so the date bar shows whenever the base
+			// is active — driven by _syncVexcelHistControl on base change.
 			const wayLyr = addBase(CFG.LAYER_WAYBACK, new WaybackLayerProvider());
 			this.waybackHistControl = this._makeHistoryBar({
 				layer: wayLyr, event: "histchange",
