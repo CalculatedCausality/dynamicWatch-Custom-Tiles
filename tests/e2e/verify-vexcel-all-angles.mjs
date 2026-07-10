@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 // Centre on the Sunshine Coast, then cycle the Vexcel compass through
-// EVERY direction (N, E, S, W, ⊙ nadir), waiting for each stitched
-// oblique to actually paint and screenshotting the panel each time.
-// Emits one PNG per angle (cropped to the control) plus a per-angle
-// verdict, so the result can be eyeballed.
+// EVERY direction (N, E, S, W, top), waiting for each warped oblique to
+// paint on the primary map and screenshotting the map each time.
 //
 //   VEXCEL_TOKEN=<jwt-or-url> npm run e2e:vexcel-angles
 import { chromium } from "playwright";
@@ -66,7 +64,8 @@ const nukeModal = () => page.evaluate(() => {
 	document.body.classList.remove("modal-open"); document.body.style.overflow = "";
 });
 await nukeModal();
-await page.waitForFunction(() => !!(window._dwLayerCtrl && window._dwLayerCtrl._map), { timeout: 15_000 });
+await page.waitForFunction(() => !!(window._dwLayerCtrl && window._dwLayerCtrl._map),
+	undefined, { timeout: 15_000 });
 
 // Centre on the Sunshine Coast (Nambour / Buderim hinterland — dense
 // Vexcel urban coverage, 2019–2025 captures).
@@ -90,7 +89,7 @@ await page.waitForSelector(".dw-vex-ctl", { timeout: 10_000 });
 await page.waitForFunction(() => {
 	const s = document.querySelector(".dw-history-slider");
 	return s && Number(s.max) >= 1;
-}, { timeout: 20_000 }).catch(() => {});
+}, undefined, { timeout: 20_000 }).catch(() => {});
 await nukeModal();
 
 if (!existsSync(REPORT_DIR)) mkdirSync(REPORT_DIR, { recursive: true });
@@ -105,32 +104,36 @@ for (const a of ANGLES) {
 		return false;
 	}, a.dir);
 
-	// Wait for THIS direction's tile pyramid to render several chunks.
-	const painted = await page.waitForFunction(() => {
-		const t = document.querySelectorAll(".dw-vex-tilemap .leaflet-tile-loaded");
-		return t.length >= 4;
-	}, { timeout: 45_000 }).then(() => true).catch(() => false);
+	// Wait for THIS direction's warped source tiles to render.
+	const painted = await page.waitForFunction((dir) => {
+		const t = document.querySelectorAll(".dw-vex-warp-tile-loaded");
+		const active = document.querySelector(".dw-vex-dir--on");
+		return t.length >= 4 && active && active.dataset.dir === dir;
+	}, a.dir, { timeout: 45_000 }).then(() => true).catch(() => false);
 	await page.waitForTimeout(3500); // let the visible grid fill
 
 	const info = await page.evaluate(() => {
 		const ctl = document.querySelector(".dw-vex-ctl");
-		const ov  = document.querySelector(".dw-vex-overlay");
-		const msg = ov.querySelector(".dw-vex-msg");
+		const warp = document.querySelector(".dw-vex-warp");
+		const msg = ctl.querySelector(".dw-vex-basemsg");
 		const on  = ctl.querySelector(".dw-vex-dir--on");
 		return {
 			activeDir: on ? on.dataset.dir : null,
 			year: (document.querySelector(".dw-history-bar-label") || {}).textContent,
-			overlayShown: ov.style.display !== "none",
-			tiles: document.querySelectorAll(".dw-vex-tilemap .leaflet-tile-loaded").length,
+			warpShown: !!warp,
+			tiles: document.querySelectorAll(".dw-vex-warp-tile-loaded").length,
 			msg: msg && msg.style.display !== "none" ? msg.textContent : "",
+			imageNames: [...new Set([...document.querySelectorAll(".dw-vex-warp-tile-loaded")]
+				.map((tile) => tile.dataset.imageName).filter(Boolean))],
 		};
 	});
 	const mine = tileLog.slice(before).filter((t) => t.status === 200);
-	const name = mine.length ? mine[mine.length - 1].name : "";
+	const name = info.imageNames.length === 1 ? info.imageNames[0] :
+		(mine.length ? mine[mine.length - 1].name : "");
 	const shot = resolve(REPORT_DIR, `angle-${a.label}.png`);
 	await page.screenshot({ path: shot });
 
-	const ok = clicked && painted && info.overlayShown && info.tiles >= 4 &&
+	const ok = clicked && painted && info.warpShown && info.tiles >= 4 &&
 		info.activeDir === a.dir;
 	results.push({ ...a, ok, info, name, tiles: mine.length, shot });
 	console.log(`  ${ok ? "✓" : "✗"} ${a.label.padEnd(3)} activeDir=${info.activeDir} ` +

@@ -43,6 +43,8 @@ const HELPERS = [
 	"_vexcelCollectionYear", "_vexcelParseObliques", "_vexcelObliqueExtractUrl",
 	"_vexcelObliqueTileBase", "_vexcelMaxDownsample", "_vexcelBand",
 	"_vexcelFootprint", "_vexcelBilinear", "_vexcelInvBilinear",
+	"_vexcelRectToQuad", "_vexcelApplyHomography",
+	"_vexcelTriangleToTriangle", "_vexcelApplyAffine",
 	"_vexcelIsCredString",
 	// Layer-provider factories
 	"LayerProvider", "tileProvider", "tokenTileProvider",

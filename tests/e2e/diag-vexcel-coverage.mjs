@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Diagnostic: drive the Vexcel compass at several populated Sunshine
 // Coast locations that DEFINITELY have oblique coverage, and report for
-// each whether the overlay painted an image or showed a message —
+// each whether the primary-map warp painted tiles or showed a message —
 // reproducing the user's "no imagery where there should be" report.
 import { chromium } from "playwright";
 import { readFileSync, existsSync } from "node:fs";
@@ -35,7 +35,8 @@ const net = [];
 context.on("response", (r) => {
 	const u = r.url();
 	if (u.includes("/v2/oriented/query")) net.push({ kind: "query", status: r.status() });
-	if (u.includes("/v2/oriented/extract")) net.push({ kind: "extract", status: r.status() });
+	if (u.includes("/v2/oriented/tile")) net.push({ kind: "tile", status: r.status() });
+	if (u.includes("/v2/oriented/transform-points")) net.push({ kind: "transform", status: r.status() });
 });
 
 // Enforce Tampermonkey's @connect allowlist so this diagnostic catches
@@ -61,7 +62,8 @@ await page.goto("https://dynamic.watch/plan", { waitUntil: "domcontentloaded", t
 await page.waitForSelector(".leaflet-planner-controls", { timeout: 30_000 });
 const nuke = () => page.evaluate(() => { document.querySelectorAll(".modal,.modal-backdrop").forEach(e => e.remove()); document.body.classList.remove("modal-open"); document.body.style.overflow = ""; });
 await nuke();
-await page.waitForFunction(() => !!(window._dwLayerCtrl && window._dwLayerCtrl._map), { timeout: 15_000 });
+await page.waitForFunction(() => !!(window._dwLayerCtrl && window._dwLayerCtrl._map),
+	undefined, { timeout: 15_000 });
 await page.evaluate(() => {
 	const map = window._dwLayerCtrl._map, ctrl = window._dwLayerCtrl;
 	const vex = ctrl._layers.find((l) => l.name === "Vexcel Aerial")?.layer;
@@ -86,26 +88,24 @@ for (const p of PLACES) {
 		if (b) b.click();
 	});
 	const painted = await page.waitForFunction(() => {
-		const img = document.querySelector(".dw-vex-overlay .dw-vex-img");
-		return img && img.style.display !== "none" && img.complete && img.naturalWidth > 0;
-	}, { timeout: 50_000 }).then(() => true).catch(() => false);
+		return document.querySelectorAll(".dw-vex-warp-tile-loaded").length > 0;
+	}, undefined, { timeout: 50_000 }).then(() => true).catch(() => false);
 	const state = await page.evaluate(() => {
-		const ov = document.querySelector(".dw-vex-overlay");
-		const img = ov.querySelector(".dw-vex-img");
-		const msg = ov.querySelector(".dw-vex-msg");
+		const ctl = document.querySelector(".dw-vex-ctl");
+		const msg = ctl.querySelector(".dw-vex-basemsg");
 		return {
-			overlayShown: ov.style.display !== "none",
-			natW: img ? img.naturalWidth : 0,
+			warpShown: !!document.querySelector(".dw-vex-warp"),
+			tiles: document.querySelectorAll(".dw-vex-warp-tile-loaded").length,
 			msg: msg && msg.style.display !== "none" ? msg.textContent : "",
 		};
 	});
 	const calls = net.slice(before);
 	console.log(`\n${p.name}  (asked ${p.lat},${p.lng} → centre ${centre.lat.toFixed(5)},${centre.lng.toFixed(5)})`);
-	console.log(`  painted=${painted} natW=${state.natW} msg="${state.msg}"`);
+	console.log(`  painted=${painted} tiles=${state.tiles} msg="${state.msg}"`);
 	console.log(`  net: ${calls.map((c) => c.kind + ":" + c.status).join(", ") || "(none)"}`);
-	// Close overlay before next place.
-	await page.evaluate(() => { const b = document.querySelector(".dw-vex-close"); if (b) b.click(); });
-	await page.waitForTimeout(15_000); // spacing for extract rate limit
+	// Clicking the active direction toggles the warp off before the next place.
+	await page.evaluate(() => { const b = document.querySelector(".dw-vex-dir--on"); if (b) b.click(); });
+	await page.waitForTimeout(2000);
 }
 
 await browser.close();

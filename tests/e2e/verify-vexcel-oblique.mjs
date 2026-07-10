@@ -1,9 +1,7 @@
 #!/usr/bin/env node
-// Verify the Vexcel oblique viewer end-to-end: with the Vexcel base
-// active, the location popup exposes the "Oblique views" button; the
-// oriented/query returns captures; and an extract pull paints a real
-// image into the viewer. Exercises the token-only oblique path (no
-// session), including the direction + date model.
+// Verify Vexcel obliques on the primary Leaflet map: oriented tiles are
+// warped into a pane below the native route, map interaction stays active,
+// and direction/date/band changes replace the selected frame.
 //
 //   VEXCEL_TOKEN=<jwt-or-url> npm run e2e:vexcel-oblique
 import { chromium } from "playwright";
@@ -34,18 +32,19 @@ const browser = await chromium.launch({
 });
 const context = await browser.newContext({ storageState: STATE_PATH, viewport: { width: 1400, height: 900 } });
 
-let queryOk = false, tile200 = 0, tileOther = 0;
+let queryOk = false, transform200 = 0, tile200 = 0, tileOther = 0;
 const tileCoords = [];
 const tileImages = []; // image-name per tile request (for frame-switch check)
 context.on("response", (resp) => {
 	const u = resp.url();
 	if (u.includes("/v2/oriented/query")) queryOk = queryOk || resp.status() === 200;
+	if (u.includes("/v2/oriented/transform-points") && resp.status() === 200) transform200++;
 	if (u.includes("/v2/oriented/tile")) {
 		if (resp.status() === 200) tile200++; else tileOther++;
 		const dm = u.match(/downsample=(\d+)/), xm = u.match(/tile-x=(\d+)/), ym = u.match(/tile-y=(\d+)/);
-		if (dm && xm && ym) tileCoords.push(`${dm[1]}/${xm[1]}/${ym[1]}`);
+		if (resp.status() === 200 && dm && xm && ym) tileCoords.push(`${dm[1]}/${xm[1]}/${ym[1]}`);
 		const im = u.match(/image-name=([^&]+)/);
-		if (im) tileImages.push(decodeURIComponent(im[1]));
+		if (resp.status() === 200 && im) tileImages.push(decodeURIComponent(im[1]));
 	}
 });
 
@@ -65,7 +64,8 @@ const nukeModal = () => page.evaluate(() => {
 	document.body.classList.remove("modal-open"); document.body.style.overflow = "";
 });
 await nukeModal();
-await page.waitForFunction(() => !!(window._dwLayerCtrl && window._dwLayerCtrl._map), { timeout: 15_000 });
+await page.waitForFunction(() => !!(window._dwLayerCtrl && window._dwLayerCtrl._map),
+	undefined, { timeout: 15_000 });
 await page.evaluate(() => window._dwLayerCtrl._map.setView([-26.607, 153.006], 17));
 
 // Activate the Vexcel base — the docked imagery control appears
@@ -83,9 +83,18 @@ const set = await page.evaluate(() => {
 });
 if (!set.ok) { console.error("Vexcel base missing"); await browser.close(); process.exit(1); }
 
-// The compass docks on its own; dates ride the SHARED history bar which
-// shows whenever the Vexcel base is active (scrubbing opens the dated
-// oblique — the basemap tiles themselves are date-locked).
+// The blank planner has no saved route. Add a normal Leaflet route-shaped
+// polyline so the test can assert that native overlayPane content remains
+// connected and stacked above the Vexcel warp.
+await page.evaluate(() => {
+	const map = window._dwLayerCtrl._map;
+	window._dwVexcelTestRoute = L.polyline([
+		[-26.610, 153.002], [-26.607, 153.006], [-26.604, 153.010],
+	], { color: "#ef2929", weight: 5, className: "route-polyline" }).addTo(map);
+});
+
+// The compass docks on its own; dates ride the shared history bar and update
+// both the flat mosaic and whichever oblique direction is active.
 const hasCtl = await page.waitForSelector(".dw-vex-ctl", { timeout: 10_000 }).then(() => true).catch(() => false);
 console.log(`docked compass present: ${hasCtl}`);
 // The date bar should populate at the map centre without opening an
@@ -93,29 +102,44 @@ console.log(`docked compass present: ${hasCtl}`);
 const barOnBasemap = await page.waitForFunction(() => {
 	const s = document.querySelector(".dw-history-slider");
 	return s && Number(s.max) >= 1;
-}, { timeout: 15_000 }).then(() => true).catch(() => false);
+}, undefined, { timeout: 15_000 }).then(() => true).catch(() => false);
 console.log(`date bar shown on basemap (should be true): ${barOnBasemap}`);
 
-// Click a direction — opens the oblique.
+// Click a direction to add the warped oblique to the primary map.
 await page.evaluate(() => {
 	const east = document.querySelector('.dw-vex-ctl .dw-vex-dir[data-dir="oblique-east"]');
 	if (east) east.click();
 });
 
-// Wait for the tile pyramid to render chunks (progressive load), then
-// give it a moment to fill the visible grid.
+// Wait for warped source tiles to paint progressively.
 await page.waitForFunction(() => {
-	const t = document.querySelectorAll(".dw-vex-tilemap .leaflet-tile-loaded");
+	const t = document.querySelectorAll(".dw-vex-warp-tile-loaded");
 	return t.length >= 2;
-}, { timeout: 30_000 }).catch(() => {});
+}, undefined, { timeout: 30_000 }).catch(() => {});
 await page.waitForTimeout(5000);
+await page.waitForSelector(".dw-vex-warp--exact", { timeout: 30_000 }).catch(() => {});
 
-// PAN the oblique and confirm NEW tiles stream in on movement — this is
-// the "scrollable tileset that loads on chunks" behaviour, not a static
-// image. Track distinct tile-x/tile-y coords requested before vs after.
-// Real mouse drag so Leaflet's Draggable actually engages (synthetic
-// dispatchEvent doesn't). Drag from mid-screen (over the tilemap, below
-// the top bars) leftward in steps.
+const routeSurface = await page.evaluate(() => {
+	const map = window._dwLayerCtrl._map;
+	const pane = map.getPane("dwVexcelObliquePane");
+	const route = window._dwVexcelTestRoute;
+	const routeRect = route && route._path ? route._path.getBoundingClientRect() : null;
+	const cellRects = [...document.querySelectorAll(".dw-vex-warp-tile-loaded .dw-vex-warp-cell")]
+		.map((cell) => cell.getBoundingClientRect());
+	return {
+		warpOnMainMap: !!document.querySelector(".dw-vex-warp") && !!pane,
+		exactWarp: !!document.querySelector(".dw-vex-warp--exact"),
+		warpPointerEvents: pane ? getComputedStyle(pane).pointerEvents : "",
+		routeConnected: !!(route && route._path && route._path.isConnected),
+		routeAboveWarp: pane && Number(getComputedStyle(map.getPane("overlayPane")).zIndex) >
+			Number(getComputedStyle(pane).zIndex),
+		routeOverImagery: !!routeRect && cellRects.some((rect) =>
+			rect.right >= routeRect.left && rect.left <= routeRect.right &&
+			rect.bottom >= routeRect.top && rect.top <= routeRect.bottom),
+	};
+});
+
+// Pan the PRIMARY map and confirm new warped source tiles stream in.
 const dragLeft = async (dist) => {
 	const cx = 700, cy = 500;
 	await page.mouse.move(cx, cy);
@@ -125,9 +149,13 @@ const dragLeft = async (dist) => {
 	await page.mouse.up();
 };
 const coordsBefore = new Set(tileCoords);
+const centerBefore = await page.evaluate(() => window._dwLayerCtrl._map.getCenter());
 await dragLeft(300);
 await page.waitForTimeout(4000);
-const newCoords = tileCoords.filter((c) => !coordsBefore.has(c)).length;
+const centerAfter = await page.evaluate(() => window._dwLayerCtrl._map.getCenter());
+const mapMoved = Math.abs(centerAfter.lng - centerBefore.lng) > 1e-5 ||
+	Math.abs(centerAfter.lat - centerBefore.lat) > 1e-5;
+const newCoords = new Set(tileCoords.filter((c) => !coordsBefore.has(c))).size;
 console.log(`  new tile coords loaded after pan: ${newCoords}`);
 
 // CONTINUOUS PANNING: pan far (several drags) toward the frame edge and
@@ -188,7 +216,7 @@ const nadirOld = await page.evaluate(() => {
 	return {
 		nadirGreyed: top && top.disabled && top.classList.contains("dw-vex-dir--off"),
 		fellBackTo: on ? on.dataset.dir : null,
-		tiles: document.querySelectorAll(".dw-vex-tilemap .leaflet-tile-loaded").length,
+		tiles: document.querySelectorAll(".dw-vex-warp-tile-loaded").length,
 	};
 });
 console.log(`  ⊙ on newest: enabled=${nadirNewest.enabled} highlighted=${nadirNewest.on}`);
@@ -203,9 +231,14 @@ const viewer = await page.evaluate(() => {
 	const dirs = [...el.querySelectorAll(".dw-vex-dir")].map((b) => b.dataset.dir);
 	const slider = document.querySelector(".dw-history-slider");
 	const captureCount = slider ? Number(slider.max) + 1 : 0;
-	const ov = document.querySelector(".dw-vex-overlay");
-	const tiles = document.querySelectorAll(".dw-vex-tilemap .leaflet-tile-loaded").length;
-	const msg = ov && ov.querySelector(".dw-vex-msg");
+	const map = window._dwLayerCtrl._map;
+	const warp = document.querySelector(".dw-vex-warp");
+	const pane = map.getPane("dwVexcelObliquePane");
+	const route = window._dwVexcelTestRoute;
+	const tiles = document.querySelectorAll(".dw-vex-warp-tile-loaded").length;
+	const msg = el.querySelector(".dw-vex-basemsg");
+	const warpZ = pane ? Number(getComputedStyle(pane).zIndex) : 0;
+	const routeZ = Number(getComputedStyle(map.getPane("overlayPane")).zIndex);
 	return {
 		present: !!el,
 		dirs,
@@ -215,6 +248,10 @@ const viewer = await page.evaluate(() => {
 		tilesLoaded: tiles,
 		imgShown: tiles > 0,
 		msg: msg && msg.style.display !== "none" ? msg.textContent : "",
+		warpOnMainMap: !!warp && !!pane,
+		warpPointerEvents: pane ? getComputedStyle(pane).pointerEvents : "",
+		routeConnected: !!(route && route._path && route._path.isConnected),
+		routeAboveWarp: routeZ > warpZ,
 	};
 });
 
@@ -225,22 +262,28 @@ await page.screenshot({ path: shot });
 
 console.log("\n=== Vexcel imagery control verification ===");
 console.log(`  oriented/query 200:  ${queryOk}`);
+console.log(`  transform-points 200: ${transform200}`);
 console.log(`  oriented/tile 200: ${tile200}  (other: ${tileOther})`);
 console.log(`  control directions: ${JSON.stringify(viewer.dirs)}`);
 console.log(`  capture slider steps: ${viewer.dates.length} (enabled: ${viewer.sliderEnabled}, year: ${viewer.year})`);
 console.log(`  tiles rendered: ${viewer.tilesLoaded}  msg: "${viewer.msg}"`);
 console.log(`  screenshot: ${shot}`);
 
-// PASS if the compass + shared history bar populated, the oblique
-// rendered as a CHUNKED tile pyramid, AND panning streamed NEW tiles
-// (proves "scrollable tileset that loads on movement", not a static img).
+// PASS if the warp painted on the primary map, panning streamed new source
+// tiles, and the native route stayed connected above a non-interactive pane.
 const modelOk = viewer.present && viewer.dirs.filter((d) => /oblique|nadir/.test(d)).length >= 4 && viewer.dates.length >= 2;
 const tilesOk = tile200 >= 2 && viewer.tilesLoaded >= 2;
 const panLoadsTiles = newCoords >= 2;
 const barGating = barOnBasemap === true; // bar shown + populated on basemap
 const continuousPan = newFrames.length >= 1; // crossed into an adjacent frame
-const ok = queryOk && modelOk && tilesOk && panLoadsTiles && barGating && nadirOk && continuousPan && irOk;
+const routeOk = routeSurface.warpOnMainMap && routeSurface.warpPointerEvents === "none" &&
+	routeSurface.routeConnected && routeSurface.routeAboveWarp && routeSurface.routeOverImagery &&
+	routeSurface.exactWarp && transform200 > 0;
+const ok = queryOk && modelOk && tilesOk && panLoadsTiles && barGating &&
+	nadirOk && continuousPan && irOk && routeOk && mapMoved;
 console.log(`  date bar on basemap: ${barGating}  |  nadir grey+fallback: ${nadirOk}  |  continuous pan (frame switch): ${continuousPan}`);
-console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel oblique ${ok ? "is a scrollable tileset that streams chunks on pan" : "did not fully verify"}`);
+console.log(`  primary-map warp + native route stacking: ${routeOk}`);
+console.log(`  primary map moved under drag: ${mapMoved}`);
+console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel oblique ${ok ? "warps onto the route map" : "did not fully verify"}`);
 await browser.close();
 process.exit(ok ? 0 : 1);

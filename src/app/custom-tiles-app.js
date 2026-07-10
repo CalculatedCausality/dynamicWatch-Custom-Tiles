@@ -442,9 +442,8 @@ export class CustomTilesApp {
 	_syncVexcelHistControl(map) {
 		const ctrl = this.vexcelHistControl;
 		if (!ctrl) return;
-		// Show the date bar whenever the Vexcel base is active. On the flat
-		// basemap it's still useful: scrubbing a date opens that date's
-		// oblique (the basemap tiles themselves are current-best-locked).
+		// Show the date bar whenever the Vexcel base is active. It controls the
+		// flat mosaic and updates the selected oblique when one is active.
 		const active = !!(
 			this.layers[CFG.LAYER_VEXCEL] &&
 			map.hasLayer(this.layers[CFG.LAYER_VEXCEL])
@@ -464,6 +463,7 @@ export class CustomTilesApp {
 		const ours = [
 			CFG.LAYER_QLD, CFG.LAYER_HIST, CFG.LAYER_TOPO, CFG.LAYER_WAYBACK,
 			CFG.LAYER_GOOGLE, CFG.LAYER_APPLE, CFG.LAYER_STAMEN_TERRAIN,
+			CFG.LAYER_VEXCEL,
 		];
 		const isDeep = ours.some(
 			(name) => this.layers[name] && map.hasLayer(this.layers[name]));
@@ -1028,10 +1028,7 @@ export class CustomTilesApp {
 			".dw-manager-footer { padding: 5px 8px 1px; border-top: 1px solid #ddd; margin-top: 4px; }",
 			".dw-back-link { font-size: 11px; color: #888; text-decoration: none; cursor: pointer; }",
 			".dw-back-link:hover { color: #333; text-decoration: underline; }",
-			// z-index 1160 sits just above the Vexcel full-map oblique
-			// overlay (1150) so the date bar stays usable while an oblique
-			// fills the map — and below the compass (1200). Harmless for
-			// the other time-series bars (nothing else lives at 1000-1160).
+			// Keep the shared date bar above map panes and below the Vexcel compass.
 			".dw-history-bar { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1160; display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: rgba(255,255,255,0.95); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); font-size: 11px; font-family: sans-serif; white-space: nowrap; pointer-events: auto; width: min(82vw, 720px); box-sizing: border-box; }",
 			".dw-history-slider { flex: 1; min-width: 0; margin: 0; accent-color: #4a8; cursor: pointer; }",
 			".dw-history-slider:disabled { cursor: not-allowed; opacity: 0.4; }",
@@ -1126,14 +1123,7 @@ export class CustomTilesApp {
 			".dw-scc-row input { margin: 0; }",
 			".dw-scc-status { border-top: 1px solid #eee; margin-top: 4px; padding-top: 4px; }",
 			".dw-scc-notif-badge { color: #dc2626; font-weight: 700; font-size: 10.5px; }",
-			// Vexcel imagery compass — docked top-right when the Vexcel
-			// base is active (counterpart to the QLD Historical compass):
-			// a compass rose (N/E/S/W + ⊙ nadir) and a capture-date
-			// slider. The image panel is hidden until a direction is
-			// clicked (passive compass; fetches only on demand). Styled to
-			// match the other custom panes: white translucent chrome,
-			// #bbb borders, #444 text, blue-tint hover (like the history
-			// bar / layer manager), not a dark theme.
+			// Vexcel direction control for the warped primary-map imagery.
 			// Docked lower-right, clear of the site's top-right close/exit
 			// button (the compass used to cover it on the basemap).
 			".dw-vex-ctl { position: absolute; top: 84px; right: 12px; z-index: 1200; background: rgba(255,255,255,0.95); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); color: #333; font-family: sans-serif; padding: 8px; width: max-content; }",
@@ -1153,24 +1143,18 @@ export class CustomTilesApp {
 			// Near-infrared band toggle (vegetation → red). Sits under the
 			// compass rose; greyed where no IR band exists (SCC: nadir 2025).
 			".dw-vex-ir { display: block; width: 96px; margin: 6px auto 0; padding: 4px 0; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; background: #fff; color: #444; border: 1px solid #bbb; border-radius: 3px; cursor: pointer; }",
-			".dw-vex-ir:hover:not(.dw-vex-dir--off) { background: #fdecec; color: #b91c1c; border-color: #dca; }",
+			".dw-vex-ir:hover:not(:disabled) { background: #fdecec; color: #b91c1c; border-color: #dca; }",
+			".dw-vex-ir:disabled { opacity: 0.4; cursor: not-allowed; background: #f3f4f6; color: #777; }",
 			".dw-vex-ir--on { background: #dc2626; color: #fff; border-color: #dc2626; }",
 			".dw-vex-ir--on:hover { background: #dc2626 !important; color: #fff !important; }",
+			".dw-vex-flat { display: none; width: 96px; margin: 4px auto 0; padding: 4px 0; font-size: 10px; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; border-radius: 3px; cursor: pointer; }",
+			".dw-vex-flat:hover { background: #dbeafe; border-color: #93c5fd; }",
+			".dw-vex-ctl--active .dw-vex-flat { display: block; }",
 			".dw-vex-basemsg { max-width: 150px; margin: 6px auto 0; padding: 5px 7px; font-size: 10.5px; line-height: 1.35; color: #7a2e2e; background: #fdecec; border: 1px solid #f0c0c0; border-radius: 3px; text-align: center; }",
-			// Full-map overlay: the chosen oblique REPLACES the map view
-			// (fills the whole map area), with the compass floating above
-			// it (dw-vex-ctl has the higher z-index). Dates ride the shared
-			// history bar. The image pans (drag) + zooms (wheel) since the
-			// full frame is large and can't be cropped server-side.
-			".dw-vex-overlay { position: absolute; inset: 0; z-index: 1150; background: #0b0b0d; }",
-			// The oblique is a Leaflet image-pyramid (CRS.Simple) that
-			// tiles /v2/oriented/tile — pans/zooms with chunked loading.
-			".dw-vex-tilemap { position: absolute; inset: 0; background: #0b0b0d; }",
-			".dw-vex-tilemap .leaflet-control-zoom { margin: 12px; }",
-			".dw-vex-close { position: absolute; top: 12px; left: 12px; z-index: 1000; background: rgba(255,255,255,0.95); border: 1px solid #bbb; color: #333; font-size: 12px; font-weight: 600; font-family: sans-serif; line-height: 1; padding: 7px 11px; border-radius: 5px; box-shadow: 0 1px 6px rgba(0,0,0,0.35); cursor: pointer; }",
-			".dw-vex-close:hover { background: #fff; color: #000; }",
-			".dw-vex-hint { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 1000; background: rgba(0,0,0,0.55); color: #e5e7eb; font-size: 11px; font-family: sans-serif; padding: 4px 10px; border-radius: 999px; pointer-events: none; }",
-			".dw-vex-msg { position: absolute; inset: 0; z-index: 999; display: flex; align-items: center; justify-content: center; padding: 20px 16px; font-size: 13px; color: #d1d5db; text-align: center; }",
+			".dw-vex-ctl--active { box-shadow: 0 0 0 2px rgba(37,99,235,0.3), 0 1px 6px rgba(0,0,0,0.35); }",
+			".dw-3d-active .dw-vex-ctl { display: none; }",
+			".dw-vex-warp, .dw-vex-warp-tile, .dw-vex-warp-cell, .dw-vex-warp img { pointer-events: none !important; user-select: none; }",
+			".dw-vex-warp-cell { backface-visibility: hidden; will-change: transform; }",
 			".dw-scc-notif-badge { color: #dc2626; font-weight: 600; }",
 			".dw-scc-hint { color: #999; font-size: 10px; margin-top: 3px; }",
 			// Deep-detail section inside the application popup (assessment
