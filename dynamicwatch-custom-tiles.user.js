@@ -2795,7 +2795,7 @@
     }
   };
 
-  // src/providers/vexcel.js
+  // src/providers/vexcel-auth.js
   function _vexcelParseToken(raw) {
     const s = String(raw || "").trim();
     const m = s.match(/token=([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/) || s.match(/^([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/);
@@ -2812,101 +2812,6 @@
   }
   function _vexcelTokenValid(token) {
     return !!token && _vexcelTokenExp(token) > Date.now() + 60 * 1e3;
-  }
-  function _vexcelTileTpl(token, session) {
-    const base = CFG.VEXCEL_WMTS_BASE + "?service=wmts&request=getTile&layer=urban&Style=RGB&TileMatrixSet=urban&TileMatrix={z}&TileRow={y}&TileCol={x}&format=image/jpeg";
-    return session ? base + "&session=" + encodeURIComponent(session) + "&token=" + encodeURIComponent(token) : base + "&token=" + encodeURIComponent(token);
-  }
-  var VEXCEL_DIRECTIONS = [
-    { key: "oblique-north", label: "N" },
-    { key: "oblique-east", label: "E" },
-    { key: "oblique-south", label: "S" },
-    { key: "oblique-west", label: "W" },
-    { key: "nadir", label: "Top" }
-  ];
-  function _vexcelCollectionYear(collection) {
-    const m = String(collection || "").match(/(\d{4})(?!.*\d{4})/);
-    return m ? m[1] : String(collection || "");
-  }
-  function _vexcelBand(name) {
-    return /_irg$/i.test(String(name || "")) ? "irg" : "rgb";
-  }
-  function _vexcelParseObliques(data) {
-    const images = {};
-    const captureMeta = /* @__PURE__ */ new Map();
-    const dirSet = /* @__PURE__ */ new Set();
-    for (const f of data && Array.isArray(data.features) ? data.features : []) {
-      const p = f.properties || {};
-      const dir = p["product-type"];
-      const coll = p.collection;
-      const name = p["image-name"];
-      if (!dir || !coll || !name) continue;
-      const key = dir + "@" + coll;
-      const band = _vexcelBand(name);
-      if (!images[key]) images[key] = {};
-      if (!images[key][band]) {
-        images[key][band] = {
-          name,
-          layer: p["source-layer"] || p.layer || "urban",
-          w: Number(p["raster-size-width"]) || 0,
-          h: Number(p["raster-size-height"]) || 0,
-          corners: _vexcelFootprint(f.geometry)
-        };
-      }
-      if (!captureMeta.has(coll)) {
-        const date = String(p["capture-date"] || "").slice(0, 10) || _vexcelCollectionYear(coll);
-        captureMeta.set(coll, { year: _vexcelCollectionYear(coll), date });
-      }
-      dirSet.add(dir);
-    }
-    const captures = [...captureMeta.entries()].map(([collection, meta]) => ({ collection, year: meta.year, date: meta.date })).sort((a, b) => b.date.localeCompare(a.date));
-    const directions = VEXCEL_DIRECTIONS.filter((d) => dirSet.has(d.key));
-    return { images, captures, directions };
-  }
-  function _vexcelObliqueExtractUrl(imageName, layer, lat, lng, token) {
-    if (!imageName || !_vexcelTokenValid(token)) return "";
-    const wkt = `POINT(${Number(lng)} ${Number(lat)})`;
-    return CFG.VEXCEL_API_BASE + "/v2/oriented/extract?wkt=" + encodeURIComponent(wkt) + "&srid=4326&layer=" + encodeURIComponent(layer || "urban") + "&image-name=" + encodeURIComponent(imageName) + "&token=" + encodeURIComponent(token);
-  }
-  function _vexcelObliqueTileBase(imageName, layer, token, session) {
-    if (!imageName || !_vexcelTokenValid(token)) return "";
-    return CFG.VEXCEL_API_BASE + "/v2/oriented/tile?layer=" + encodeURIComponent(layer || "urban") + "&image-name=" + encodeURIComponent(imageName) + (session ? "&session=" + encodeURIComponent(session) : "") + "&token=" + encodeURIComponent(token);
-  }
-  function _vexcelMaxDownsample(w, h) {
-    const px = Math.max(Number(w) || 256, Number(h) || 256);
-    return Math.max(0, Math.ceil(Math.log2(px / 256)));
-  }
-  function _vexcelFootprint(geometry) {
-    const ring = geometry && geometry.coordinates && geometry.coordinates[0];
-    if (!Array.isArray(ring) || ring.length < 4) return null;
-    const c = ring.slice(0, 4).map((p) => [Number(p[0]), Number(p[1])]);
-    return c.every((p) => isFinite(p[0]) && isFinite(p[1])) ? c : null;
-  }
-  function _vexcelBilinear(corners, u, v) {
-    const a = (1 - u) * (1 - v), b = u * (1 - v), d = u * v, e = (1 - u) * v;
-    return [
-      a * corners[0][0] + b * corners[1][0] + d * corners[2][0] + e * corners[3][0],
-      a * corners[0][1] + b * corners[1][1] + d * corners[2][1] + e * corners[3][1]
-    ];
-  }
-  function _vexcelInvBilinear(corners, lng, lat) {
-    let u = 0.5, v = 0.5;
-    for (let i = 0; i < 15; i++) {
-      const p = _vexcelBilinear(corners, u, v);
-      const fx = p[0] - lng, fy = p[1] - lat;
-      const du = 1e-4, dv = 1e-4;
-      const pu = _vexcelBilinear(corners, u + du, v);
-      const pv = _vexcelBilinear(corners, u, v + dv);
-      const j00 = (pu[0] - p[0]) / du, j01 = (pv[0] - p[0]) / dv;
-      const j10 = (pu[1] - p[1]) / du, j11 = (pv[1] - p[1]) / dv;
-      const det = j00 * j11 - j01 * j10;
-      if (!det) break;
-      u -= (j11 * fx - j01 * fy) / det;
-      v -= (-j10 * fx + j00 * fy) / det;
-      u = Math.max(0, Math.min(1, u));
-      v = Math.max(0, Math.min(1, v));
-    }
-    return [u, v];
   }
   function _getStoredToken() {
     try {
@@ -2987,12 +2892,8 @@
           headers: {
             "Content-Type": "application/x-www-form-urlencoded",
             "X-App-Key": CFG.VEXCEL_APP_HDR,
-            // REQUIRED: without the viewer Origin, init returns
-            // session:null (the account looks unentitled). With it, a
-            // real session is minted. GM_xmlhttpRequest can set Origin;
-            // a page <fetch> can't.
-            "Origin": CFG.VEXCEL_SPOOF_ORIGIN,
-            "Referer": CFG.VEXCEL_SPOOF_ORIGIN + "/"
+            Origin: CFG.VEXCEL_SPOOF_ORIGIN,
+            Referer: CFG.VEXCEL_SPOOF_ORIGIN + "/"
           }
         },
         (err, data) => {
@@ -3023,15 +2924,6 @@
       Origin: CFG.VEXCEL_SPOOF_ORIGIN,
       Referer: CFG.VEXCEL_SPOOF_ORIGIN + "/"
     }, extra || {});
-  }
-  function _ensureQueryAuth(cb) {
-    _ensureTokenSilent((tok) => {
-      if (!_vexcelTokenValid(tok)) {
-        cb(null);
-        return;
-      }
-      _ensureSession(tok, (sess) => cb(tok, sess || ""));
-    });
   }
   var VEXCEL_BAKED_USER = "szxc61qc8@mozmail.com";
   var VEXCEL_BAKED_PASS = "4Bp6GoxdPzaZLAfhj@";
@@ -3141,6 +3033,15 @@
     }
     cb(null);
   }
+  function _ensureQueryAuth(cb) {
+    _ensureTokenSilent((tok) => {
+      if (!_vexcelTokenValid(tok)) {
+        cb(null);
+        return;
+      }
+      _ensureSession(tok, (sess) => cb(tok, sess || ""));
+    });
+  }
   function _ensureAuthedToken(lead, cb) {
     const tok = _getStoredToken();
     if (_vexcelTokenValid(tok)) {
@@ -3184,6 +3085,103 @@
     const tok = _vexcelParseToken(s);
     if (tok) _storeToken(tok);
     cb(_vexcelTokenValid(tok) ? tok : null);
+  }
+
+  // src/providers/vexcel.js
+  function _vexcelTileTpl(token, session) {
+    const base = CFG.VEXCEL_WMTS_BASE + "?service=wmts&request=getTile&layer=urban&Style=RGB&TileMatrixSet=urban&TileMatrix={z}&TileRow={y}&TileCol={x}&format=image/jpeg";
+    return session ? base + "&session=" + encodeURIComponent(session) + "&token=" + encodeURIComponent(token) : base + "&token=" + encodeURIComponent(token);
+  }
+  var VEXCEL_DIRECTIONS = [
+    { key: "oblique-north", label: "N" },
+    { key: "oblique-east", label: "E" },
+    { key: "oblique-south", label: "S" },
+    { key: "oblique-west", label: "W" },
+    { key: "nadir", label: "Top" }
+  ];
+  function _vexcelCollectionYear(collection) {
+    const m = String(collection || "").match(/(\d{4})(?!.*\d{4})/);
+    return m ? m[1] : String(collection || "");
+  }
+  function _vexcelBand(name) {
+    return /_irg$/i.test(String(name || "")) ? "irg" : "rgb";
+  }
+  function _vexcelParseObliques(data) {
+    const images = {};
+    const captureMeta = /* @__PURE__ */ new Map();
+    const dirSet = /* @__PURE__ */ new Set();
+    for (const f of data && Array.isArray(data.features) ? data.features : []) {
+      const p = f.properties || {};
+      const dir = p["product-type"];
+      const coll = p.collection;
+      const name = p["image-name"];
+      if (!dir || !coll || !name) continue;
+      const key = dir + "@" + coll;
+      const band = _vexcelBand(name);
+      if (!images[key]) images[key] = {};
+      if (!images[key][band]) {
+        images[key][band] = {
+          name,
+          layer: p["source-layer"] || p.layer || "urban",
+          w: Number(p["raster-size-width"]) || 0,
+          h: Number(p["raster-size-height"]) || 0,
+          corners: _vexcelFootprint(f.geometry)
+        };
+      }
+      if (!captureMeta.has(coll)) {
+        const date = String(p["capture-date"] || "").slice(0, 10) || _vexcelCollectionYear(coll);
+        captureMeta.set(coll, { year: _vexcelCollectionYear(coll), date });
+      }
+      dirSet.add(dir);
+    }
+    const captures = [...captureMeta.entries()].map(([collection, meta]) => ({ collection, year: meta.year, date: meta.date })).sort((a, b) => b.date.localeCompare(a.date));
+    const directions = VEXCEL_DIRECTIONS.filter((d) => dirSet.has(d.key));
+    return { images, captures, directions };
+  }
+  function _vexcelObliqueExtractUrl(imageName, layer, lat, lng, token) {
+    if (!imageName || !_vexcelTokenValid(token)) return "";
+    const wkt = `POINT(${Number(lng)} ${Number(lat)})`;
+    return CFG.VEXCEL_API_BASE + "/v2/oriented/extract?wkt=" + encodeURIComponent(wkt) + "&srid=4326&layer=" + encodeURIComponent(layer || "urban") + "&image-name=" + encodeURIComponent(imageName) + "&token=" + encodeURIComponent(token);
+  }
+  function _vexcelObliqueTileBase(imageName, layer, token, session) {
+    if (!imageName || !_vexcelTokenValid(token)) return "";
+    return CFG.VEXCEL_API_BASE + "/v2/oriented/tile?layer=" + encodeURIComponent(layer || "urban") + "&image-name=" + encodeURIComponent(imageName) + (session ? "&session=" + encodeURIComponent(session) : "") + "&token=" + encodeURIComponent(token);
+  }
+  function _vexcelMaxDownsample(w, h) {
+    const px = Math.max(Number(w) || 256, Number(h) || 256);
+    return Math.max(0, Math.ceil(Math.log2(px / 256)));
+  }
+  function _vexcelFootprint(geometry) {
+    const ring = geometry && geometry.coordinates && geometry.coordinates[0];
+    if (!Array.isArray(ring) || ring.length < 4) return null;
+    const c = ring.slice(0, 4).map((p) => [Number(p[0]), Number(p[1])]);
+    return c.every((p) => isFinite(p[0]) && isFinite(p[1])) ? c : null;
+  }
+  function _vexcelBilinear(corners, u, v) {
+    const a = (1 - u) * (1 - v), b = u * (1 - v), d = u * v, e = (1 - u) * v;
+    return [
+      a * corners[0][0] + b * corners[1][0] + d * corners[2][0] + e * corners[3][0],
+      a * corners[0][1] + b * corners[1][1] + d * corners[2][1] + e * corners[3][1]
+    ];
+  }
+  function _vexcelInvBilinear(corners, lng, lat) {
+    let u = 0.5, v = 0.5;
+    for (let i = 0; i < 15; i++) {
+      const p = _vexcelBilinear(corners, u, v);
+      const fx = p[0] - lng, fy = p[1] - lat;
+      const du = 1e-4, dv = 1e-4;
+      const pu = _vexcelBilinear(corners, u + du, v);
+      const pv = _vexcelBilinear(corners, u, v + dv);
+      const j00 = (pu[0] - p[0]) / du, j01 = (pv[0] - p[0]) / dv;
+      const j10 = (pu[1] - p[1]) / du, j11 = (pv[1] - p[1]) / dv;
+      const det = j00 * j11 - j01 * j10;
+      if (!det) break;
+      u -= (j11 * fx - j01 * fy) / det;
+      v -= (-j10 * fx + j00 * fy) / det;
+      u = Math.max(0, Math.min(1, u));
+      v = Math.max(0, Math.min(1, v));
+    }
+    return [u, v];
   }
   function fetchVexcelObliques(lat, lng, cb) {
     _ensureQueryAuth((token, session) => {

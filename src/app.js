@@ -19,6 +19,12 @@ import {
 } from './providers/qld-cadastre.js';
 import { oimIcon } from './providers/openinframap.js';
 import {
+	_vexcelIsCredString,
+	_vexcelParseToken,
+	_vexcelTokenExp,
+	_vexcelTokenValid,
+} from './providers/vexcel-auth.js';
+import {
 	_vexcelCollectionYear,
 	_vexcelObliqueExtractUrl,
 	_vexcelObliqueTileBase,
@@ -27,12 +33,8 @@ import {
 	_vexcelFootprint,
 	_vexcelBilinear,
 	_vexcelInvBilinear,
-	_vexcelIsCredString,
 	_vexcelParseObliques,
-	_vexcelParseToken,
 	_vexcelTileTpl,
-	_vexcelTokenExp,
-	_vexcelTokenValid,
 } from './providers/vexcel.js';
 import {
 	_decisionClass,

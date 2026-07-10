@@ -2,43 +2,35 @@ import { dwMbGmFetchAB, dwRegisterMbLayer } from "../bridge/mapbox-tile-bridge.j
 import { BLANK_TILE, CFG } from "../config.js";
 import { LayerProvider } from "../layers/provider-factories.js";
 import { gmGet, gmJsonGet, wireTileAbort } from "../utils/http.js";
+import {
+	_clearSession,
+	_ensureAuthedToken,
+	_ensureQueryAuth,
+	_ensureSession,
+	_getStoredSession,
+	_getStoredToken,
+	_hasCreds,
+	_storeToken,
+	_vexcelOriginHeaders,
+	_vexcelTokenValid,
+} from "./vexcel-auth.js";
 
-/* -- Vexcel high-res aerial (ANZ viewer WMTS) ---------------------------
- * api.vexcelgroup.com serves the "urban" ortho mosaic (7.5 cm class,
- * Sunshine Coast flown 2019+) through a standard WMTS discovered via
- * /v2/ortho/wmts GetCapabilities: EPSG:3857, levels 0-21, JPEG/PNG,
- * CORS *. getTile only needs the account JWT — the viewer's `session`
- * param is not required for tiles.
- *
- * The JWT expires ~24 h after login and there's no anonymous mint or
- * renew endpoint, so this follows the Waze manual-token pattern: the
- * user pastes any api.vexcelgroup.com request URL (or the bare token)
- * once per day when the layer asks; it's stored in GM until expiry.
- * The token is never baked into the script.
+// Preserve the provider module's existing exports while app code can import
+// auth helpers from their owning module directly.
+export {
+	_vexcelIsCredString,
+	_vexcelLogin,
+	_vexcelParseToken,
+	_vexcelTokenExp,
+	_vexcelTokenValid,
+	vexcelHasToken,
+} from "./vexcel-auth.js";
+
+/* -- Vexcel imagery integration -----------------------------------------
+ * This module owns Vexcel imagery models and URLs, metadata requests, the
+ * docked oblique control, and the Leaflet/Mapbox tile layer. Credential,
+ * token, and viewer-session lifecycle is isolated in vexcel-auth.js.
  */
-
-// Accept a bare JWT, or any URL/curl blob containing token=<jwt>.
-export function _vexcelParseToken(raw) {
-	const s = String(raw || "").trim();
-	const m =
-		s.match(/token=([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/) ||
-		s.match(/^([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/);
-	return m ? m[1] : "";
-}
-
-// JWT payload `exp` (seconds) → epoch ms; 0 when undecodable.
-export function _vexcelTokenExp(token) {
-	try {
-		const b64 = String(token).split(".")[1]
-			.replace(/-/g, "+").replace(/_/g, "/");
-		const payload = JSON.parse(atob(b64));
-		return (Number(payload.exp) || 0) * 1000;
-	} catch (_) { return 0; }
-}
-
-export function _vexcelTokenValid(token) {
-	return !!token && _vexcelTokenExp(token) > Date.now() + 60 * 1000;
-}
 
 export function _vexcelTileTpl(token, session) {
 	const base =
@@ -215,290 +207,6 @@ export function _vexcelInvBilinear(corners, lng, lat) {
 		v = Math.max(0, Math.min(1, v));
 	}
 	return [u, v];
-}
-
-function _getStoredToken() {
-	try { return GM_getValue(CFG.VEXCEL_TOKEN_KEY, "") || ""; }
-	catch (_) { return ""; }
-}
-
-function _storeToken(t) {
-	try { GM_setValue(CFG.VEXCEL_TOKEN_KEY, t); } catch (_) {}
-}
-
-/* -- Session (the viewer's proper tile credential) ---------------------
- * The official viewer doesn't just use the JWT: after login it POSTs
- * /api/viewer/configuration/init and, on accounts that are entitled that
- * way, gets back a `session` it appends to tile requests. The init call is
- * gated by hash = sha256(`${APP_NAME}_${timestamp}`) — reverse-engineered
- * from the viewer bundle, no secret salt. We reproduce that flow so tiles
- * carry whatever credential the account actually issues; accounts that
- * return session:null (this one currently) transparently use the JWT.
- * The session is bound to the token it was minted with, so a token refresh
- * re-mints it and we never re-POST init for an unchanged token.
- */
-function _vexcelTokKey(token) { return String(token || "").split(".")[2] || ""; }
-
-function _getStoredSession() {
-	try {
-		const o = JSON.parse(GM_getValue(CFG.VEXCEL_SESSION_KEY, "") || "null");
-		return (o && o.s) || "";
-	} catch (_) { return ""; }
-}
-
-function _sessionMintedFor(token) {
-	try {
-		const o = JSON.parse(GM_getValue(CFG.VEXCEL_SESSION_KEY, "") || "null");
-		return !!o && o.k === _vexcelTokKey(token);
-	} catch (_) { return false; }
-}
-
-function _storeSession(session, token) {
-	try {
-		GM_setValue(CFG.VEXCEL_SESSION_KEY,
-			JSON.stringify({ s: session || "", k: _vexcelTokKey(token) }));
-	} catch (_) {}
-}
-
-// Drop the cached session so the next _ensureSession re-mints one (used when
-// tiles are refused — the session can expire while the JWT is still valid).
-function _clearSession() {
-	try { GM_setValue(CFG.VEXCEL_SESSION_KEY, ""); } catch (_) {}
-}
-
-// sha256 hex of a string via WebCrypto (dynamic.watch is a secure context),
-// matching the viewer's hashCode(). cb("") on any failure.
-function _vexcelHashCode(str, cb) {
-	try {
-		const bytes = new TextEncoder().encode(String(str));
-		crypto.subtle.digest("SHA-256", bytes).then(
-			(buf) => cb(Array.from(new Uint8Array(buf))
-				.map((b) => b.toString(16).padStart(2, "0")).join("")),
-			() => cb(""),
-		);
-	} catch (_) { cb(""); }
-}
-
-// Exchange a valid JWT for the viewer `session` via configuration/init.
-// cb(session) — "" when the account issues none (then the JWT is used).
-function _vexcelInitSession(token, cb) {
-	cb = cb || function () {};
-	if (!_vexcelTokenValid(token)) { cb(""); return; }
-	const ts = (typeof Date !== "undefined" && Date.now) ? Date.now() : 0;
-	_vexcelHashCode(CFG.VEXCEL_APP_NAME + "_" + ts, (hash) => {
-		if (!hash) { cb(""); return; }
-		gmJsonGet(
-			CFG.VEXCEL_INIT_URL + "?token=" + encodeURIComponent(token),
-			{
-				method: "POST",
-				data: "hash=" + hash + "&timestamp=" + ts +
-					"&app=" + encodeURIComponent(CFG.VEXCEL_APP_NAME),
-				headers: {
-					"Content-Type": "application/x-www-form-urlencoded",
-					"X-App-Key": CFG.VEXCEL_APP_HDR,
-					// REQUIRED: without the viewer Origin, init returns
-					// session:null (the account looks unentitled). With it, a
-					// real session is minted. GM_xmlhttpRequest can set Origin;
-					// a page <fetch> can't.
-					"Origin": CFG.VEXCEL_SPOOF_ORIGIN,
-					"Referer": CFG.VEXCEL_SPOOF_ORIGIN + "/",
-				},
-			},
-			(err, data) => {
-				const s = data && (data.session ||
-					(data.data && data.data.session));
-				cb(s ? String(s) : "");
-			},
-		);
-	});
-}
-
-// Ensure a session exists for the current token, minting it once. Runs
-// init at most once per token (result — real session or "" — is cached
-// bound to the token), so activation/tileerror paths can call it freely.
-// Always resolves; the token remains the fallback credential.
-function _ensureSession(token, cb) {
-	cb = cb || function () {};
-	if (!_vexcelTokenValid(token)) { cb(""); return; }
-	if (_sessionMintedFor(token)) { cb(_getStoredSession()); return; }
-	_vexcelInitSession(token, (s) => { _storeSession(s, token); cb(s); });
-}
-
-// Every Vexcel imagery service (ortho + oriented) gates on the ANZ-viewer
-// Origin header AND session+token on the query string — verified: drop any
-// one → 403. These headers ride on all GM imagery requests.
-function _vexcelOriginHeaders(extra) {
-	return Object.assign({
-		Origin: CFG.VEXCEL_SPOOF_ORIGIN,
-		Referer: CFG.VEXCEL_SPOOF_ORIGIN + "/",
-	}, extra || {});
-}
-
-// Resolve BOTH a valid token and its session for the async oblique paths.
-// cb(token, session) — token valid + session (may be ""); cb(null) if none.
-function _ensureQueryAuth(cb) {
-	_ensureTokenSilent((tok) => {
-		if (!_vexcelTokenValid(tok)) { cb(null); return; }
-		_ensureSession(tok, (sess) => cb(tok, sess || ""));
-	});
-}
-
-// Baked-in Vexcel account — the default used when the user hasn't pasted
-// their own creds/token. Requested to be embedded so the Vexcel base "just
-// works" with no prompt. WARNING: this is a plaintext password shipped in
-// the script — anyone with the built userscript (or this repo's history)
-// can read it. Do NOT push this to a public remote; rotate the password if
-// it leaks. Anything the user pastes (creds or a one-off token) still wins.
-const VEXCEL_BAKED_USER = "szxc61qc8@mozmail.com";
-const VEXCEL_BAKED_PASS = "4Bp6GoxdPzaZLAfhj@";
-
-// Credentials for silent daily token refresh. Prefer GM-stored (whatever the
-// user pasted on THIS device); fall back to the baked-in account above.
-function _getStoredCreds() {
-	try {
-		return {
-			user: GM_getValue(CFG.VEXCEL_USER_KEY, "") || VEXCEL_BAKED_USER,
-			pass: GM_getValue(CFG.VEXCEL_PASS_KEY, "") || VEXCEL_BAKED_PASS,
-		};
-	} catch (_) { return { user: VEXCEL_BAKED_USER, pass: VEXCEL_BAKED_PASS }; }
-}
-
-function _storeCreds(user, pass) {
-	try {
-		GM_setValue(CFG.VEXCEL_USER_KEY, user || "");
-		GM_setValue(CFG.VEXCEL_PASS_KEY, pass || "");
-	} catch (_) {}
-}
-
-function _hasCreds() { const c = _getStoredCreds(); return !!(c.user && c.pass); }
-
-// Detect a "user:password" login string vs a pasted token/URL. Creds =
-// has a colon, an "@" in the part before it, and isn't an http(s) URL.
-export function _vexcelIsCredString(s) {
-	s = String(s || "").trim();
-	const i = s.indexOf(":");
-	return i > 0 && s.slice(0, i).indexOf("@") > 0 && !/^https?:/i.test(s);
-}
-
-// Exchange stored credentials for a fresh JWT. Guards against the two
-// ways this could hammer the auth endpoint (→ account lockout): an
-// in-flight coalescer (parallel 403s share one login) and a 15 s
-// cooldown (sequential retries back off). Bad creds are CLEARED so we
-// fall back to prompting instead of looping. cb(token|null, reason).
-let _loginInFlight = null;
-let _loginCooldownUntil = 0;
-export function _vexcelLogin(cb) {
-	cb = cb || function () {};
-	const creds = _getStoredCreds();
-	if (!creds.user || !creds.pass) { cb(null, "nocreds"); return; }
-	if (_loginInFlight) { _loginInFlight.push(cb); return; }
-	const now = (typeof Date !== "undefined" && Date.now) ? Date.now() : 0;
-	if (now && now < _loginCooldownUntil) { cb(null, "cooldown"); return; }
-	_loginCooldownUntil = now + 15000;
-	_loginInFlight = [cb];
-	const done = (tok, reason) => {
-		const waiters = _loginInFlight; _loginInFlight = null;
-		for (const w of waiters) { try { w(tok, reason); } catch (_) {} }
-	};
-	gmJsonGet(
-		CFG.VEXCEL_ADMIN_BASE + "/api/auth/authenticate",
-		{
-			method: "POST",
-			data: JSON.stringify({
-				username: creds.user, password: creds.pass,
-				application: CFG.VEXCEL_APP_KEY,
-			}),
-			headers: {
-				"Content-Type": "application/json",
-				"X-App-Key": CFG.VEXCEL_APP_HDR,
-			},
-		},
-		(err, data, raw) => {
-			const status = raw ? raw.status : 0;
-			// Rejected credentials — drop them so we don't retry into a
-			// lockout; the caller then prompts for fresh ones.
-			if (status === 401 || status === 403) {
-				_storeCreds("", ""); done(null, "badcreds"); return;
-			}
-			if (err || !data) { done(null, "neterr"); return; } // transient
-			const tok = data.data && data.data.token;
-			if (!_vexcelTokenValid(tok)) {
-				_storeCreds("", ""); done(null, "badcreds"); return;
-			}
-			_storeToken(tok);
-			_loginCooldownUntil = 0; // success unblocks retries immediately
-			done(tok, null);
-		},
-	);
-}
-
-// Get a usable token WITHOUT ever prompting: valid stored token, else a
-// silent auto-login with stored creds, else null. Used by the async
-// query/frame paths so they self-heal when the basemap path re-auths.
-function _ensureTokenSilent(cb) {
-	const tok = _getStoredToken();
-	if (_vexcelTokenValid(tok)) { cb(tok); return; }
-	if (_hasCreds()) { _vexcelLogin((t) => cb(t || null)); return; }
-	cb(null);
-}
-
-// Get a usable token, prompting the user as a last resort. Prefers a
-// silent auto-login; only prompts when there are no creds or they were
-// rejected. Transient failures stay silent (retry on the next event).
-function _ensureAuthedToken(lead, cb) {
-	const tok = _getStoredToken();
-	if (_vexcelTokenValid(tok)) { cb(tok); return; }
-	if (_hasCreds()) {
-		_vexcelLogin((newTok, reason) => {
-			if (newTok) { cb(newTok); return; }
-			if (reason === "neterr" || reason === "cooldown") { cb(null, reason); return; }
-			_promptForVexcelAuth(lead, (t2) => cb(t2 || null));
-		});
-		return;
-	}
-	_promptForVexcelAuth(lead, (t2) => cb(t2 || null));
-}
-
-// One prompt that accepts EITHER "email:password" (stored for silent
-// daily refresh, then logged in) OR a pasted token/URL (one-off). Async
-// because the credential path performs a network login. cb(token|null).
-function _promptForVexcelAuth(lead, cb) {
-	cb = cb || function () {};
-	const raw = window.prompt(
-		(lead || "Vexcel Aerial sign-in.") + "\n\n" +
-		"Enter your Vexcel login as  email:password  — stored on THIS device " +
-		"only and used to auto-refresh the daily token.\n\n" +
-		"…or paste a one-off api.vexcelgroup.com token/URL instead " +
-		"(log in at " + CFG.VEXCEL_VIEWER_URL + ").",
-		"",
-	);
-	if (raw == null) { cb(null); return; } // cancelled — don't nag this add
-	const s = raw.trim();
-	if (_vexcelIsCredString(s)) {
-		const i = s.indexOf(":");
-		_storeCreds(s.slice(0, i).trim(), s.slice(i + 1).trim());
-		_vexcelLogin((tok) => cb(_vexcelTokenValid(tok) ? tok : null));
-		return;
-	}
-	const tok = _vexcelParseToken(s);
-	if (tok) _storeToken(tok);
-	cb(_vexcelTokenValid(tok) ? tok : null);
-}
-
-// Back-compat shim: some call sites still expect a synchronous
-// token-only prompt. Kept for the frame/query fallbacks.
-function _promptForToken(lead) {
-	const raw = window.prompt(
-		(lead || "Vexcel Aerial needs a fresh token (they expire daily).") + "\n\n" +
-		"1. Log in at " + CFG.VEXCEL_VIEWER_URL + "\n" +
-		"2. DevTools → Network → copy any api.vexcelgroup.com request URL\n" +
-		"3. Paste it here (the whole URL is fine):",
-		"",
-	);
-	if (raw == null) return ""; // cancelled — don't nag again this add
-	const tok = _vexcelParseToken(raw);
-	if (tok) _storeToken(tok);
-	return tok;
 }
 
 // Fetch every oblique/nadir capture available at a point (token-only,
@@ -1020,11 +728,6 @@ export function createVexcelControl() {
 	};
 	_vexCtl = ctl;
 	return ctl;
-}
-
-// True when a fresh-enough token exists.
-export function vexcelHasToken() {
-	return _vexcelTokenValid(_getStoredToken());
 }
 
 export class VexcelLayerProvider extends LayerProvider {

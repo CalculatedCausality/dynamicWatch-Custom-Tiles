@@ -1236,7 +1236,8 @@ t("@connect covers every host the providers GM-fetch from", () => {
 	// Hosts fetched through GM_xmlhttpRequest (NOT <img> tile hosts,
 	// which the browser loads directly and @connect doesn't gate).
 	const required = [
-		"api.vexcelgroup.com",              // Vexcel oblique query + extract
+		"api.vexcelgroup.com",              // Vexcel imagery + metadata
+		"admin.vexcelgroup.com",            // Vexcel login + session minting
 		"geopublic.scc.qld.gov.au",         // SCC applications GeoJSON query
 		"developmenti.sunshinecoast.qld.gov.au", // Development.i detail/filter
 		"publicdocs.scc.qld.gov.au",        // SCC lodged-document repository
