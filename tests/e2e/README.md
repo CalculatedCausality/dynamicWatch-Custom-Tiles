@@ -173,6 +173,19 @@ Each run writes:
 
 `test-results/` is gitignored.
 
+### Vexcel perspective editing
+
+```bash
+npm run e2e:vexcel-editing
+npm run e2e:vexcel-editing:headed
+```
+
+Uses the live dynamic.watch planner UI with deterministic mocked Vexcel
+query, tile, and transform endpoints. It rapidly adds a straight-line route,
+inserts and drags a route point, adds and drags a standalone waypoint, deletes
+a route point through its popup, and verifies unrelated Leaflet overlays retain
+their own clicks. No production Vexcel token is required.
+
 ## What the snapshot contains
 
 Same shape as the manual debug snippets we've been pasting in the chat:
