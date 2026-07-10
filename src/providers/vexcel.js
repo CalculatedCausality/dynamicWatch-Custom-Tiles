@@ -16,8 +16,8 @@ import {
 } from "./vexcel-auth.js";
 import {
 	_vexcelFootprint,
-	createVexcelWarpedLayer,
-} from "./vexcel-warp.js";
+	createVexcelObliqueLayer,
+} from "./vexcel-oblique-layer.js";
 
 // Preserve the provider module's existing exports while app code can import
 // auth helpers from their owning module directly.
@@ -30,16 +30,12 @@ export {
 	vexcelHasToken,
 } from "./vexcel-auth.js";
 export {
-	createVexcelWarpedLayer,
-	_vexcelApplyAffine,
-	_vexcelApplyHomography,
 	_vexcelBilinear,
+	_vexcelClipPathToQuad,
 	_vexcelFootprint,
 	_vexcelInvBilinear,
 	_vexcelMaxDownsample,
-	_vexcelRectToQuad,
-	_vexcelTriangleToTriangle,
-} from "./vexcel-warp.js";
+} from "./vexcel-oblique-layer.js";
 
 /* -- Vexcel imagery integration -----------------------------------------
  * This module owns Vexcel imagery models and URLs, metadata requests, the
@@ -263,10 +259,12 @@ function _fetchVexcelFrame(lng, lat, collection, dir, band, token, session, cb) 
 	);
 }
 
-// Resolve native image pixels to ground coordinates using Vexcel's camera
-// model and terrain data. Points are chunked to keep request bodies bounded;
-// results preserve input order as [lng, lat].
-export function fetchVexcelPixelPoints(frame, points, cb) {
+// Transform points through Vexcel's camera model. `pixel-2-world` accepts
+// image pixels and returns [lng,lat]; `world-2-pixel` does the reverse so the
+// route can be drawn in the untouched perspective photograph.
+export function fetchVexcelPixelPoints(frame, points, operation, cb) {
+	if (typeof operation === "function") { cb = operation; operation = "pixel-2-world"; }
+	operation = operation === "world-2-pixel" ? operation : "pixel-2-world";
 	cb = cb || function () {};
 	if (!frame || !frame.name || !Array.isArray(points) || !points.length) {
 		cb(null); return;
@@ -301,7 +299,7 @@ export function fetchVexcelPixelPoints(frame, points, cb) {
 				{
 					method: "POST",
 					data: JSON.stringify({
-						operation: "pixel-2-world",
+						operation,
 						"image-name": frame.name,
 						wkt,
 						srid: 4326,
@@ -319,13 +317,15 @@ export function fetchVexcelPixelPoints(frame, points, cb) {
 							const validCoord = (value) => (typeof value === "number" ||
 								(typeof value === "string" && value.trim() !== "")) &&
 								Number.isFinite(Number(value));
-							const directIsLngLat = validCoord(p.x) && validCoord(p.y) &&
-								Math.abs(Number(p.x)) <= 180 && Math.abs(Number(p.y)) <= 90;
-							const location = directIsLngLat ? p : (p.location || {});
-							const lng = Number(location.x), lat = Number(location.y);
-							if (validCoord(location.x) && validCoord(location.y) &&
-								Math.abs(lng) <= 180 && Math.abs(lat) <= 90) {
-								result[chunk.start + i] = [lng, lat];
+							const directValid = validCoord(p.x) && validCoord(p.y);
+							const directUsable = directValid && (operation === "world-2-pixel" ||
+								(Math.abs(Number(p.x)) <= 180 && Math.abs(Number(p.y)) <= 90));
+							const value = directUsable ? p : (p.location || {});
+							const x = Number(value.x), y = Number(value.y);
+							const inRange = operation === "world-2-pixel" ||
+								(Math.abs(x) <= 180 && Math.abs(y) <= 90);
+							if (validCoord(value.x) && validCoord(value.y) && inRange) {
+								result[chunk.start + i] = [x, y];
 							}
 						}
 					}
@@ -342,9 +342,9 @@ export function fetchVexcelPixelPoints(frame, points, cb) {
 }
 
 /* -- Vexcel imagery compass (docked, layer-attached) ------------------
- * Selecting a direction adds a warped imagery layer to the primary Leaflet
- * map. The native route and waypoints remain above it in their normal panes,
- * so route edits, map panning, and zooming all use one geographic surface.
+ * Selecting a direction displays the untouched perspective photograph on the
+ * primary Leaflet map and projects the route into that image's pixel plane.
+ * Map panning, zooming, route edits, dates, and directions remain synchronized.
  */
 let _vexCtl = null;
 let _vexLayer = null; // the base tile layer, so the control can drive date/band
@@ -377,6 +377,28 @@ export function fetchVexcelOrthoDates(lat, lng, cb) {
 			},
 		);
 	});
+}
+
+// Dynamic.watch owns the editable route as Leaflet polylines. Read those
+// ground coordinates so Vexcel can project the route into the selected image.
+export function _dwGetRoutePaths() {
+	try {
+		const pageWin = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+		const plan = pageWin.leafletPlan;
+		if (!plan || !Array.isArray(plan.lines)) return [];
+		const paths = [];
+		for (const line of plan.lines) {
+			if (!Array.isArray(line)) continue;
+			for (const segment of line) {
+				const polyline = segment && segment.polyline;
+				if (!polyline || typeof polyline.getLatLngs !== "function") continue;
+				const latlngs = polyline.getLatLngs();
+				const flat = Array.isArray(latlngs[0]) ? latlngs.flat(Infinity) : latlngs;
+				if (flat.length) paths.push(flat.map((point) => [point.lng, point.lat]));
+			}
+		}
+		return paths;
+	} catch (_) { return []; }
 }
 
 export function createVexcelControl() {
@@ -465,21 +487,22 @@ export function createVexcelControl() {
 	};
 	const ensureWarpLayer = () => {
 		if (ctl._warpLayer) return ctl._warpLayer;
-		ctl._warpLayer = createVexcelWarpedLayer({
+		ctl._warpLayer = createVexcelObliqueLayer({
 			headers: _vexcelOriginHeaders({ Accept: "image/jpeg,image/*,*/*;q=0.8" }),
 			tileBase(frame) {
 				return _vexcelObliqueTileBase(
 					frame.name, frame.layer, _getStoredToken(), _getStoredSession());
 			},
 			transformPoints: fetchVexcelPixelPoints,
+			getRoutePaths: _dwGetRoutePaths,
 			onStatus(status) {
 				if (!ctl.obliqueActive || !status.frame || !ctl._frame ||
 					status.frame.name !== ctl._frame.name) return;
-				if (status.loaded > 0 && status.exactReady) setMsg("");
-				else if (status.loaded > 0 && status.transformError) {
-					setMsg("Oblique alignment is approximate; Vexcel terrain projection is unavailable.");
+				if (status.loaded > 0 && status.routeExact) setMsg("");
+				else if (status.loaded > 0 && status.routeError) {
+					setMsg("The oblique is loaded, but route projection is approximate.");
 				} else if (status.loaded > 0) {
-					setMsg("Aligning oblique imagery to the route…");
+					setMsg("Projecting the route onto the oblique…");
 				}
 				else if (status.error && status.pending === 0) {
 					setMsg("Vexcel could not load this oblique frame.");
@@ -507,7 +530,7 @@ export function createVexcelControl() {
 		ctl._fire("overlaytoggle");
 	};
 
-	const loadFrame = (frame) => {
+	const loadFrame = (frame, preserveScale) => {
 		const base = _vexcelObliqueTileBase(
 			frame.name, frame.layer, _getStoredToken(), _getStoredSession());
 		if (!base) {
@@ -518,7 +541,7 @@ export function createVexcelControl() {
 			hideOblique("Vexcel did not provide ground geometry for this frame.");
 			return;
 		}
-		const next = Object.assign({}, frame, { tileBase: base });
+		const next = Object.assign({}, frame, { tileBase: base, preserveScale: !!preserveScale });
 		if (ctl.obliqueActive && ctl._frame && ctl._frame.name === next.name &&
 			ctl._frame.tileBase === next.tileBase) {
 			markActiveDir(); return;
@@ -696,7 +719,7 @@ export function createVexcelControl() {
 				direction !== ctl.dir || band !== ctl.frameBand || currentKey !== centerKey ||
 				!frame || !frame.name) return;
 			if (ctl._frame && frame.name === ctl._frame.name) return;
-			loadFrame(Object.assign({ collection }, frame));
+			loadFrame(Object.assign({ collection }, frame), true);
 		});
 	};
 	const scheduleRefresh = () => {

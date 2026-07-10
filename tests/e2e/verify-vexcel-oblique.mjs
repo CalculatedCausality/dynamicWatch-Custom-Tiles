@@ -83,14 +83,15 @@ const set = await page.evaluate(() => {
 });
 if (!set.ok) { console.error("Vexcel base missing"); await browser.close(); process.exit(1); }
 
-// The blank planner has no saved route. Add a normal Leaflet route-shaped
-// polyline so the test can assert that native overlayPane content remains
-// connected and stacked above the Vexcel warp.
+// The blank planner has no saved route. Add one using the same leafletPlan
+// shape the provider reads, so it can be projected into Vexcel image pixels.
 await page.evaluate(() => {
 	const map = window._dwLayerCtrl._map;
 	window._dwVexcelTestRoute = L.polyline([
 		[-26.610, 153.002], [-26.607, 153.006], [-26.604, 153.010],
 	], { color: "#ef2929", weight: 5, className: "route-polyline" }).addTo(map);
+	window.leafletPlan = window.leafletPlan || {};
+	window.leafletPlan.lines = [[{ polyline: window._dwVexcelTestRoute }]];
 });
 
 // The compass docks on its own; dates ride the shared history bar and update
@@ -117,25 +118,39 @@ await page.waitForFunction(() => {
 	return t.length >= 2;
 }, undefined, { timeout: 30_000 }).catch(() => {});
 await page.waitForTimeout(5000);
-await page.waitForSelector(".dw-vex-warp--exact", { timeout: 30_000 }).catch(() => {});
+await page.waitForSelector(".dw-vex-route--exact", { timeout: 30_000 }).catch(() => {});
 
 const routeSurface = await page.evaluate(() => {
 	const map = window._dwLayerCtrl._map;
 	const pane = map.getPane("dwVexcelObliquePane");
-	const route = window._dwVexcelTestRoute;
-	const routeRect = route && route._path ? route._path.getBoundingClientRect() : null;
-	const cellRects = [...document.querySelectorAll(".dw-vex-warp-tile-loaded .dw-vex-warp-cell")]
-		.map((cell) => cell.getBoundingClientRect());
+	const routePane = map.getPane("dwVexcelRoutePane");
+	const route = document.querySelector('.dw-vex-route path[stroke="#ef2929"]');
+	const routeRect = route ? route.getBoundingClientRect() : null;
+	const tiles = [...document.querySelectorAll(".dw-vex-warp-tile-loaded")];
+	const tileRects = tiles
+		.map((tile) => tile.getBoundingClientRect());
+	const routeStyle = route ? getComputedStyle(route) : null;
+	const mapRect = map.getContainer().getBoundingClientRect();
 	return {
 		warpOnMainMap: !!document.querySelector(".dw-vex-warp") && !!pane,
-		exactWarp: !!document.querySelector(".dw-vex-warp--exact"),
+		exactRoute: !!document.querySelector(".dw-vex-route--exact"),
 		warpPointerEvents: pane ? getComputedStyle(pane).pointerEvents : "",
-		routeConnected: !!(route && route._path && route._path.isConnected),
-		routeAboveWarp: pane && Number(getComputedStyle(map.getPane("overlayPane")).zIndex) >
+		routeConnected: !!(route && route.isConnected),
+		routeAboveWarp: pane && routePane && Number(getComputedStyle(routePane).zIndex) >
 			Number(getComputedStyle(pane).zIndex),
-		routeOverImagery: !!routeRect && cellRects.some((rect) =>
+		routeOverImagery: !!routeRect && tileRects.some((rect) =>
 			rect.right >= routeRect.left && rect.left <= routeRect.right &&
 			rect.bottom >= routeRect.top && rect.top <= routeRect.bottom),
+		nativeRouteHidden: getComputedStyle(window._dwVexcelTestRoute._path).opacity === "0",
+		projectedRouteVisible: !!routeRect && routeRect.width > 1 && routeRect.height > 1 &&
+			routeRect.right >= mapRect.left && routeRect.left <= mapRect.right &&
+			routeRect.bottom >= mapRect.top && routeRect.top <= mapRect.bottom &&
+			routeStyle.display !== "none" && routeStyle.visibility !== "hidden" &&
+			Number(routeStyle.opacity) > 0 && Number(routeStyle.strokeOpacity || 1) > 0,
+		perspectivePreserved: !!document.querySelector(".dw-vex-warp") &&
+			getComputedStyle(document.querySelector(".dw-vex-warp")).transform !== "none" &&
+			!document.querySelector(".dw-vex-warp-cell") &&
+			tiles.every((tile) => getComputedStyle(tile).transform === "none"),
 	};
 });
 
@@ -234,11 +249,10 @@ const viewer = await page.evaluate(() => {
 	const map = window._dwLayerCtrl._map;
 	const warp = document.querySelector(".dw-vex-warp");
 	const pane = map.getPane("dwVexcelObliquePane");
-	const route = window._dwVexcelTestRoute;
 	const tiles = document.querySelectorAll(".dw-vex-warp-tile-loaded").length;
 	const msg = el.querySelector(".dw-vex-basemsg");
 	const warpZ = pane ? Number(getComputedStyle(pane).zIndex) : 0;
-	const routeZ = Number(getComputedStyle(map.getPane("overlayPane")).zIndex);
+	const routeZ = Number(getComputedStyle(map.getPane("dwVexcelRoutePane")).zIndex);
 	return {
 		present: !!el,
 		dirs,
@@ -250,7 +264,7 @@ const viewer = await page.evaluate(() => {
 		msg: msg && msg.style.display !== "none" ? msg.textContent : "",
 		warpOnMainMap: !!warp && !!pane,
 		warpPointerEvents: pane ? getComputedStyle(pane).pointerEvents : "",
-		routeConnected: !!(route && route._path && route._path.isConnected),
+		routeConnected: !!document.querySelector(".dw-vex-route path"),
 		routeAboveWarp: routeZ > warpZ,
 	};
 });
@@ -278,12 +292,13 @@ const barGating = barOnBasemap === true; // bar shown + populated on basemap
 const continuousPan = newFrames.length >= 1; // crossed into an adjacent frame
 const routeOk = routeSurface.warpOnMainMap && routeSurface.warpPointerEvents === "none" &&
 	routeSurface.routeConnected && routeSurface.routeAboveWarp && routeSurface.routeOverImagery &&
-	routeSurface.exactWarp && transform200 > 0;
+	routeSurface.nativeRouteHidden && routeSurface.projectedRouteVisible &&
+	routeSurface.perspectivePreserved && routeSurface.exactRoute && transform200 > 0;
 const ok = queryOk && modelOk && tilesOk && panLoadsTiles && barGating &&
 	nadirOk && continuousPan && irOk && routeOk && mapMoved;
 console.log(`  date bar on basemap: ${barGating}  |  nadir grey+fallback: ${nadirOk}  |  continuous pan (frame switch): ${continuousPan}`);
 console.log(`  primary-map warp + native route stacking: ${routeOk}`);
 console.log(`  primary map moved under drag: ${mapMoved}`);
-console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel oblique ${ok ? "warps onto the route map" : "did not fully verify"}`);
+console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel oblique ${ok ? "keeps perspective with a projected route" : "did not fully verify"}`);
 await browser.close();
 process.exit(ok ? 0 : 1);

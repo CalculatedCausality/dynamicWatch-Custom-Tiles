@@ -1186,49 +1186,14 @@ t("_vexcelBilinear / _vexcelInvBilinear round-trip a ground point", () => {
 	}
 });
 
-t("_vexcelRectToQuad maps image pixels onto a projective map quad", () => {
-	const quad = [[12, 18], [310, 42], [276, 244], [-8, 210]];
-	const matrix = dw._vexcelRectToQuad(256, 192, quad);
-	assert(matrix && matrix.length === 9, "homography created");
-	for (const [source, target] of [
-		[[0, 0], quad[0]], [[256, 0], quad[1]],
-		[[256, 192], quad[2]], [[0, 192], quad[3]],
-	]) {
-		const actual = dw._vexcelApplyHomography(matrix, source[0], source[1]);
-		close(actual[0], target[0], 1e-8, "corner x");
-		close(actual[1], target[1], 1e-8, "corner y");
-	}
-});
-
-t("_vexcelRectToQuad handles affine rotation and rejects invalid quads", () => {
-	const quad = [[50, 20], [150, 70], [110, 150], [10, 100]];
-	const matrix = dw._vexcelRectToQuad(100, 100, quad);
-	const centre = dw._vexcelApplyHomography(matrix, 50, 50);
-	close(centre[0], 80, 1e-8, "affine centre x");
-	close(centre[1], 85, 1e-8, "affine centre y");
-	eq(dw._vexcelRectToQuad(0, 100, quad), null, "zero-width source rejected");
-	eq(dw._vexcelRectToQuad(100, 100,
-		[[0, 0], [100, 100], [100, 0], [0, 100]]), null, "crossed quad rejected");
-	eq(dw._vexcelRectToQuad(100, 100,
-		[[0, 0], [50, 0], [100, 0], [0, 100]]), null, "degenerate quad rejected");
-});
-
-t("_vexcelTriangleToTriangle keeps shared mesh edges continuous", () => {
-	const sourceA = [[0, 0], [100, 0], [100, 100]];
-	const sourceB = [[0, 0], [100, 100], [0, 100]];
-	const targetA = [[20, 30], [150, 20], [140, 160]];
-	const targetB = [[20, 30], [140, 160], [5, 145]];
-	const a = dw._vexcelTriangleToTriangle(sourceA, targetA);
-	const b = dw._vexcelTriangleToTriangle(sourceB, targetB);
-	for (let t = 0; t <= 1; t += 0.25) {
-		const source = [100 * t, 100 * t];
-		const pa = dw._vexcelApplyAffine(a, source[0], source[1]);
-		const pb = dw._vexcelApplyAffine(b, source[0], source[1]);
-		close(pa[0], pb[0], 1e-8, "shared edge x");
-		close(pa[1], pb[1], 1e-8, "shared edge y");
-	}
-	eq(dw._vexcelTriangleToTriangle([[0, 0], [1, 1], [2, 2]], targetA), null,
-		"degenerate source triangle rejected");
+t("_vexcelClipPathToQuad keeps route portions crossing an image footprint", () => {
+	const quad = [[0, 0], [1, 0], [1, 1], [0, 1]];
+	const crossing = dw._vexcelClipPathToQuad([[-1, 0.5], [2, 0.5]], quad);
+	eq(crossing.length, 1, "crossing segment retained");
+	close(crossing[0][0][0], 0, 1e-9, "entry clipped to left edge");
+	close(crossing[0][1][0], 1, 1e-9, "exit clipped to right edge");
+	deepEq(dw._vexcelClipPathToQuad([[-2, -2], [-1, -1]], quad), [],
+		"fully outside route omitted");
 });
 
 t("_vexcelObliqueTileBase builds a token-scoped tile base", () => {

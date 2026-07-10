@@ -25,9 +25,6 @@ import {
 	_vexcelTokenValid,
 } from './providers/vexcel-auth.js';
 import {
-	createVexcelWarpedLayer,
-	_vexcelApplyAffine,
-	_vexcelApplyHomography,
 	_vexcelCollectionYear,
 	_vexcelObliqueExtractUrl,
 	_vexcelObliqueTileBase,
@@ -35,10 +32,9 @@ import {
 	_vexcelBand,
 	_vexcelFootprint,
 	_vexcelBilinear,
+	_vexcelClipPathToQuad,
 	_vexcelInvBilinear,
 	_vexcelParseObliques,
-	_vexcelRectToQuad,
-	_vexcelTriangleToTriangle,
 	_vexcelTileTpl,
 } from './providers/vexcel.js';
 import {
@@ -127,9 +123,7 @@ export function bootUserscript() {
 			_vexcelCollectionYear, _vexcelParseObliques, _vexcelObliqueExtractUrl,
 			_vexcelObliqueTileBase, _vexcelMaxDownsample, _vexcelBand,
 			_vexcelFootprint, _vexcelBilinear, _vexcelInvBilinear,
-			_vexcelRectToQuad, _vexcelApplyHomography,
-			_vexcelTriangleToTriangle, _vexcelApplyAffine,
-			createVexcelWarpedLayer,
+			_vexcelClipPathToQuad,
 			_vexcelIsCredString,
 			LayerProvider, tileProvider, tokenTileProvider,
 			arcgisExportProvider, pollingDataLayer, oimIcon,
