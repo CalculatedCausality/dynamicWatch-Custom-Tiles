@@ -1194,6 +1194,23 @@ t("_vexcelClipPathToQuad keeps route portions crossing an image footprint", () =
 	close(crossing[0][1][0], 1, 1e-9, "exit clipped to right edge");
 	deepEq(dw._vexcelClipPathToQuad([[-2, -2], [-1, -1]], quad), [],
 		"fully outside route omitted");
+	for (const edge of [
+		[[0, 0], [1, 0]], [[1, 0], [1, 1]],
+		[[1, 1], [0, 1]], [[0, 1], [0, 0]],
+	]) {
+		eq(dw._vexcelClipPathToQuad(edge, quad).length, 1,
+			"route on every footprint edge is retained");
+	}
+});
+
+t("_vexcelClipPathToRect clips exact image pixels without dropping crossings", () => {
+	const crossing = dw._vexcelClipPathToRect([[-5, 50], [50, 50], [105, 50]], 100, 100);
+	eq(crossing.length, 1, "crossing pixels remain one path");
+	deepEq(crossing[0], [[0, 50], [50, 50], [100, 50]]);
+	const corner = dw._vexcelClipPathToRect([[-5, -5], [50, 50], [105, 105]], 100, 100);
+	deepEq(corner[0], [[0, 0], [50, 50], [100, 100]], "corner crossings are included");
+	deepEq(dw._vexcelClipPathToRect([[-5, -5], [-1, -1]], 100, 100), [],
+		"fully outside pixels omitted");
 });
 
 t("_vexcelObliqueTileBase builds a token-scoped tile base", () => {

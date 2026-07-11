@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Centre on the Sunshine Coast, then cycle the Vexcel compass through
-// EVERY direction (N, E, S, W, top), waiting for each warped oblique to
+// every cardinal direction (N, E, S, W), waiting for each warped oblique to
 // paint on the primary map and screenshotting the map each time.
 //
 //   VEXCEL_TOKEN=<jwt-or-url> npm run e2e:vexcel-angles
@@ -31,7 +31,6 @@ const ANGLES = [
 	{ dir: "oblique-east",  label: "E" },
 	{ dir: "oblique-south", label: "S" },
 	{ dir: "oblique-west",  label: "W" },
-	{ dir: "nadir",         label: "Top" },
 ];
 
 const browser = await chromium.launch({
@@ -153,5 +152,12 @@ const names = new Set(results.filter((r) => r.ok && r.name).map((r) => r.name));
 console.log(`\n${passed}/${results.length} angles rendered as tiles  |  distinct image-names: ${names.size}`);
 const distinct = names.size >= results.filter((r) => r.ok).length && names.size >= 4;
 if (!distinct) console.log("  ✗ image-names not all distinct — suspect a stuck frame");
+await page.locator(".dw-vex-rose .dw-vex-flat").click();
+const flatOk = await page.waitForFunction(() =>
+	!document.querySelector(".dw-vex-warp") &&
+	document.querySelector(".dw-vex-flat")?.classList.contains("dw-vex-dir--on"),
+	undefined, { timeout: 10_000 },
+).then(() => true).catch(() => false);
+console.log(`  ${flatOk ? "PASS" : "FAIL"}  2D center restores the flat aerial map`);
 await browser.close();
-process.exit(passed === results.length && distinct ? 0 : 1);
+process.exit(passed === results.length && distinct && flatOk ? 0 : 1);

@@ -19,11 +19,13 @@ const b64 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
 const TOKEN = `${b64({ alg: "HS256" })}.${b64({ exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`;
 const WIDTH = 1200, HEIGHT = 900;
 const WEST = 153.0, EAST = 153.01, NORTH = -26.6, SOUTH = -26.61;
+const COLLECTION = "au-qld-editing-2026";
+const DIRECTIONS = ["oblique-north", "oblique-east", "oblique-south", "oblique-west"];
 const PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
 	"base64",
 );
-const feature = {
+const features = DIRECTIONS.map((direction) => ({
 	type: "Feature",
 	geometry: {
 		type: "Polygon",
@@ -32,15 +34,15 @@ const feature = {
 		]],
 	},
 	properties: {
-		"product-type": "oblique-east",
-		collection: "au-qld-editing-2026",
-		"image-name": "mock-oblique-east-rgb",
+		"product-type": direction,
+		collection: COLLECTION,
+		"image-name": `mock-${direction}-rgb`,
 		"source-layer": "urban",
 		"raster-size-width": WIDTH,
 		"raster-size-height": HEIGHT,
 		"capture-date": "2026-01-01",
 	},
-};
+}));
 
 const browser = await chromium.launch({
 	headless: !process.env.HEADED,
@@ -49,6 +51,8 @@ const browser = await chromium.launch({
 const context = await browser.newContext({ storageState: STATE, viewport: { width: 1400, height: 900 } });
 let worldToPixel = 0, pixelToWorld = 0, pixelFallbacks = 0;
 let delayNextWorldTransform = false;
+let failNextPixelTransform = false;
+let overscanWorldTransform = false;
 await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 	const request = route.request();
 	const url = request.url();
@@ -57,15 +61,27 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 		const values = [...String(body.wkt || "").matchAll(
 			/(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/g,
 		)].map((match) => [Number(match[1]), Number(match[2])]);
-		const points = body.operation === "world-2-pixel"
-			? values.map(([lng, lat]) => ({
-				x: (lng - WEST) / (EAST - WEST) * WIDTH,
-				y: (NORTH - lat) / (NORTH - SOUTH) * HEIGHT,
-			}))
-			: values.map(([x, y]) => ({
-				x: WEST + x / WIDTH * (EAST - WEST),
-				y: NORTH - y / HEIGHT * (NORTH - SOUTH),
-			}));
+		const direction = DIRECTIONS.find((candidate) =>
+			String(body["image-name"] || "").includes(candidate)) || "oblique-east";
+		const toPixel = ([lng, lat]) => {
+			const u = (lng - WEST) / (EAST - WEST);
+			const v = (NORTH - lat) / (NORTH - SOUTH);
+			if (direction === "oblique-west") return { x: (1 - u) * WIDTH, y: v * HEIGHT };
+			if (direction === "oblique-north") return { x: v * WIDTH, y: (1 - u) * HEIGHT };
+			if (direction === "oblique-south") return { x: (1 - v) * WIDTH, y: u * HEIGHT };
+			return overscanWorldTransform
+				? { x: u * (WIDTH + 4) - 2, y: v * HEIGHT }
+				: { x: u * WIDTH, y: v * HEIGHT };
+		};
+		const toWorld = ([x, y]) => {
+			let u, v;
+			if (direction === "oblique-west") { u = 1 - x / WIDTH; v = y / HEIGHT; }
+			else if (direction === "oblique-north") { u = 1 - y / HEIGHT; v = x / WIDTH; }
+			else if (direction === "oblique-south") { u = y / HEIGHT; v = 1 - x / WIDTH; }
+			else { u = x / WIDTH; v = y / HEIGHT; }
+			return { x: WEST + u * (EAST - WEST), y: NORTH - v * (NORTH - SOUTH) };
+		};
+		const points = body.operation === "world-2-pixel" ? values.map(toPixel) : values.map(toWorld);
 		if (body.operation === "world-2-pixel") worldToPixel++;
 		else pixelToWorld++;
 		// Interaction transforms are deliberately slower. The fifth one also
@@ -75,7 +91,8 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 			delayNextWorldTransform = false;
 			await new Promise((done) => setTimeout(done, 250));
 		}
-		const useFallback = body.operation !== "world-2-pixel" && pixelToWorld === 5;
+		const useFallback = body.operation !== "world-2-pixel" && failNextPixelTransform;
+		if (useFallback) failNextPixelTransform = false;
 		if (useFallback) pixelFallbacks++;
 		await route.fulfill({
 			status: 200,
@@ -85,10 +102,16 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 		return;
 	}
 	if (url.includes("/v2/oriented/query")) {
+		const body = request.postDataJSON();
+		const requested = body["product-type"];
 		await route.fulfill({
 			status: 200,
 			contentType: "application/json",
-			body: JSON.stringify({ type: "FeatureCollection", features: [feature] }),
+			body: JSON.stringify({
+				type: "FeatureCollection",
+				features: requested ? features.filter((entry) =>
+					entry.properties["product-type"] === requested) : features,
+			}),
 		});
 		return;
 	}
@@ -96,7 +119,7 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 		await route.fulfill({
 			status: 200,
 			contentType: "application/json",
-			body: JSON.stringify({ features: [{ properties: { collection: feature.properties.collection } }] }),
+			body: JSON.stringify({ features: [{ properties: { collection: COLLECTION } }] }),
 		});
 		return;
 	}
@@ -244,11 +267,178 @@ await page.waitForFunction((before) => {
 }, beforeDragPath);
 await page.waitForFunction(() => !window.leafletPlan.ignoringMapClicks);
 
+const inspectProjectedRoute = () => page.evaluate(() => {
+	const svg = document.querySelector(".dw-vex-route");
+	const children = [...svg.children];
+	const white = children.map((node, index) => node.getAttribute("stroke") === "#fff" ? index : -1)
+		.filter((index) => index >= 0);
+	const red = children.map((node, index) => node.getAttribute("stroke") === "#ef2929" ? index : -1)
+		.filter((index) => index >= 0);
+	const hits = children.map((node, index) => node.classList.contains("dw-vex-route-hit") ? index : -1)
+		.filter((index) => index >= 0);
+	const endpoints = red.flatMap((index) => {
+		const path = children[index];
+		return [path.getPointAtLength(0), path.getPointAtLength(path.getTotalLength())];
+	});
+	const handles = [...svg.querySelectorAll(
+		".dw-vex-route-handle--start,.dw-vex-route-handle--via,.dw-vex-route-handle--end",
+	)];
+	const maxEndpointError = handles.reduce((maximum, handle) => {
+		const x = Number(handle.getAttribute("cx")), y = Number(handle.getAttribute("cy"));
+		const nearest = Math.min(...endpoints.map((point) => Math.hypot(point.x - x, point.y - y)));
+		return Math.max(maximum, nearest);
+	}, 0);
+	let adjacencyError = Infinity;
+	if (red.length === handles.length - 1) {
+		adjacencyError = red.reduce((maximum, index, segmentIndex) => {
+			const path = children[index];
+			const start = path.getPointAtLength(0);
+			const end = path.getPointAtLength(path.getTotalLength());
+			const a = handles[segmentIndex], b = handles[segmentIndex + 1];
+			const ap = { x: Number(a.getAttribute("cx")), y: Number(a.getAttribute("cy")) };
+			const bp = { x: Number(b.getAttribute("cx")), y: Number(b.getAttribute("cy")) };
+			const direct = Math.max(Math.hypot(start.x - ap.x, start.y - ap.y),
+				Math.hypot(end.x - bp.x, end.y - bp.y));
+			const reverse = Math.max(Math.hypot(start.x - bp.x, start.y - bp.y),
+				Math.hypot(end.x - ap.x, end.y - ap.y));
+			return Math.max(maximum, Math.min(direct, reverse));
+		}, 0);
+	}
+	return {
+		white: white.length,
+		red: red.length,
+		hits: hits.length,
+		paintOrder: white.length > 0 && red.length > 0 && hits.length > 0 &&
+			Math.max(...white) < Math.min(...red) && Math.max(...red) < Math.min(...hits),
+		finite: [...svg.querySelectorAll("path")].every((path) =>
+			!/NaN|Infinity|undefined/.test(path.getAttribute("d") || "")),
+		maxEndpointError,
+		adjacencyError,
+	};
+});
+
+// Every cardinal camera uses a different rotation/reflection. Insert a real
+// route point by clicking the projected line at each angle, verify its handle
+// lands on that click, then undo and continue to the next camera.
+const angleResults = [];
+for (const direction of ["oblique-north", "oblique-south", "oblique-west", "oblique-east"]) {
+	const directionButton = page.locator(`.dw-vex-dir[data-dir="${direction}"]`);
+	await directionButton.click();
+	const angleReady = await page.waitForFunction((activeDirection) => {
+		const active = document.querySelector(".dw-vex-dir--on[data-dir]");
+		const frameNames = [...document.querySelectorAll(".dw-vex-warp-tile-loaded")]
+			.map((tile) => tile.dataset.imageName || "");
+		return active?.dataset.dir === activeDirection &&
+			frameNames.some((name) => name.includes(activeDirection)) &&
+			!!document.querySelector(".dw-vex-route--exact");
+	}, direction, { timeout: 20_000 }).then(() => true).catch(() => false);
+	if (!angleReady) {
+		const state = await page.evaluate(() => ({
+			active: document.querySelector(".dw-vex-dir--on[data-dir]")?.dataset.dir,
+			buttons: [...document.querySelectorAll(".dw-vex-dir")].map((button) => ({
+				text: button.textContent, dir: button.dataset.dir, disabled: button.disabled,
+			})),
+			images: [...document.querySelectorAll(".dw-vex-warp-tile-loaded")]
+				.map((tile) => tile.dataset.imageName),
+			exact: !!document.querySelector(".dw-vex-route--exact"),
+			message: document.querySelector(".dw-vex-basemsg")?.textContent,
+		}));
+		throw new Error(`${direction} did not become ready: ${JSON.stringify({ state, pageErrors })}`);
+	}
+	const beforeCount = await page.evaluate(() => window.leafletPlan.lines[0].length);
+	const angleHit = await page.locator(".dw-vex-route-hit").first().evaluate((path) => {
+		const local = path.getPointAtLength(path.getTotalLength() * 0.45);
+		const screen = new DOMPoint(local.x, local.y).matrixTransform(path.getScreenCTM());
+		return { x: screen.x, y: screen.y };
+	});
+	await page.mouse.click(angleHit.x, angleHit.y);
+	await page.waitForFunction((count) => window.leafletPlan.lines[0].length === count + 1,
+		beforeCount);
+	await page.waitForFunction((segments) =>
+		document.querySelectorAll(".dw-vex-route-hit").length === segments + 1 &&
+		!!document.querySelector(".dw-vex-route--exact"), beforeCount - 1);
+	const insertionError = await page.locator(".dw-vex-route-handle--via").evaluateAll(
+		(handles, target) => Math.min(...handles.map((handle) => {
+			const rect = handle.getBoundingClientRect();
+			return Math.hypot(rect.left + rect.width / 2 - target.x,
+				rect.top + rect.height / 2 - target.y);
+		})), angleHit,
+	);
+	const insertedQuality = await inspectProjectedRoute();
+	await page.locator(".leaflet-planner-controls #undo").click();
+	await page.waitForFunction((count) => window.leafletPlan.lines[0].length === count,
+		beforeCount);
+	await page.waitForFunction((segments) =>
+		document.querySelectorAll(".dw-vex-route-hit").length === segments &&
+		!!document.querySelector(".dw-vex-route--exact"), beforeCount - 1);
+	const restoredQuality = await inspectProjectedRoute();
+	angleResults.push({ direction, insertionError, insertedQuality, restoredQuality });
+}
+await page.locator('.dw-vex-dir[data-dir="oblique-east"]').click();
+await page.waitForTimeout(250);
+const repeatedCardinalStayed = await page.evaluate(() =>
+	!!document.querySelector(".dw-vex-warp") &&
+	!!document.querySelector('.dw-vex-dir--on[data-dir="oblique-east"]'));
+
+// Vexcel can return exact pixels just outside the nominal raster even when
+// the geographic segment crosses the frame. Exercise the renderer itself,
+// not only the clipping helper, and require one edge-to-edge visible path.
+overscanWorldTransform = true;
+await page.evaluate(({ west, east, lat }) => {
+	const map = window.leafletPlan.map;
+	window._dwVexcelClipProbe = L.polyline([[lat, west - 0.001], [lat, east + 0.001]], {
+		className: "route-polyline", color: "#ef2929",
+	}).addTo(map);
+	window.leafletPlan.lines.push([{ polyline: window._dwVexcelClipProbe }]);
+}, { west: WEST, east: EAST, lat: (NORTH + SOUTH) / 2 });
+await page.waitForFunction(() =>
+	document.querySelectorAll(".dw-vex-route path[stroke='#ef2929']").length === 3 &&
+	!!document.querySelector(".dw-vex-route--exact"),
+);
+const clippedCrossingVisible = await page.evaluate((width) =>
+	[...document.querySelectorAll(".dw-vex-route path[stroke='#ef2929']")].some((path) => {
+		const start = path.getPointAtLength(0);
+		const end = path.getPointAtLength(path.getTotalLength());
+		return Math.min(start.x, end.x) < 0.01 && Math.max(start.x, end.x) > width - 0.01;
+	}), WIDTH);
+overscanWorldTransform = false;
+await page.evaluate(() => {
+	window.leafletPlan.lines.pop();
+	window.leafletPlan.map.removeLayer(window._dwVexcelClipProbe);
+});
+await page.waitForFunction(() =>
+	document.querySelectorAll(".dw-vex-route path[stroke='#ef2929']").length === 2 &&
+	!!document.querySelector(".dw-vex-route--exact"),
+);
+
+const compassState = await page.evaluate(() => ({
+	directions: [...document.querySelectorAll(".dw-vex-dir[data-dir]")].map((button) => button.dataset.dir),
+	centerText: document.querySelector(".dw-vex-rose .dw-vex-flat")?.textContent,
+	flatButtons: document.querySelectorAll(".dw-vex-flat").length,
+}));
+await page.locator(".dw-vex-rose .dw-vex-flat").click();
+await page.waitForFunction(() =>
+	!document.querySelector(".dw-vex-warp") &&
+	!document.querySelector("#leaflet.dw-vex-perspective-active") &&
+	document.querySelector(".dw-vex-flat")?.classList.contains("dw-vex-dir--on"),
+);
+const flatState = await page.evaluate(() => ({
+	warp: !!document.querySelector(".dw-vex-warp"),
+	perspective: document.querySelector("#leaflet")?.classList.contains("dw-vex-perspective-active"),
+	centerActive: document.querySelector(".dw-vex-flat")?.classList.contains("dw-vex-dir--on"),
+}));
+await page.locator('.dw-vex-dir[data-dir="oblique-east"]').click();
+await page.waitForFunction(() =>
+	document.querySelector('.dw-vex-dir--on[data-dir="oblique-east"]') &&
+	document.querySelector(".dw-vex-route--exact"),
+);
+
 // Also use the planner's actual Add Waypoint mode and save its popup. The
 // standalone blue point should be projected and draggable, not disappear.
 await page.locator("#travel-mode-btn").click();
 await page.locator('#travel-mode-popup a.travel-mode-a[data-id="waypoint"]').click();
 const waypointPoint = { x: mapBox.x + mapBox.width * 0.75, y: mapBox.y + mapBox.height * 0.72 };
+failNextPixelTransform = true;
 await page.mouse.click(waypointPoint.x, waypointPoint.y);
 const waypointAdded = await page.waitForFunction(
 	() => window.leafletPlan.waypoints?.length === 1,
@@ -370,6 +560,11 @@ result.insertError = insertError;
 result.waypointDragError = waypointDragError;
 result.handleStayedConnected = handleStayedConnected;
 result.overlayHits = overlayHits;
+result.angleResults = angleResults;
+result.compassState = compassState;
+result.flatState = flatState;
+result.clippedCrossingVisible = clippedCrossingVisible;
+result.repeatedCardinalStayed = repeatedCardinalStayed;
 result.popupAnchorError = popupAnchorError;
 result.deleteLineLength = await page.evaluate(() => window.leafletPlan.lines?.[0]?.length);
 result.pageErrors = pageErrors;
@@ -386,11 +581,29 @@ if (result.viaDragError > 4) failures.push(`dragged handle missed cursor by ${re
 if (result.waypointDragError > 4) failures.push(`waypoint drag missed cursor by ${result.waypointDragError.toFixed(1)}px`);
 if (!handleStayedConnected) failures.push("exact reprojection replaced an active drag handle");
 if (!result.nativeMarkersHidden) failures.push("native flat-map markers leaked into perspective mode");
-if (worldToPixel < 4 || pixelToWorld < 6) failures.push("expected both Vexcel transform directions to be exercised");
+if (worldToPixel < 12 || pixelToWorld < 10) failures.push("expected both Vexcel transform directions across all angles");
 if (pixelFallbacks !== 1) failures.push("failed pixel transform did not exercise exactly one fallback");
 if (overlayHits !== 1 || result.waypoints !== 1) failures.push("perspective click capture stole an overlay event");
 if (popupAnchorError > 20) failures.push(`route-point popup missed projected handle by ${popupAnchorError.toFixed(1)}px`);
 if (result.deleteLineLength !== 2) failures.push("projected route-point delete did not update the course");
+for (const angle of angleResults) {
+	if (angle.insertionError > 3) failures.push(`${angle.direction} insertion missed by ${angle.insertionError.toFixed(1)}px`);
+	for (const [state, quality] of [["inserted", angle.insertedQuality], ["restored", angle.restoredQuality]]) {
+		if (!quality.paintOrder || !quality.finite || quality.maxEndpointError > 0.5 ||
+			quality.adjacencyError > 0.5) {
+			failures.push(`${angle.direction} ${state} route rendered poorly: ${JSON.stringify(quality)}`);
+		}
+	}
+}
+if (!clippedCrossingVisible) failures.push("exact out-of-frame route pixels were dropped instead of clipped");
+if (!repeatedCardinalStayed) failures.push("selected cardinal still duplicates the center 2D action");
+if (compassState.flatButtons !== 1 || compassState.centerText?.trim() !== "2D" ||
+	compassState.directions.length !== 4 || compassState.directions.some((direction) => direction === "nadir")) {
+	failures.push(`compass still has duplicate flat/nadir actions: ${JSON.stringify(compassState)}`);
+}
+if (flatState.warp || flatState.perspective || !flatState.centerActive) {
+	failures.push(`center 2D action did not restore flat map: ${JSON.stringify(flatState)}`);
+}
 if (pageErrors.length) failures.push(`page errors: ${pageErrors.join("; ")}`);
 
 await browser.close();
@@ -398,4 +611,4 @@ if (failures.length) {
 	console.error(failures.join("\n"));
 	process.exit(1);
 }
-console.log("PASS: add, insert, drag, delete, and standalone waypoint editing stay aligned in Vexcel perspective mode");
+console.log("PASS: route editing stays continuous and aligned across N/E/S/W Vexcel perspectives");

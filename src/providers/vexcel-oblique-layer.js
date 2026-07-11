@@ -47,6 +47,17 @@ export function _vexcelInvBilinear(corners, lng, lat) {
 }
 
 function _pointInQuad(corners, lng, lat) {
+	for (let i = 0; i < corners.length; i++) {
+		const a = corners[i], b = corners[(i + 1) % corners.length];
+		const dx = b[0] - a[0], dy = b[1] - a[1];
+		const cross = (lng - a[0]) * dy - (lat - a[1]) * dx;
+		const tolerance = 1e-10 * Math.max(1, Math.abs(dx), Math.abs(dy));
+		if (Math.abs(cross) <= tolerance &&
+			lng >= Math.min(a[0], b[0]) - tolerance && lng <= Math.max(a[0], b[0]) + tolerance &&
+			lat >= Math.min(a[1], b[1]) - tolerance && lat <= Math.max(a[1], b[1]) + tolerance) {
+			return true;
+		}
+	}
 	let inside = false;
 	for (let i = 0, j = corners.length - 1; i < corners.length; j = i++) {
 		const a = corners[i], b = corners[j];
@@ -93,6 +104,44 @@ export function _vexcelClipPathToQuad(path, corners) {
 			if (!same(current[current.length - 1], p0)) { flush(); current.push(p0); }
 			current.push(p1);
 		}
+	}
+	flush();
+	return segments;
+}
+
+export function _vexcelClipPathToRect(path, width, height) {
+	const segments = [];
+	let current = [];
+	const same = (a, b) => a && b && Math.abs(a[0] - b[0]) < 1e-7 &&
+		Math.abs(a[1] - b[1]) < 1e-7;
+	const flush = () => {
+		if (current.length > 1) segments.push(current);
+		current = [];
+	};
+	for (let i = 1; i < path.length; i++) {
+		const a = path[i - 1], b = path[i];
+		if (!a || !b || !Number.isFinite(a[0]) || !Number.isFinite(a[1]) ||
+			!Number.isFinite(b[0]) || !Number.isFinite(b[1])) {
+			flush(); continue;
+		}
+		const dx = b[0] - a[0], dy = b[1] - a[1];
+		let t0 = 0, t1 = 1, visible = true;
+		for (const [p, q] of [[-dx, a[0]], [dx, width - a[0]],
+			[-dy, a[1]], [dy, height - a[1]]]) {
+			if (Math.abs(p) < 1e-12) {
+				if (q < 0) { visible = false; break; }
+				continue;
+			}
+			const r = q / p;
+			if (p < 0) t0 = Math.max(t0, r);
+			else t1 = Math.min(t1, r);
+			if (t0 > t1) { visible = false; break; }
+		}
+		if (!visible) { flush(); continue; }
+		const p0 = [a[0] + dx * t0, a[1] + dy * t0];
+		const p1 = [a[0] + dx * t1, a[1] + dy * t1];
+		if (!same(current[current.length - 1], p0)) { flush(); current.push(p0); }
+		current.push(p1);
 	}
 	flush();
 	return segments;
@@ -268,6 +317,9 @@ export function createVexcelObliqueLayer(options) {
 			this._pendingRouteDraw = null;
 			this._routeExact = false;
 			this._routeError = false;
+			for (const hit of this._routeSvg.querySelectorAll(".dw-vex-route-hit")) {
+				hit.classList.remove("dw-vex-route-hit");
+			}
 			this._notify();
 			clearTimeout(this._routeTimer);
 			this._routeTimer = setTimeout(() => this._requestRoute(), 100);
@@ -443,7 +495,7 @@ export function createVexcelObliqueLayer(options) {
 				this._map.dragging && this._map.dragging.moved && this._map.dragging.moved()) return;
 			const target = event.target;
 			if (target && target.closest && target.closest(
-				".leaflet-control,.leaflet-popup,.leaflet-interactive,.leaflet-marker-icon," +
+				".leaflet-control,.leaflet-popup,.dw-vex-ctl,.leaflet-interactive,.leaflet-marker-icon," +
 				".leaflet-tooltip,.dw-vex-route-hit,.dw-vex-route-handle")) return;
 			const pixel = this._eventPixel(event);
 			if (!pixel) return;
@@ -573,6 +625,9 @@ export function createVexcelObliqueLayer(options) {
 			const drag = this._drag;
 			if (!drag || drag.pointerId !== event.pointerId) return;
 			this._drag = null;
+			if (drag.handle.hasPointerCapture && drag.handle.hasPointerCapture(event.pointerId)) {
+				drag.handle.releasePointerCapture(event.pointerId);
+			}
 			event.preventDefault();
 			event.stopPropagation();
 			drag.handle.classList.remove("dw-vex-route-handle--dragging");
@@ -602,6 +657,9 @@ export function createVexcelObliqueLayer(options) {
 			const drag = this._drag;
 			if (!drag || drag.pointerId !== event.pointerId) return;
 			this._drag = null;
+			if (drag.handle.hasPointerCapture && drag.handle.hasPointerCapture(event.pointerId)) {
+				drag.handle.releasePointerCapture(event.pointerId);
+			}
 			drag.handle.classList.remove("dw-vex-route-handle--dragging");
 			if (!this._applyPendingRouteDraw()) this._requestRoute();
 		},
@@ -862,43 +920,43 @@ export function createVexcelObliqueLayer(options) {
 		_drawRoute(paths, markers) {
 			if (!this._routeSvg || !this._frame) return;
 			this._routeSvg.replaceChildren();
+			const rendered = [];
 			for (const entry of paths) {
 				const points = entry.points || entry;
-				let segment = [];
-				const flush = () => {
-					if (segment.length < 2) { segment = []; return; }
-					const d = segment.map((p, i) => (i ? "L" : "M") + p[0] + " " + p[1]).join(" ");
-					for (const [color, width] of [["#fff", 7], ["#ef2929", 4]]) {
-						const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-						path.setAttribute("d", d);
-						path.setAttribute("fill", "none");
-						path.setAttribute("stroke", color);
-						path.setAttribute("stroke-width", String(width));
-						path.setAttribute("stroke-linecap", "round");
-						path.setAttribute("stroke-linejoin", "round");
-						path.setAttribute("vector-effect", "non-scaling-stroke");
-						this._routeSvg.appendChild(path);
-					}
-					const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
-					hit.classList.add("dw-vex-route-hit");
-					hit.dataset.sourceIndex = String(entry.sourceIndex == null ? -1 : entry.sourceIndex);
-					hit.setAttribute("d", d);
-					hit.setAttribute("fill", "none");
-					hit.setAttribute("stroke", "transparent");
-					hit.setAttribute("stroke-width", "20");
-					hit.setAttribute("vector-effect", "non-scaling-stroke");
-					this._routeSvg.appendChild(hit);
-					segment = [];
-				};
-				for (const point of points) {
-					if (!point || !isFinite(point[0]) || !isFinite(point[1]) ||
-						point[0] < 0 || point[1] < 0 ||
-						point[0] > this._frame.w || point[1] > this._frame.h) {
-						flush(); continue;
-					}
-					segment.push(point);
+				for (const segment of _vexcelClipPathToRect(points, this._frame.w, this._frame.h)) {
+					rendered.push({
+						d: segment.map((p, i) => (i ? "L" : "M") + p[0] + " " + p[1]).join(" "),
+						sourceIndex: entry.sourceIndex == null ? -1 : entry.sourceIndex,
+					});
 				}
-				flush();
+			}
+			const addVisualPaths = (color, width) => {
+				for (const item of rendered) {
+					const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+					path.setAttribute("d", item.d);
+					path.setAttribute("fill", "none");
+					path.setAttribute("stroke", color);
+					path.setAttribute("stroke-width", String(width));
+					path.setAttribute("stroke-linecap", "round");
+					path.setAttribute("stroke-linejoin", "round");
+					path.setAttribute("vector-effect", "non-scaling-stroke");
+					this._routeSvg.appendChild(path);
+				}
+			};
+			addVisualPaths("#fff", 7);
+			addVisualPaths("#ef2929", 4);
+			for (const item of rendered) {
+				const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
+				hit.classList.add("dw-vex-route-hit");
+				hit.dataset.sourceIndex = String(item.sourceIndex);
+				hit.setAttribute("d", item.d);
+				hit.setAttribute("fill", "none");
+				hit.setAttribute("stroke", "transparent");
+				hit.setAttribute("stroke-width", "20");
+				hit.setAttribute("stroke-linecap", "round");
+				hit.setAttribute("stroke-linejoin", "round");
+				hit.setAttribute("vector-effect", "non-scaling-stroke");
+				this._routeSvg.appendChild(hit);
 			}
 			const scale = this._scale() || 1;
 			for (let markerIdx = 0; markerIdx < (markers || []).length; markerIdx++) {

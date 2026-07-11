@@ -185,65 +185,28 @@ await page.waitForTimeout(3000);
 const newFrames = [...new Set(tileImages)].filter((n) => !framesBefore.has(n));
 console.log(`  frame(s) switched-to while panning: ${newFrames.length} (${newFrames.map((n) => n.slice(-22)).join(", ")})`);
 
-// ⊙ nadir behaviour: it exists only on the newest capture (SCC: 2025).
-// Select it (should work + highlight on the newest date), then scrub to
-// the OLDEST date — ⊙ must grey out and the view fall back to an angle
-// with tiles, never a dead "no photo".
-await page.evaluate(() => {
-	const s = document.querySelector(".dw-history-slider");
-	if (s) { s.value = String(s.max); s.dispatchEvent(new Event("input", { bubbles: true })); s.dispatchEvent(new Event("change", { bubbles: true })); }
-	const top = document.querySelector('.dw-vex-ctl .dw-vex-dir[data-dir="nadir"]');
-	if (top && !top.disabled) top.click();
-});
-await page.waitForTimeout(3500);
-const nadirNewest = await page.evaluate(() => {
-	const top = document.querySelector('.dw-vex-ctl .dw-vex-dir[data-dir="nadir"]');
-	const ir = document.querySelector(".dw-vex-ir");
-	return { enabled: top && !top.disabled, on: top && top.classList.contains("dw-vex-dir--on"), irEnabled: ir && !ir.disabled };
-});
-
-// IR toggle: on nadir 2025 (which has infrared), the IR button is
-// enabled; clicking it must stream an _irg (infrared) frame.
-const irBefore = tileImages.filter((n) => /_irg$/.test(n)).length;
-await page.evaluate(() => {
-	const ir = document.querySelector(".dw-vex-ir");
-	if (ir && !ir.disabled) ir.click();
-});
-await page.waitForTimeout(4500);
-const irLoaded = tileImages.filter((n) => /_irg$/.test(n)).length > irBefore;
-const irOn = await page.evaluate(() => {
-	const ir = document.querySelector(".dw-vex-ir");
-	return ir && ir.classList.contains("dw-vex-ir--on");
-});
-console.log(`  IR toggle: enabled-on-nadir=${nadirNewest.irEnabled} loaded-infrared=${irLoaded} highlighted=${irOn}`);
-// Toggle back to rgb before scrubbing away.
-await page.evaluate(() => { const ir = document.querySelector(".dw-vex-ir"); if (ir && !ir.disabled) ir.click(); });
-await page.waitForTimeout(1500);
-
-await page.evaluate(() => {
-	const s = document.querySelector(".dw-history-slider");
-	if (s) { s.value = "0"; s.dispatchEvent(new Event("input", { bubbles: true })); s.dispatchEvent(new Event("change", { bubbles: true })); } // oldest
-});
-await page.waitForTimeout(4000);
-const nadirOld = await page.evaluate(() => {
-	const top = document.querySelector('.dw-vex-ctl .dw-vex-dir[data-dir="nadir"]');
-	const on = document.querySelector('.dw-vex-ctl .dw-vex-dir--on');
-	return {
-		nadirGreyed: top && top.disabled && top.classList.contains("dw-vex-dir--off"),
-		fellBackTo: on ? on.dataset.dir : null,
-		tiles: document.querySelectorAll(".dw-vex-warp-tile-loaded").length,
-	};
-});
-console.log(`  ⊙ on newest: enabled=${nadirNewest.enabled} highlighted=${nadirNewest.on}`);
-console.log(`  ⊙ on oldest: greyed=${nadirOld.nadirGreyed} fell-back-to=${nadirOld.fellBackTo} tiles=${nadirOld.tiles}`);
-const nadirOk = nadirNewest.enabled && nadirOld.nadirGreyed &&
-	/oblique/.test(nadirOld.fellBackTo || "") && nadirOld.tiles >= 2;
-const irOk = nadirNewest.irEnabled && irLoaded && irOn;
+// The compass has one vertical-map action in its centre. It must remove the
+// perspective layer and restore the native route, then a cardinal must reopen
+// the oblique normally.
+await page.locator(".dw-vex-rose .dw-vex-flat").click();
+const flatOk = await page.waitForFunction(() =>
+	!document.querySelector(".dw-vex-warp") &&
+	!document.querySelector("#leaflet.dw-vex-perspective-active") &&
+	document.querySelector(".dw-vex-flat")?.classList.contains("dw-vex-dir--on"),
+	undefined, { timeout: 10_000 },
+).then(() => true).catch(() => false);
+await page.locator('.dw-vex-dir[data-dir="oblique-east"]').click();
+const reopenOk = await page.waitForFunction(() =>
+	document.querySelector('.dw-vex-dir--on[data-dir="oblique-east"]') &&
+	document.querySelectorAll(".dw-vex-warp-tile-loaded").length >= 2 &&
+	document.querySelector(".dw-vex-route--exact"),
+	undefined, { timeout: 30_000 },
+).then(() => true).catch(() => false);
 
 const viewer = await page.evaluate(() => {
 	const el = document.querySelector(".dw-vex-ctl");
 	if (!el) return { present: false };
-	const dirs = [...el.querySelectorAll(".dw-vex-dir")].map((b) => b.dataset.dir);
+	const dirs = [...el.querySelectorAll(".dw-vex-dir[data-dir]")].map((b) => b.dataset.dir);
 	const slider = document.querySelector(".dw-history-slider");
 	const captureCount = slider ? Number(slider.max) + 1 : 0;
 	const map = window._dwLayerCtrl._map;
@@ -285,7 +248,7 @@ console.log(`  screenshot: ${shot}`);
 
 // PASS if the warp painted on the primary map, panning streamed new source
 // tiles, and the native route stayed connected above a non-interactive pane.
-const modelOk = viewer.present && viewer.dirs.filter((d) => /oblique|nadir/.test(d)).length >= 4 && viewer.dates.length >= 2;
+const modelOk = viewer.present && viewer.dirs.length === 4 && viewer.dirs.every((d) => /oblique/.test(d)) && viewer.dates.length >= 2;
 const tilesOk = tile200 >= 2 && viewer.tilesLoaded >= 2;
 const panLoadsTiles = newCoords >= 2;
 const barGating = barOnBasemap === true; // bar shown + populated on basemap
@@ -295,8 +258,8 @@ const routeOk = routeSurface.warpOnMainMap && routeSurface.warpPointerEvents ===
 	routeSurface.nativeRouteHidden && routeSurface.projectedRouteVisible &&
 	routeSurface.perspectivePreserved && routeSurface.exactRoute && transform200 > 0;
 const ok = queryOk && modelOk && tilesOk && panLoadsTiles && barGating &&
-	nadirOk && continuousPan && irOk && routeOk && mapMoved;
-console.log(`  date bar on basemap: ${barGating}  |  nadir grey+fallback: ${nadirOk}  |  continuous pan (frame switch): ${continuousPan}`);
+	flatOk && reopenOk && continuousPan && routeOk && mapMoved;
+console.log(`  date bar on basemap: ${barGating}  |  center 2D: ${flatOk}  |  reopen oblique: ${reopenOk}  |  continuous pan (frame switch): ${continuousPan}`);
 console.log(`  primary-map warp + native route stacking: ${routeOk}`);
 console.log(`  primary map moved under drag: ${mapMoved}`);
 console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel oblique ${ok ? "keeps perspective with a projected route" : "did not fully verify"}`);

@@ -31,6 +31,7 @@ export {
 } from "./vexcel-auth.js";
 export {
 	_vexcelBilinear,
+	_vexcelClipPathToRect,
 	_vexcelClipPathToQuad,
 	_vexcelFootprint,
 	_vexcelInvBilinear,
@@ -438,12 +439,11 @@ export function createVexcelControl() {
 		'<div class="dw-vex-rose">' +
 		'<button type="button" class="dw-vex-dir dw-vex-n" data-dir="oblique-north" title="Look from the north">N</button>' +
 		'<button type="button" class="dw-vex-dir dw-vex-w" data-dir="oblique-west" title="Look from the west">W</button>' +
-		'<button type="button" class="dw-vex-dir dw-vex-c" data-dir="nadir" title="Straight down">⊙</button>' +
+		'<button type="button" class="dw-vex-dir dw-vex-flat dw-vex-c" title="Return to the vertical aerial map">2D</button>' +
 		'<button type="button" class="dw-vex-dir dw-vex-e" data-dir="oblique-east" title="Look from the east">E</button>' +
 		'<button type="button" class="dw-vex-dir dw-vex-s" data-dir="oblique-south" title="Look from the south">S</button>' +
 		"</div>" +
 		'<button type="button" class="dw-vex-ir" title="Toggle near-infrared imagery (vegetation shows red)">IR</button>' +
-		'<button type="button" class="dw-vex-flat" title="Return to the vertical aerial map">Flat map</button>' +
 		'<div class="dw-vex-basemsg" style="display:none"></div>';
 	L.DomEvent.disableClickPropagation(el);
 	L.DomEvent.disableScrollPropagation(el);
@@ -461,7 +461,7 @@ export function createVexcelControl() {
 		obRequestKey: "",
 		capturePendingKey: "",
 		pendingOblique: false,
-		dir: "nadir",
+		dir: "oblique-north",
 		queried: false,
 		obliqueActive: false,
 		in3d: false,
@@ -480,7 +480,7 @@ export function createVexcelControl() {
 			n.style.display = text ? "block" : "none";
 		},
 	};
-	const dirBtns = [...el.querySelectorAll(".dw-vex-dir")];
+	const dirBtns = [...el.querySelectorAll(".dw-vex-dir[data-dir]")];
 	const irBtn   = el.querySelector(".dw-vex-ir");
 	const flatBtn = el.querySelector(".dw-vex-flat");
 
@@ -591,8 +591,8 @@ export function createVexcelControl() {
 			hideOblique("No Vexcel oblique here — recentre over a flown area."); return;
 		}
 		if (!cellFor(ctl.dir)) {
-			const fallback = VEXCEL_DIRECTIONS.find((d) => cellFor(d.key));
-			if (fallback) ctl.dir = fallback.key;
+			const fallback = dirBtns.find((button) => cellFor(button.dataset.dir));
+			if (fallback) ctl.dir = fallback.dataset.dir;
 		}
 		const cell = cellFor(ctl.dir);
 		if (cell && ctl.band === "irg" && !cell.irg) {
@@ -617,6 +617,11 @@ export function createVexcelControl() {
 			b.classList.toggle("dw-vex-dir--off", ctl.in3d || (!!ctl.obModel && !has));
 			b.disabled = ctl.in3d || (!!ctl.obModel && !has);
 		});
+		if (flatBtn) {
+			flatBtn.classList.toggle("dw-vex-dir--on", !ctl.obliqueActive);
+			flatBtn.classList.toggle("dw-vex-dir--off", ctl.in3d);
+			flatBtn.disabled = ctl.in3d;
+		}
 		updateIrBtn();
 	}
 
@@ -646,16 +651,16 @@ export function createVexcelControl() {
 		if (!_vexcelTokenValid(_getStoredToken()) && !_hasCreds()) {
 			setMsg("Sign in to Vexcel (reselect the base) to load imagery."); return;
 		}
-		if (ctl.obliqueActive && ctl.dir === b.dataset.dir) {
-			hideOblique(); return;
-		}
+		if (ctl.obliqueActive && ctl.dir === b.dataset.dir) return;
 		ctl.dir = b.dataset.dir;
 		ctl.frameGen++;
 		ctl.pendingOblique = true;
 		setMsg("Loading oblique imagery…");
 		ensureObModel(() => { ctl.pendingOblique = false; markActiveDir(); load(); });
 	}));
-	if (flatBtn) flatBtn.addEventListener("click", () => hideOblique());
+	if (flatBtn) flatBtn.addEventListener("click", () => {
+		if (ctl.obliqueActive) hideOblique();
+	});
 
 	if (irBtn) irBtn.addEventListener("click", () => {
 		const toggle = () => {

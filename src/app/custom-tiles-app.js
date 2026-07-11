@@ -1136,20 +1136,17 @@ export class CustomTilesApp {
 			".dw-vex-dir { width: 30px; height: 30px; padding: 0; font-size: 13px; font-weight: 700; background: #fff; color: #444; border: 1px solid #bbb; border-radius: 3px; cursor: pointer; }",
 			".dw-vex-dir:hover { background: #e8f0fb; color: #000; border-color: #888; }",
 			".dw-vex-dir--on { background: #2563eb; color: #fff; border-color: #2563eb; }",
-			// Greyed = no photo for this direction on the selected date
-			// (e.g. ⊙ nadir was only flown some years). Non-clickable.
+			// Greyed = no photo for this direction on the selected date.
 			".dw-vex-dir--off { opacity: 0.35; cursor: default; background: #f3f4f6; }",
 			".dw-vex-dir--off:hover { background: #f3f4f6; color: #444; border-color: transparent; }",
 			// Near-infrared band toggle (vegetation → red). Sits under the
-			// compass rose; greyed where no IR band exists (SCC: nadir 2025).
+			// compass rose; greyed where no IR band exists.
 			".dw-vex-ir { display: block; width: 96px; margin: 6px auto 0; padding: 4px 0; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; background: #fff; color: #444; border: 1px solid #bbb; border-radius: 3px; cursor: pointer; }",
 			".dw-vex-ir:hover:not(:disabled) { background: #fdecec; color: #b91c1c; border-color: #dca; }",
 			".dw-vex-ir:disabled { opacity: 0.4; cursor: not-allowed; background: #f3f4f6; color: #777; }",
 			".dw-vex-ir--on { background: #dc2626; color: #fff; border-color: #dc2626; }",
 			".dw-vex-ir--on:hover { background: #dc2626 !important; color: #fff !important; }",
-			".dw-vex-flat { display: none; width: 96px; margin: 4px auto 0; padding: 4px 0; font-size: 10px; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; border-radius: 3px; cursor: pointer; }",
-			".dw-vex-flat:hover { background: #dbeafe; border-color: #93c5fd; }",
-			".dw-vex-ctl--active .dw-vex-flat { display: block; }",
+			".dw-vex-flat { font-size: 10px; }",
 			".dw-vex-basemsg { max-width: 150px; margin: 6px auto 0; padding: 5px 7px; font-size: 10.5px; line-height: 1.35; color: #7a2e2e; background: #fdecec; border: 1px solid #f0c0c0; border-radius: 3px; text-align: center; }",
 			".dw-vex-ctl--active { box-shadow: 0 0 0 2px rgba(37,99,235,0.3), 0 1px 6px rgba(0,0,0,0.35); }",
 			".dw-3d-active .dw-vex-ctl { display: none; }",

@@ -182,9 +182,11 @@ npm run e2e:vexcel-editing:headed
 
 Uses the live dynamic.watch planner UI with deterministic mocked Vexcel
 query, tile, and transform endpoints. It rapidly adds a straight-line route,
-inserts and drags a route point, adds and drags a standalone waypoint, deletes
-a route point through its popup, and verifies unrelated Leaflet overlays retain
-their own clicks. No production Vexcel token is required.
+inserts and drags a route point, then rotates through N/E/S/W camera transforms
+and inserts/undoes a point at every angle while checking line continuity and
+paint order. It also tests the center `2D` action, standalone waypoints, route
+deletion, and unrelated Leaflet overlay clicks. No production Vexcel token is
+required.
 
 ## What the snapshot contains
 
