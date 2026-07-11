@@ -579,7 +579,6 @@ export function createVexcelControl() {
 	};
 
 	const loadFrame = (frame, preserveScale) => {
-		setFlatSuppressed(false);
 		const base = _vexcelObliqueTileBase(
 			frame.name, frame.layer, _getStoredToken(), _getStoredSession());
 		if (!base) {
@@ -595,6 +594,7 @@ export function createVexcelControl() {
 			ctl._frame.tileBase === next.tileBase) {
 			markActiveDir(); return;
 		}
+		setFlatSuppressed(false);
 		ctl._frame = next;
 		ctl.obliqueActive = true;
 		el.classList.add("dw-vex-ctl--active");
@@ -680,6 +680,8 @@ export function createVexcelControl() {
 		const direction = ctl.dir, band = ctl.band;
 		const fastGeneration = ctl.frameGen;
 		const loadFromModel = () => ensureObModel(() => {
+			if (!ctl._map || fastGeneration !== ctl.frameGen || direction !== ctl.dir ||
+				band !== ctl.band || !ctl.pendingOblique) return;
 			ctl.pendingOblique = false; markActiveDir(); load();
 		});
 		if (!center) { loadFromModel(); return; }

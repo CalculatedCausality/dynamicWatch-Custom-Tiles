@@ -229,11 +229,27 @@ const panBefore = await page.evaluate(() => ({
 	tiles: [...document.querySelectorAll(".dw-vex-warp-tile-loaded")].map((tile) => tile.dataset.tile),
 }));
 const frameQueriesBeforePan = frameQueryCount;
-await page.mouse.move(mapBox.x + mapBox.width / 2, mapBox.y + mapBox.height / 2);
-await page.mouse.down();
-await page.mouse.move(mapBox.x + mapBox.width / 2, mapBox.y + mapBox.height / 2 + 30,
-	{ steps: 8 });
-await page.mouse.up();
+let maxReleaseJump = 0;
+for (const [dx, dy] of [[0, 30], [35, 0], [0, -25], [-30, 0]]) {
+	const x = mapBox.x + mapBox.width / 2, y = mapBox.y + mapBox.height / 2;
+	await page.mouse.move(x, y);
+	await page.mouse.down();
+	await page.mouse.move(x + dx, y + dy, { steps: 5 });
+	const beforeRelease = await page.evaluate(({ width, height }) => {
+		const svg = document.querySelector(".dw-vex-route");
+		const point = new DOMPoint(width / 2, height / 2).matrixTransform(svg.getScreenCTM());
+		return { x: point.x, y: point.y };
+	}, { width: WIDTH, height: HEIGHT });
+	await page.mouse.up();
+	const afterRelease = await page.evaluate(({ width, height }) => {
+		const svg = document.querySelector(".dw-vex-route");
+		const point = new DOMPoint(width / 2, height / 2).matrixTransform(svg.getScreenCTM());
+		return { x: point.x, y: point.y };
+	}, { width: WIDTH, height: HEIGHT });
+	maxReleaseJump = Math.max(maxReleaseJump,
+		Math.hypot(afterRelease.x - beforeRelease.x, afterRelease.y - beforeRelease.y));
+	await page.waitForTimeout(25);
+}
 await page.waitForTimeout(800);
 const panAfter = await page.evaluate(({ west, east, north, south, width, height, curve }) => {
 	const map = window.leafletPlan.map;
@@ -260,6 +276,12 @@ const panState = {
 	frameQueries: frameQueryCount - frameQueriesBeforePan,
 	retention: panBefore.tiles.length ? retainedTiles / panBefore.tiles.length : 0,
 	centerError: panAfter.centerError,
+	maxReleaseJump,
+	baseStillSuppressed: await page.evaluate(() => {
+		const entry = window._dwLayerCtrl._layers.find((item) => item.name === "Vexcel Aerial");
+		const container = entry?.layer?.getContainer?.() || entry?.layer?._container;
+		return !!container?.classList.contains("dw-vex-flat-suppressed");
+	}),
 };
 const first = { x: mapBox.x + mapBox.width * 0.38, y: mapBox.y + mapBox.height * 0.48 };
 const second = { x: mapBox.x + mapBox.width * 0.64, y: mapBox.y + mapBox.height * 0.55 };
@@ -808,7 +830,7 @@ if (initialEastTileRequests > 24) {
 	failures.push(`initial oblique over-fetched ${initialEastTileRequests} tiles`);
 }
 if (!panState.sameFrame || panState.frameQueries !== 0 || panState.retention < 0.7 ||
-	panState.centerError > 1) {
+	panState.centerError > 1 || panState.maxReleaseJump > 1 || !panState.baseStillSuppressed) {
 	failures.push(`small oblique pan reloaded or lost its camera center: ${JSON.stringify(panState)}`);
 }
 if (!offFrameRouteOk) failures.push("off-frame route was reported as an unavailable projection");

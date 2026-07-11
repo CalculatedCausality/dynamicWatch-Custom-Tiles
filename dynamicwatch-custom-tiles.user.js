@@ -3294,6 +3294,7 @@
         this._baseZoom = 0;
         this._centerPixel = null;
         this._centerPixelKey = "";
+        this._centerLatLng = null;
         this._centerRequestKey = "";
         this._centerHandle = null;
         this._panHandle = null;
@@ -3479,6 +3480,7 @@
         if (!frame.preserveScale) this._nativeScale = 0;
         this._centerPixel = null;
         this._centerPixelKey = "";
+        this._centerLatLng = null;
         this._centerRequestKey = "";
         this._routeExact = false;
         this._routeError = false;
@@ -3497,6 +3499,7 @@
         this._nativeScale = 0;
         this._centerPixel = null;
         this._centerPixelKey = "";
+        this._centerLatLng = null;
         this._centerRequestKey = "";
         this._cancelProjectionRequests();
         this._clearTiles();
@@ -3568,7 +3571,9 @@
         const provisionalKey = center.lat.toFixed(6) + "," + center.lng.toFixed(6);
         this._centerPixel = target;
         this._centerPixelKey = provisionalKey;
+        this._centerLatLng = L.latLng(center);
         this._centerRequestKey = "";
+        this._update();
         if (this._panHandle && typeof this._panHandle.abort === "function") this._panHandle.abort();
         const generation = this._generation, frame = this._frame;
         let handle = null;
@@ -3579,6 +3584,7 @@
             const corrected = L.latLng(point[1], point[0]);
             this._centerPixel = target;
             this._centerPixelKey = corrected.lat.toFixed(6) + "," + corrected.lng.toFixed(6);
+            this._centerLatLng = corrected;
             this._centerRequestKey = "";
             this._map.setView(corrected, start.zoom, { animate: false });
           } else {
@@ -3602,7 +3608,20 @@
         const scale = this._scale();
         const mapCenter = this._map.getCenter();
         const centerKey = mapCenter.lat.toFixed(6) + "," + mapCenter.lng.toFixed(6);
-        const center = this._centerPixelKey === centerKey && this._centerPixel ? this._centerPixel : this._fallbackPixel(mapCenter);
+        let center;
+        if (this._centerPixelKey === centerKey && this._centerPixel) {
+          center = this._centerPixel;
+        } else if (this._centerPixel && this._centerLatLng) {
+          const zoom = this._map.getZoom();
+          const previous = this._map.project(this._centerLatLng, zoom);
+          const current = this._map.project(mapCenter, zoom);
+          center = [
+            this._centerPixel[0] + (current.x - previous.x) / scale,
+            this._centerPixel[1] + (current.y - previous.y) / scale
+          ];
+        } else {
+          center = this._fallbackPixel(mapCenter);
+        }
         const size = this._map.getSize();
         const layerCenter = this._map.containerPointToLayerPoint([size.x / 2, size.y / 2]);
         const left = layerCenter.x - center[0] * scale;
@@ -3937,8 +3956,9 @@
         const required = /* @__PURE__ */ new Set();
         const tiles = this._chooseTiles(layout);
         for (const tile of tiles) required.add(tile.downsample + "/" + tile.x + "/" + tile.y);
+        this._requiredTiles = required;
         for (const [key, tile] of this._tiles) {
-          if (!required.has(key)) this._removeTile(key, tile);
+          if (!required.has(key) && !tile.loaded) this._removeTile(key, tile);
         }
         const currentBase = options.tileBase ? options.tileBase(this._frame) : this._frame.tileBase;
         for (const tile of tiles) {
@@ -3959,7 +3979,18 @@
           }
         }
         this._pump();
+        this._pruneStaleTiles();
         this._notify();
+      },
+      _pruneStaleTiles() {
+        if (!this._requiredTiles || !this._requiredTiles.size) return;
+        for (const key of this._requiredTiles) {
+          const tile = this._tiles.get(key);
+          if (!tile || !tile.loaded) return;
+        }
+        for (const [key, tile] of [...this._tiles]) {
+          if (!this._requiredTiles.has(key)) this._removeTile(key, tile);
+        }
       },
       _createTile(key, tile) {
         const root = document.createElement("div");
@@ -4009,6 +4040,7 @@
             if (pixels && pixels[0] && isFinite(pixels[0][0]) && isFinite(pixels[0][1])) {
               this._centerPixel = pixels[0];
               this._centerPixelKey = key;
+              this._centerLatLng = L.latLng(center);
               this._update();
             }
             if (this._centerRequestKey === key) this._centerRequestKey = "";
@@ -4279,6 +4311,7 @@
             tile.loaded = true;
             tile.root.classList.add("dw-vex-warp-tile-loaded");
             tile.img.style.opacity = "1";
+            this._pruneStaleTiles();
             this._notify();
             if (this._routeDeferred) {
               this._routeDeferred = false;
@@ -4312,6 +4345,7 @@
       },
       _clearTiles() {
         this._queue = [];
+        this._requiredTiles = null;
         for (const [key, tile] of [...this._tiles]) this._removeTile(key, tile);
         this._inflight = 0;
       },
@@ -4819,7 +4853,6 @@
       ctl._fire("overlaytoggle");
     };
     const loadFrame = (frame, preserveScale) => {
-      setFlatSuppressed(false);
       const base = _vexcelObliqueTileBase(
         frame.name,
         frame.layer,
@@ -4839,6 +4872,7 @@
         markActiveDir();
         return;
       }
+      setFlatSuppressed(false);
       ctl._frame = next;
       ctl.obliqueActive = true;
       el.classList.add("dw-vex-ctl--active");
@@ -4929,6 +4963,7 @@
       const direction = ctl.dir, band = ctl.band;
       const fastGeneration = ctl.frameGen;
       const loadFromModel = () => ensureObModel(() => {
+        if (!ctl._map || fastGeneration !== ctl.frameGen || direction !== ctl.dir || band !== ctl.band || !ctl.pendingOblique) return;
         ctl.pendingOblique = false;
         markActiveDir();
         load();
