@@ -26,6 +26,7 @@ The stock dynamicWatch map only ships with OpenStreetMap/topo. This script adds 
 | **Apple Maps** | 19 | Apple's vector-styled dark map; uses an auto-refreshing access key sourced via DuckDuckGo |
 | **Stamen Terrain** | 18 | Colour-shaded relief with optional labels; sourced via Stadia Maps with a localhost-spoofed Origin |
 | **Esri Wayback** | 19 | Esri's archive of every World Imagery release; a date scrubber appears in the top-centre when active |
+| **Vexcel Aerial** | 21 | Vexcel's dated high-res aerial mosaic (ANZ program) with a capture-date scrubber, near-infrared toggle, and an oblique compass — see [Vexcel obliques](#vexcel-obliques) below. Needs a free Vexcel viewer login |
 
 **Queensland**
 
@@ -46,6 +47,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 | Layer | Notes |
 |---|---|
 | **QLD Cadastre** | Property/parcel boundaries; hover for lot/plan, tenure, area, locality, plus a **Sales ↗** link that pulls recent sale history from OnTheHouse |
+| **SCC Applications** | Sunshine Coast Council development/building/plumbing applications as colour-coded markers; an on-map submenu picks current vs decided sets; popups carry the full record, property history, documents, and a deep link into Development.i |
 | **QPWS Estate** | Protected areas, walking tracks, great walks, MTB/horse/trail-bike trails; hover for name + type |
 | **QLD Relief** | Hillshade overlay at ~45% opacity for terrain context |
 
@@ -89,7 +91,11 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 
 ### Historical & Wayback scrubbers
 
-When **QLD Historical** is active, a horizontal scrubber bar appears at the top of the map with prev/next arrows, a range slider, and the current capture date. Slide or click the arrows to step through every capture available at the current view. Panning to a new area refreshes the catalog automatically. **Esri Wayback** uses the same scrubber to step through every World Imagery release going back to 2014.
+When **QLD Historical** is active, a horizontal scrubber bar appears at the top of the map with prev/next arrows, a range slider, and the current capture date. Slide or click the arrows to step through every capture available at the current view. Panning to a new area refreshes the catalog automatically. **Esri Wayback** uses the same scrubber to step through every World Imagery release going back to 2014, and **Vexcel Aerial** uses it to step through Vexcel's dated captures.
+
+### Vexcel obliques
+
+When **Vexcel Aerial** is the active base, a compass control docks on the map. Its centre button shows the flat vertical mosaic; the four cardinal buttons swap in the matching **oblique** (45°) aerial photo, warped in perspective directly on the primary map — panning, zooming, and the planner all keep working, and your route is re-projected onto the photo's own pixels so it hugs the terrain in the oblique view. The shared date scrubber steps through captures for whichever view is active, and an **IR** toggle switches the mosaic to near-infrared.
 
 ### Hover identify
 
@@ -149,6 +155,8 @@ Quick-reference table — what you need to log in to for each layer to render.
 | Apple Maps | No | DuckDuckGo MapKit JWT → Apple accessKey | 30-min token, auto-refreshed |
 | Stamen Terrain | No | Stadia Maps keyless endpoint | `localhost` Origin spoof via GM_xmlhttpRequest |
 | Esri Wayback | No | None | Public catalog + tiles |
+| Vexcel Aerial | Yes | Vexcel viewer account | Paste `email:password` once (stored on-device, daily JWT auto-refreshed) or a one-off token/URL from the Vexcel viewer |
+| SCC Applications | No | None | Public ArcGIS Feature Layers + Development.i endpoints |
 | OpenSeaMap | No | None | Public tiles |
 | Strava Heatmap | No | Anonymous Strava endpoint | Capped at zoom 10 (higher zoom requires signed cookies) |
 | Garmin Heatmap | No | Anonymous Garmin Connect tile feeds | 5 sub-feeds blended additively on canvas |
@@ -205,7 +213,7 @@ bash tests/run.sh        # run suites against current bundle
 bash tests/run.sh --ci   # plain text output
 ```
 
-- **`unit.mjs`** (57 tests, no network, ~200 ms) — pure helpers: tile geometry, MVT/protobuf decode, Cadastre formatters, OnTheHouse URL builders, INTVL date utilities, layer-provider factories, and layer-group registration. Loaded into a sandboxed `vm.createContext` via [`_loader.mjs`](tests/_loader.mjs) so the production code itself is what gets exercised.
+- **`unit.mjs`** (102 tests, no network, ~200 ms) — pure helpers: tile geometry, MVT/protobuf decode, Cadastre formatters, OnTheHouse URL builders, INTVL date utilities, layer-provider factories, and layer-group registration. Loaded into a sandboxed `vm.createContext` via [`_loader.mjs`](tests/_loader.mjs) so the production code itself is what gets exercised.
 - **`smoke.sh`** (34 tests + 7 skips, ~15 s) — HTTP probe every public layer endpoint over Brisbane CBD: HTTP 200 + content-type + minimum body size. Mapbox Terrain-DEM is skipped unless `MAPBOX_TOKEN` is set.
 - **`shape.mjs`** (42 tests + 2 skips, ~15 s) — deep structural validation: PNG/JPEG magic-byte sniff, PBF decoded via the userscript's own `mvtDecode`, JSON field walks asserting every field the script reads. Also runs the full QLD CSRF token bootstrap, Apple DuckDuckGo → bootstrap chain, and the Esri Wayback catalog → release → tile pipeline end-to-end. Mapbox terrain probes are opt-in via `MAPBOX_TOKEN`.
 - **`e2e/run-3d-asserts.mjs`** (8 tests, ~60 s) — Playwright-driven assertions on a real Chromium against a saved plan. Covers 3D enable, marker reprojection under rotation, waypoint drag, the rapid-toggle stress path, heatmap persistence, overlay-above-base layer order, and the 3D → 2D → 3D cycle. Needs `npm install` + `npm run e2e:install` + `npm run e2e:auth` once; see [`tests/e2e/README.md`](tests/e2e/README.md).

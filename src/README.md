@@ -30,7 +30,12 @@ Current modules:
 - `src/providers/qld-cadastre.js` — QLD Cadastre provider plus OnTheHouse sales/address helpers.
 - `src/providers/qld-environment.js` — QPWS Estate, National Parks, and their ArcGIS query layer helper.
 - `src/providers/qld-imagery.js` — QLD Roads and QLD Historical imagery providers.
+- `src/providers/scc-applications.js` — Sunshine Coast Council development-application overlay (Development.i APIs).
 - `src/providers/stamen-terrain.js` — Stamen Terrain provider.
+- `src/providers/vexcel.js` — Vexcel Aerial base map: dated ortho mosaic, IR toggle, oblique metadata queries, and route pixel projection.
+- `src/providers/vexcel-auth.js` — Vexcel credential/token persistence, login coalescing, session minting, and required request headers.
+- `src/providers/vexcel-oblique-layer.js` — warped oblique imagery pane on the primary map (tile warp, frame transitions, compass control).
+- `src/providers/waze-token.js` — Waze reCAPTCHA Enterprise token broker for the georss live-map API.
 - `src/providers/wayback.js` — Esri Wayback provider.
 - `src/runtime/mode-3d.js` — Mapbox GL terrain controller and planner-toolbar 3D toggle button.
 - `src/tokens.js` — QLD and Apple short-lived token managers.

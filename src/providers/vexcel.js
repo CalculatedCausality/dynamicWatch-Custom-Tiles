@@ -180,8 +180,9 @@ export function fetchVexcelObliques(lat, lng, cb) {
 function _fetchVexcelObliques(lat, lng, token, session, cb) {
 	if (!_vexcelTokenValid(token)) { cb(null); return; }
 	gmJsonGet(
-		CFG.VEXCEL_API_BASE + "/v2/oriented/query?session=" +
-			encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
+		CFG.VEXCEL_API_BASE + "/v2/oriented/query?" +
+			(session ? "session=" + encodeURIComponent(session) + "&" : "") +
+			"token=" + encodeURIComponent(token),
 		{
 			method: "POST",
 			data: JSON.stringify({
@@ -242,8 +243,9 @@ function _fetchVexcelFrame(lng, lat, collection, dir, band, token, session, cb) 
 	};
 	if (collection) query.collection = collection;
 	gmJsonGet(
-		CFG.VEXCEL_API_BASE + "/v2/oriented/query?session=" +
-			encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
+		CFG.VEXCEL_API_BASE + "/v2/oriented/query?" +
+			(session ? "session=" + encodeURIComponent(session) + "&" : "") +
+			"token=" + encodeURIComponent(token),
 		{
 			method: "POST",
 			data: JSON.stringify(query),
@@ -283,7 +285,7 @@ export function fetchVexcelPixelPoints(frame, points, operation, cb) {
 			this.handles = [];
 		},
 	};
-	_ensureQueryAuth((token) => {
+	_ensureQueryAuth((token, session) => {
 		if (request.aborted) return;
 		if (!token) { request.completed = true; cb(null); return; }
 		const chunks = [];
@@ -305,8 +307,9 @@ export function fetchVexcelPixelPoints(frame, points, operation, cb) {
 					: `LINESTRING(${coords.join(",")})`;
 				let handle = null;
 				handle = gmJsonGet(
-				CFG.VEXCEL_API_BASE + "/v2/oriented/transform-points?token=" +
-					encodeURIComponent(token),
+				CFG.VEXCEL_API_BASE + "/v2/oriented/transform-points?" +
+					(session ? "session=" + encodeURIComponent(session) + "&" : "") +
+					"token=" + encodeURIComponent(token),
 				{
 					method: "POST",
 					data: JSON.stringify({
@@ -374,8 +377,9 @@ export function fetchVexcelOrthoDates(lat, lng, cb) {
 		gmJsonGet(
 			CFG.VEXCEL_API_BASE + "/v2/ortho/collections?wkt=" +
 				encodeURIComponent(`POINT(${Number(lng)} ${Number(lat)})`) +
-				"&srid=4326&layer=urban,wide-area&session=" +
-				encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
+				"&srid=4326&layer=urban,wide-area" +
+				(session ? "&session=" + encodeURIComponent(session) : "") +
+				"&token=" + encodeURIComponent(token),
 			{ headers: _vexcelOriginHeaders() },
 			(err, data, raw) => {
 				if (raw && (raw.status === 401 || raw.status === 403)) { cb(null, "auth"); return; }

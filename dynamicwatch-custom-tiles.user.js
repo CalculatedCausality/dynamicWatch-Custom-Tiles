@@ -2939,7 +2939,8 @@
   function _vexcelOriginHeaders(extra) {
     return Object.assign({
       Origin: CFG.VEXCEL_SPOOF_ORIGIN,
-      Referer: CFG.VEXCEL_SPOOF_ORIGIN + "/"
+      Referer: CFG.VEXCEL_SPOOF_ORIGIN + "/",
+      "X-App-Key": CFG.VEXCEL_APP_HDR
     }, extra || {});
   }
   var VEXCEL_BAKED_USER = "szxc61qc8@mozmail.com";
@@ -3001,6 +3002,13 @@
         }
       }
     };
+    const acceptToken = (tok) => {
+      if (!_vexcelTokenValid(tok)) return false;
+      _storeToken(tok);
+      _loginCooldownUntil = 0;
+      done(tok, null);
+      return true;
+    };
     gmJsonGet(
       CFG.VEXCEL_ADMIN_BASE + "/api/auth/authenticate",
       {
@@ -3027,14 +3035,10 @@
           return;
         }
         const tok = data.data && data.data.token;
-        if (!_vexcelTokenValid(tok)) {
+        if (!acceptToken(tok)) {
           _storeCreds("", "");
           done(null, "badcreds");
-          return;
         }
-        _storeToken(tok);
-        _loginCooldownUntil = 0;
-        done(tok, null);
       }
     );
   }
@@ -4657,7 +4661,7 @@
       return;
     }
     gmJsonGet(
-      CFG.VEXCEL_API_BASE + "/v2/oriented/query?session=" + encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
+      CFG.VEXCEL_API_BASE + "/v2/oriented/query?" + (session ? "session=" + encodeURIComponent(session) + "&" : "") + "token=" + encodeURIComponent(token),
       {
         method: "POST",
         data: JSON.stringify({
@@ -4718,7 +4722,7 @@
     };
     if (collection) query.collection = collection;
     gmJsonGet(
-      CFG.VEXCEL_API_BASE + "/v2/oriented/query?session=" + encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
+      CFG.VEXCEL_API_BASE + "/v2/oriented/query?" + (session ? "session=" + encodeURIComponent(session) + "&" : "") + "token=" + encodeURIComponent(token),
       {
         method: "POST",
         data: JSON.stringify(query),
@@ -4763,7 +4767,7 @@
         this.handles = [];
       }
     };
-    _ensureQueryAuth((token) => {
+    _ensureQueryAuth((token, session) => {
       if (request.aborted) return;
       if (!token) {
         request.completed = true;
@@ -4787,7 +4791,7 @@
           const wkt = coords.length === 1 ? `POINT(${coords[0]})` : `LINESTRING(${coords.join(",")})`;
           let handle = null;
           handle = gmJsonGet(
-            CFG.VEXCEL_API_BASE + "/v2/oriented/transform-points?token=" + encodeURIComponent(token),
+            CFG.VEXCEL_API_BASE + "/v2/oriented/transform-points?" + (session ? "session=" + encodeURIComponent(session) + "&" : "") + "token=" + encodeURIComponent(token),
             {
               method: "POST",
               data: JSON.stringify({
@@ -4841,7 +4845,7 @@
         return;
       }
       gmJsonGet(
-        CFG.VEXCEL_API_BASE + "/v2/ortho/collections?wkt=" + encodeURIComponent(`POINT(${Number(lng)} ${Number(lat)})`) + "&srid=4326&layer=urban,wide-area&session=" + encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
+        CFG.VEXCEL_API_BASE + "/v2/ortho/collections?wkt=" + encodeURIComponent(`POINT(${Number(lng)} ${Number(lat)})`) + "&srid=4326&layer=urban,wide-area" + (session ? "&session=" + encodeURIComponent(session) : "") + "&token=" + encodeURIComponent(token),
         { headers: _vexcelOriginHeaders() },
         (err, data, raw) => {
           if (raw && (raw.status === 401 || raw.status === 403)) {

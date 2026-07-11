@@ -150,6 +150,7 @@ export function _vexcelOriginHeaders(extra) {
 	return Object.assign({
 		Origin: CFG.VEXCEL_SPOOF_ORIGIN,
 		Referer: CFG.VEXCEL_SPOOF_ORIGIN + "/",
+		"X-App-Key": CFG.VEXCEL_APP_HDR,
 	}, extra || {});
 }
 
@@ -203,6 +204,13 @@ export function _vexcelLogin(cb) {
 		_loginInFlight = null;
 		for (const w of waiters) { try { w(tok, reason); } catch (_) {} }
 	};
+	const acceptToken = (tok) => {
+		if (!_vexcelTokenValid(tok)) return false;
+		_storeToken(tok);
+		_loginCooldownUntil = 0;
+		done(tok, null);
+		return true;
+	};
 	gmJsonGet(
 		CFG.VEXCEL_ADMIN_BASE + "/api/auth/authenticate",
 		{
@@ -226,14 +234,10 @@ export function _vexcelLogin(cb) {
 			}
 			if (err || !data) { done(null, "neterr"); return; }
 			const tok = data.data && data.data.token;
-			if (!_vexcelTokenValid(tok)) {
+			if (!acceptToken(tok)) {
 				_storeCreds("", "");
 				done(null, "badcreds");
-				return;
 			}
-			_storeToken(tok);
-			_loginCooldownUntil = 0;
-			done(tok, null);
 		},
 	);
 }

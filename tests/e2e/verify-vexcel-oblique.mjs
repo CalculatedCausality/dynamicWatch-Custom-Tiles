@@ -3,7 +3,9 @@
 // warped into a pane below the native route, map interaction stays active,
 // and direction/date/band changes replace the selected frame.
 //
-//   VEXCEL_TOKEN=<jwt-or-url> npm run e2e:vexcel-oblique
+//   npm run e2e:vexcel-oblique
+// A supplied VEXCEL_TOKEN is still accepted; otherwise the userscript uses
+// its normal stored-credential/default login flow and mints one in-browser.
 import { chromium } from "playwright";
 import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -20,11 +22,15 @@ const tokMatch =
 	rawTok.match(/token=([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/) ||
 	rawTok.match(/^([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/);
 const TOKEN = tokMatch ? tokMatch[1] : "";
-if (!TOKEN) { console.error("set VEXCEL_TOKEN"); process.exit(2); }
 try {
+	if (!TOKEN) throw new Error("auto-login");
 	const exp = JSON.parse(Buffer.from(TOKEN.split(".")[1], "base64url").toString()).exp * 1000;
 	if (exp < Date.now()) { console.error(`token expired ${new Date(exp).toISOString()}`); process.exit(2); }
-} catch { console.error("VEXCEL_TOKEN not a JWT"); process.exit(2); }
+} catch (error) {
+	if (TOKEN || error.message !== "auto-login") {
+		console.error("VEXCEL_TOKEN not a JWT"); process.exit(2);
+	}
+}
 
 const browser = await chromium.launch({
 	headless: !process.env.HEADED,
@@ -33,10 +39,18 @@ const browser = await chromium.launch({
 const context = await browser.newContext({ storageState: STATE_PATH, viewport: { width: 1400, height: 900 } });
 
 let queryOk = false, transform200 = 0, tile200 = 0, tileOther = 0;
+const apiFailures = []; // status-only trail of non-200 API responses, printed on FAIL
+const authStatuses = [];
 const tileCoords = [];
 const tileImages = []; // image-name per tile request (for frame-switch check)
 context.on("response", (resp) => {
 	const u = resp.url();
+	if (/\/v2\/auth\/login|admin\.vexcelgroup\.com\/api\/auth\/authenticate/.test(u)) {
+		authStatuses.push(`${resp.status()} ${u.includes("/v2/auth/login") ? "API" : "viewer"}`);
+	}
+	if (/\/v2\/oriented\/(query|transform-points|tile)/.test(u) && resp.status() !== 200) {
+		apiFailures.push(`${resp.status()} ${u.replace(/([?&](token|session))=[^&]+/g, "$1=…")}`.slice(0, 200));
+	}
 	if (u.includes("/v2/oriented/query")) queryOk = queryOk || resp.status() === 200;
 	if (u.includes("/v2/oriented/transform-points") && resp.status() === 200) transform200++;
 	if (u.includes("/v2/oriented/tile")) {
@@ -49,15 +63,26 @@ context.on("response", (resp) => {
 });
 
 await context.addInitScript({ content: readFileSync(resolve(__dirname, "lib", "bootstrap.js"), "utf8") });
-await context.addInitScript({ content:
-	`try { localStorage.setItem("GM:dw_vexcel_token", ${JSON.stringify(JSON.stringify(TOKEN))}); } catch (_) {}` });
+await context.addInitScript({ content: TOKEN
+	? `try { localStorage.setItem("GM:dw_vexcel_token", ${JSON.stringify(JSON.stringify(TOKEN))}); } catch (_) {}`
+	: `try {
+		localStorage.removeItem("GM:dw_vexcel_token");
+		localStorage.removeItem("GM:dw_vexcel_session");
+	} catch (_) {}` });
 await context.addInitScript({ content: readFileSync(resolve(REPO_ROOT, "dynamicwatch-custom-tiles.user.js"), "utf8") });
 
 const page = await context.newPage();
 const logs = [];
 page.on("console", (m) => logs.push(`${m.type()}: ${m.text()}`));
 
-await page.goto("https://dynamic.watch/plan", { waitUntil: "domcontentloaded", timeout: 45_000 });
+let navigated = false;
+for (let attempt = 0; attempt < 5 && !navigated; attempt++) {
+	if (attempt) await page.waitForTimeout(1000);
+	navigated = await page.goto("https://dynamic.watch/plan", {
+		waitUntil: "domcontentloaded", timeout: 45_000,
+	}).then(() => true).catch(() => false);
+}
+if (!navigated) throw new Error("dynamic.watch planner navigation failed after 5 attempts");
 await page.waitForSelector(".leaflet-planner-controls", { timeout: 30_000 });
 const nukeModal = () => page.evaluate(() => {
 	document.querySelectorAll(".modal, .modal-backdrop").forEach(el => el.remove());
@@ -78,10 +103,21 @@ const set = await page.evaluate(() => {
 	ctrl._layers.filter((l) => !l.overlay).forEach((l) => {
 		if (l.layer !== vex && map.hasLayer(l.layer)) map.removeLayer(l.layer);
 	});
-	if (!map.hasLayer(vex)) map.addLayer(vex);
+	// Force the provider's selection-time auth hook even when storageState
+	// restored Vexcel as the already-selected base before this test attached.
+	if (map.hasLayer(vex)) map.removeLayer(vex);
+	map.addLayer(vex);
 	return { ok: true };
 });
 if (!set.ok) { console.error("Vexcel base missing"); await browser.close(); process.exit(1); }
+
+const tokenReady = await page.waitForFunction(() => {
+	try {
+		const token = JSON.parse(localStorage.getItem("GM:dw_vexcel_token") || '""');
+		return String(token).split(".").length === 3;
+	} catch (_) { return false; }
+}, undefined, { timeout: 30_000 }).then(() => true).catch(() => false);
+console.log(`Vexcel token ready (${TOKEN ? "provided" : "minted"}): ${tokenReady}`);
 
 // The blank planner has no saved route. Add one using the same leafletPlan
 // shape the provider reads, so it can be projected into Vexcel image pixels.
@@ -222,7 +258,8 @@ const viewer = await page.evaluate(() => {
 	const tiles = document.querySelectorAll(".dw-vex-warp-tile-loaded").length;
 	const msg = el.querySelector(".dw-vex-basemsg");
 	const warpZ = pane ? Number(getComputedStyle(pane).zIndex) : 0;
-	const routeZ = Number(getComputedStyle(map.getPane("dwVexcelRoutePane")).zIndex);
+	const routePane = map.getPane("dwVexcelRoutePane");
+	const routeZ = routePane ? Number(getComputedStyle(routePane).zIndex) : 0;
 	return {
 		present: !!el,
 		dirs,
@@ -248,6 +285,7 @@ console.log("\n=== Vexcel imagery control verification ===");
 console.log(`  oriented/query 200:  ${queryOk}`);
 console.log(`  transform-points 200: ${transform200}`);
 console.log(`  oriented/tile 200: ${tile200}  (other: ${tileOther})`);
+	console.log(`  auth attempts: ${authStatuses.join(", ") || "none"}`);
 console.log(`  control directions: ${JSON.stringify(viewer.dirs)}`);
 console.log(`  capture slider steps: ${viewer.dates.length} (enabled: ${viewer.sliderEnabled}, year: ${viewer.year})`);
 console.log(`  tiles rendered: ${viewer.tilesLoaded}  msg: "${viewer.msg}"`);
@@ -265,11 +303,15 @@ const routeOk = routeSurface.warpOnMainMap && routeSurface.warpPointerEvents ===
 	routeSurface.nativeRouteHidden && routeSurface.projectedRouteVisible &&
 	routeSurface.perspectivePreserved && routeSurface.flatBaseReplaced &&
 	routeSurface.exactRoute && transform200 > 0;
-const ok = queryOk && modelOk && tilesOk && panLoadsTiles && barGating &&
+const ok = tokenReady && queryOk && modelOk && tilesOk && panLoadsTiles && barGating &&
 	flatOk && reopenOk && continuousPan && routeOk && mapMoved;
 console.log(`  date bar on basemap: ${barGating}  |  center 2D: ${flatOk}  |  reopen oblique: ${reopenOk}  |  continuous pan (frame switch): ${continuousPan}`);
 console.log(`  primary-map warp + native route stacking: ${routeOk}`);
 console.log(`  primary map moved under drag: ${mapMoved}`);
+if (!ok && apiFailures.length) {
+	console.log(`  non-200 Vexcel API responses (first 8):`);
+	apiFailures.slice(0, 8).forEach((line) => console.log(`    ${line}`));
+}
 console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — Vexcel oblique ${ok ? "keeps perspective with a projected route" : "did not fully verify"}`);
 await browser.close();
 process.exit(ok ? 0 : 1);

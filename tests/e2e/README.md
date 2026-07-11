@@ -173,6 +173,24 @@ Each run writes:
 
 `test-results/` is gitignored.
 
+### Vexcel Aerial suite
+
+```bash
+npm run e2e:vexcel            # base renders in 2D (WMTS 200s) + 3D (direct CORS)
+npm run e2e:vexcel-oblique    # oblique warp on the primary map + projected route
+npm run e2e:vexcel-angles     # cycle all four cardinal obliques, screenshot each
+npm run e2e:vexcel-labels     # Esri reference labels ride on the Vexcel base
+npm run e2e:vexcel-autologin  # VEXCEL_USER/VEXCEL_PASS creds silently mint a JWT
+npm run e2e:vexcel-reprompt   # rejected (403) token re-prompts instead of blanking
+```
+
+Live-API tests. `verify-vexcel-oblique` accepts an optional
+`VEXCEL_TOKEN=<jwt-or-url>`; without one the userscript's own
+stored-credential/default login mints a token in-browser. The others that
+need auth take `VEXCEL_TOKEN` (or `VEXCEL_USER`/`VEXCEL_PASS` for
+autologin). `diag-vexcel-flow.mjs` and `diag-vexcel-coverage.mjs` are the
+matching non-pass/fail diagnostics for auth-flow and coverage triage.
+
 ### Vexcel perspective editing
 
 ```bash

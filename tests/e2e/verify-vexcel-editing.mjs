@@ -53,6 +53,7 @@ const context = await browser.newContext({
 	storageState: STATE, viewport: { width: 1400, height: 900 }, hasTouch: true,
 });
 let worldToPixel = 0, pixelToWorld = 0, pixelFallbacks = 0;
+let transformsWithoutSession = 0;
 let delayNextWorldTransform = false;
 let failNextPixelTransform = false;
 let failWorldTransforms = false;
@@ -66,6 +67,7 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 	const request = route.request();
 	const url = request.url();
 	if (url.includes("/v2/oriented/transform-points")) {
+		if (!new URL(url).searchParams.get("session")) transformsWithoutSession++;
 		const body = request.postDataJSON();
 		demPriorities.push(body["dem-priority"]);
 		const values = [...String(body.wkt || "").matchAll(
@@ -949,6 +951,7 @@ result.repeatedCardinalStayed = repeatedCardinalStayed;
 result.nonlinearAlignment = nonlinearAlignment;
 result.unsupportedDemOverrides = demPriorities.filter((priority) => priority != null).length;
 result.transformRequests = demPriorities.length;
+result.transformsWithoutSession = transformsWithoutSession;
 result.firstObliqueTileMs = firstObliqueTileMs;
 result.loadingBaseState = loadingBaseState;
 result.activeBaseState = activeBaseState;
@@ -1003,6 +1006,9 @@ if (nonlinearAlignment.vertices < 3 || nonlinearAlignment.error > 1) {
 }
 if (!demPriorities.length || demPriorities.some((priority) => priority != null)) {
 	failures.push(`POST transforms included an unsupported DEM override: ${JSON.stringify(demPriorities)}`);
+}
+if (transformsWithoutSession !== 0) {
+	failures.push(`${transformsWithoutSession} transform requests omitted the viewer session`);
 }
 if (compassState.flatButtons !== 1 || compassState.centerText?.trim() !== "2D" ||
 	compassState.directions.length !== 4 || compassState.directions.some((direction) => direction === "nadir")) {
