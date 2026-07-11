@@ -749,8 +749,10 @@ export function createVexcelControl() {
 		}
 		if (ctl.capturePendingKey === key) return;
 		ctl.lat = c.lat; ctl.lng = c.lng;
-		ctl.obModel = null; ctl.obAtKey = "";
-		markActiveDir();
+		if (!ctl.obliqueActive) {
+			ctl.obModel = null; ctl.obAtKey = "";
+			markActiveDir();
+		}
 		if (!_vexcelTokenValid(_getStoredToken()) && !_hasCreds()) {
 			ctl.atKey = key;
 			ctl.captures = []; ctl.queried = true; ctl._fire("capturechange"); return;
@@ -782,6 +784,7 @@ export function createVexcelControl() {
 	};
 	const refreshFrame = () => {
 		if (!ctl._map || !ctl.obliqueActive || !ctl._frame) return;
+		if (ctl._warpLayer && ctl._warpLayer.coversCurrentView()) return;
 		const center = ctl._map.getCenter();
 		const collection = ctl._frame.collection || obliqueCollection();
 		const direction = ctl.dir, band = ctl.frameBand;
@@ -802,8 +805,8 @@ export function createVexcelControl() {
 		const center = ctl._map.getCenter();
 		const key5 = center.lat.toFixed(5) + "," + center.lng.toFixed(5);
 		const key4 = center.lat.toFixed(4) + "," + center.lng.toFixed(4);
-		const modelMoved = (ctl.obRequestKey && ctl.obRequestKey !== key5) ||
-			(ctl.obAtKey && ctl.obAtKey !== key5);
+		const modelMoved = !ctl.obliqueActive && ((ctl.obRequestKey && ctl.obRequestKey !== key5) ||
+			(ctl.obAtKey && ctl.obAtKey !== key5));
 		if (modelMoved) {
 			ctl.viewGen++;
 			ctl.obRequestKey = "";

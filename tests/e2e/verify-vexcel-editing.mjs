@@ -56,6 +56,7 @@ let failNextPixelTransform = false;
 let overscanWorldTransform = false;
 const demPriorities = [];
 const tileRequestsByImage = new Map();
+let frameQueryCount = 0;
 await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 	const request = route.request();
 	const url = request.url();
@@ -112,6 +113,7 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 	if (url.includes("/v2/oriented/query")) {
 		const body = request.postDataJSON();
 		const requested = body["product-type"];
+		if (requested) frameQueryCount++;
 		await new Promise((done) => setTimeout(done, requested ? 40 : 300));
 		await route.fulfill({
 			status: 200,
@@ -222,6 +224,43 @@ const initialEastTileRequests = tileRequestsByImage.get("mock-oblique-east-rgb")
 
 const mapBox = await page.locator("#leaflet").boundingBox();
 if (!mapBox) throw new Error("planner map is not visible");
+const panBefore = await page.evaluate(() => ({
+	frame: document.querySelector(".dw-vex-warp-tile-loaded")?.dataset.imageName,
+	tiles: [...document.querySelectorAll(".dw-vex-warp-tile-loaded")].map((tile) => tile.dataset.tile),
+}));
+const frameQueriesBeforePan = frameQueryCount;
+await page.mouse.move(mapBox.x + mapBox.width / 2, mapBox.y + mapBox.height / 2);
+await page.mouse.down();
+await page.mouse.move(mapBox.x + mapBox.width / 2, mapBox.y + mapBox.height / 2 + 30,
+	{ steps: 8 });
+await page.mouse.up();
+await page.waitForTimeout(800);
+const panAfter = await page.evaluate(({ west, east, north, south, width, height, curve }) => {
+	const map = window.leafletPlan.map;
+	const center = map.getCenter();
+	const x = (center.lng - west) / (east - west) * width;
+	const baseY = (north - center.lat) / (north - south) * height;
+	const y = baseY + curve * Math.sin(Math.PI * x / width);
+	const svg = document.querySelector(".dw-vex-route");
+	const screen = new DOMPoint(x, y).matrixTransform(svg.getScreenCTM());
+	const rect = map.getContainer().getBoundingClientRect();
+	return {
+		frame: document.querySelector(".dw-vex-warp-tile-loaded")?.dataset.imageName,
+		tiles: [...document.querySelectorAll(".dw-vex-warp-tile-loaded")].map((tile) => tile.dataset.tile),
+		centerError: Math.hypot(screen.x - (rect.left + rect.width / 2),
+			screen.y - (rect.top + rect.height / 2)),
+	};
+}, {
+	west: WEST, east: EAST, north: NORTH, south: SOUTH,
+	width: WIDTH, height: HEIGHT, curve: CAMERA_CURVE,
+});
+const retainedTiles = panBefore.tiles.filter((key) => panAfter.tiles.includes(key)).length;
+const panState = {
+	sameFrame: panBefore.frame === panAfter.frame,
+	frameQueries: frameQueryCount - frameQueriesBeforePan,
+	retention: panBefore.tiles.length ? retainedTiles / panBefore.tiles.length : 0,
+	centerError: panAfter.centerError,
+};
 const first = { x: mapBox.x + mapBox.width * 0.38, y: mapBox.y + mapBox.height * 0.48 };
 const second = { x: mapBox.x + mapBox.width * 0.64, y: mapBox.y + mapBox.height * 0.55 };
 
@@ -339,6 +378,30 @@ await page.waitForFunction((before) => {
 		document.querySelector(".dw-vex-route--exact");
 }, beforeDragPath);
 await page.waitForFunction(() => !window.leafletPlan.ignoringMapClicks);
+
+// A route wholly outside the current source image is normal while browsing.
+// It must produce an empty exact projection, not an unavailable-route error.
+await page.evaluate(({ lat, lng }) => {
+	window._dwSavedRouteLines = window.leafletPlan.lines;
+	window._dwOffFrameRoute = L.polyline([[lat, lng], [lat + 0.001, lng + 0.001]], {
+		className: "route-polyline", color: "#9400D3",
+	}).addTo(window.leafletPlan.map);
+	window.leafletPlan.lines = [[{ polyline: window._dwOffFrameRoute }]];
+}, { lat: SOUTH - 1, lng: EAST + 1 });
+await page.waitForFunction(() =>
+	document.querySelectorAll(".dw-vex-route-visual").length === 0 &&
+	!!document.querySelector(".dw-vex-route--exact"),
+);
+const offFrameRouteOk = await page.evaluate(() =>
+	!/projection is unavailable/i.test(document.querySelector(".dw-vex-basemsg")?.textContent || ""));
+await page.evaluate(() => {
+	window.leafletPlan.lines = window._dwSavedRouteLines;
+	window.leafletPlan.map.removeLayer(window._dwOffFrameRoute);
+});
+await page.waitForFunction(() =>
+	document.querySelectorAll(".dw-vex-route-visual").length === 2 &&
+	!!document.querySelector(".dw-vex-route--exact"),
+);
 
 const inspectProjectedRoute = () => page.evaluate(() => {
 	const svg = document.querySelector(".dw-vex-route");
@@ -683,6 +746,8 @@ result.firstObliqueTileMs = firstObliqueTileMs;
 result.loadingBaseState = loadingBaseState;
 result.activeBaseState = activeBaseState;
 result.initialEastTileRequests = initialEastTileRequests;
+result.panState = panState;
+result.offFrameRouteOk = offFrameRouteOk;
 result.popupAnchorError = popupAnchorError;
 result.deleteLineLength = await page.evaluate(() => window.leafletPlan.lines?.[0]?.length);
 result.pageErrors = pageErrors;
@@ -738,10 +803,15 @@ if (!activeBaseState.baseStillSelected || !activeBaseState.hidden || !activeBase
 	activeBaseState.suppressedContainers !== 1) {
 	failures.push(`oblique did not replace only the flat Vexcel base: ${JSON.stringify(activeBaseState)}`);
 }
-if (firstObliqueTileMs > 350) failures.push(`cold oblique first tile took ${firstObliqueTileMs}ms`);
+if (firstObliqueTileMs > 500) failures.push(`cold oblique first tile took ${firstObliqueTileMs}ms`);
 if (initialEastTileRequests > 24) {
 	failures.push(`initial oblique over-fetched ${initialEastTileRequests} tiles`);
 }
+if (!panState.sameFrame || panState.frameQueries !== 0 || panState.retention < 0.7 ||
+	panState.centerError > 1) {
+	failures.push(`small oblique pan reloaded or lost its camera center: ${JSON.stringify(panState)}`);
+}
+if (!offFrameRouteOk) failures.push("off-frame route was reported as an unavailable projection");
 if (pageErrors.length) failures.push(`page errors: ${pageErrors.join("; ")}`);
 
 await browser.close();

@@ -3296,6 +3296,8 @@
         this._centerPixelKey = "";
         this._centerRequestKey = "";
         this._centerHandle = null;
+        this._panHandle = null;
+        this._panStart = null;
         this._routeHandle = null;
         this._routeGeneration = 0;
         this._routeTimer = null;
@@ -3417,6 +3419,8 @@
       getEvents() {
         return {
           moveend: this._update,
+          dragstart: this._onMapDragStart,
+          dragend: this._onMapDragEnd,
           zoomend: this._update,
           viewreset: this._update,
           resize: this._update
@@ -3504,6 +3508,17 @@
       getFrame() {
         return this._frame;
       },
+      coversCurrentView() {
+        if (!this._map || !this._frame || !this._centerPixel) return false;
+        const center = this._map.getCenter();
+        const key = center.lat.toFixed(6) + "," + center.lng.toFixed(6);
+        if (key !== this._centerPixelKey) return false;
+        const scale = this._scale();
+        const size = this._map.getSize();
+        const halfX = size.x / (2 * scale), halfY = size.y / (2 * scale);
+        const tolerance = 48 / scale;
+        return this._centerPixel[0] - halfX >= -tolerance && this._centerPixel[0] + halfX <= this._frame.w + tolerance && this._centerPixel[1] - halfY >= -tolerance && this._centerPixel[1] + halfY <= this._frame.h + tolerance;
+      },
       getLoadedTileCount() {
         let count = 0;
         for (const tile of this._tiles.values()) if (tile.loaded) count++;
@@ -3524,6 +3539,55 @@
       _scale() {
         this._ensureScale();
         return this._nativeScale * 2 ** (this._map.getZoom() - this._baseZoom);
+      },
+      _onMapDragStart() {
+        if (!this._map || !this._frame || !this._centerPixel) return;
+        const center = this._map.getCenter();
+        const key = center.lat.toFixed(6) + "," + center.lng.toFixed(6);
+        if (key !== this._centerPixelKey) return;
+        this._panStart = {
+          frame: this._frame,
+          generation: this._generation,
+          zoom: this._map.getZoom(),
+          mapPixel: this._map.project(center, this._map.getZoom()),
+          imagePixel: this._centerPixel.slice(),
+          scale: this._scale()
+        };
+      },
+      _onMapDragEnd() {
+        const start = this._panStart;
+        this._panStart = null;
+        if (!start || !this._map || start.frame !== this._frame || start.generation !== this._generation || start.zoom !== this._map.getZoom() || !options.transformPoints) return;
+        const center = this._map.getCenter();
+        const mapPixel = this._map.project(center, start.zoom);
+        const target = [
+          start.imagePixel[0] + (mapPixel.x - start.mapPixel.x) / start.scale,
+          start.imagePixel[1] + (mapPixel.y - start.mapPixel.y) / start.scale
+        ];
+        if (target[0] < 0 || target[1] < 0 || target[0] > this._frame.w || target[1] > this._frame.h) return;
+        const provisionalKey = center.lat.toFixed(6) + "," + center.lng.toFixed(6);
+        this._centerPixel = target;
+        this._centerPixelKey = provisionalKey;
+        this._centerRequestKey = "";
+        if (this._panHandle && typeof this._panHandle.abort === "function") this._panHandle.abort();
+        const generation = this._generation, frame = this._frame;
+        let handle = null;
+        handle = options.transformPoints(frame, [target], "pixel-2-world", (points) => {
+          if (generation !== this._generation || frame !== this._frame) return;
+          const point = points && points[0];
+          if (point && Number.isFinite(point[0]) && Number.isFinite(point[1])) {
+            const corrected = L.latLng(point[1], point[0]);
+            this._centerPixel = target;
+            this._centerPixelKey = corrected.lat.toFixed(6) + "," + corrected.lng.toFixed(6);
+            this._centerRequestKey = "";
+            this._map.setView(corrected, start.zoom, { animate: false });
+          } else {
+            this._centerPixelKey = "";
+            this._update();
+          }
+          if (this._panHandle === handle) this._panHandle = null;
+        });
+        this._panHandle = handle && !handle.completed ? handle : null;
       },
       _fallbackPixel(latlng) {
         const uv = _vexcelInvBilinear(
@@ -4053,9 +4117,9 @@
             else projected[index.pathIdx].points[index.pointIdx] = pixel;
           }
           if (!complete) {
-            this._routeExact = false;
-            this._routeError = true;
-            this._drawRoute([], []);
+            this._routeExact = true;
+            this._routeError = false;
+            this._drawRoute(projected, projectedMarkers);
             this._notify();
           } else if (this._drag) {
             this._pendingRouteDraw = {
@@ -4252,11 +4316,12 @@
         this._inflight = 0;
       },
       _cancelProjectionRequests() {
-        for (const handle of [this._centerHandle, this._routeHandle]) {
+        for (const handle of [this._centerHandle, this._panHandle, this._routeHandle]) {
           if (handle && typeof handle.abort === "function") handle.abort();
           else gmCancel(handle);
         }
         this._centerHandle = null;
+        this._panHandle = null;
         this._routeHandle = null;
       },
       _cancelInteractionRequests() {
@@ -4947,9 +5012,11 @@
       if (ctl.capturePendingKey === key) return;
       ctl.lat = c.lat;
       ctl.lng = c.lng;
-      ctl.obModel = null;
-      ctl.obAtKey = "";
-      markActiveDir();
+      if (!ctl.obliqueActive) {
+        ctl.obModel = null;
+        ctl.obAtKey = "";
+        markActiveDir();
+      }
       if (!_vexcelTokenValid(_getStoredToken()) && !_hasCreds()) {
         ctl.atKey = key;
         ctl.captures = [];
@@ -4985,6 +5052,7 @@
     };
     const refreshFrame = () => {
       if (!ctl._map || !ctl.obliqueActive || !ctl._frame) return;
+      if (ctl._warpLayer && ctl._warpLayer.coversCurrentView()) return;
       const center = ctl._map.getCenter();
       const collection = ctl._frame.collection || obliqueCollection();
       const direction = ctl.dir, band = ctl.frameBand;
@@ -5003,7 +5071,7 @@
       const center = ctl._map.getCenter();
       const key5 = center.lat.toFixed(5) + "," + center.lng.toFixed(5);
       const key4 = center.lat.toFixed(4) + "," + center.lng.toFixed(4);
-      const modelMoved = ctl.obRequestKey && ctl.obRequestKey !== key5 || ctl.obAtKey && ctl.obAtKey !== key5;
+      const modelMoved = !ctl.obliqueActive && (ctl.obRequestKey && ctl.obRequestKey !== key5 || ctl.obAtKey && ctl.obAtKey !== key5);
       if (modelMoved) {
         ctl.viewGen++;
         ctl.obRequestKey = "";
