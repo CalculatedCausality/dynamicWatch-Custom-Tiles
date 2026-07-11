@@ -19,6 +19,7 @@ const b64 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
 const TOKEN = `${b64({ alg: "HS256" })}.${b64({ exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`;
 const WIDTH = 1200, HEIGHT = 900;
 const WEST = 153.0, EAST = 153.01, NORTH = -26.6, SOUTH = -26.61;
+const CAMERA_CURVE = 30;
 const COLLECTION = "au-qld-editing-2026";
 const DIRECTIONS = ["oblique-north", "oblique-east", "oblique-south", "oblique-west"];
 const PNG = Buffer.from(
@@ -53,11 +54,13 @@ let worldToPixel = 0, pixelToWorld = 0, pixelFallbacks = 0;
 let delayNextWorldTransform = false;
 let failNextPixelTransform = false;
 let overscanWorldTransform = false;
+const demPriorities = [];
 await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 	const request = route.request();
 	const url = request.url();
 	if (url.includes("/v2/oriented/transform-points")) {
 		const body = request.postDataJSON();
+		demPriorities.push(body["dem-priority"]);
 		const values = [...String(body.wkt || "").matchAll(
 			/(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/g,
 		)].map((match) => [Number(match[1]), Number(match[2])]);
@@ -66,19 +69,23 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 		const toPixel = ([lng, lat]) => {
 			const u = (lng - WEST) / (EAST - WEST);
 			const v = (NORTH - lat) / (NORTH - SOUTH);
-			if (direction === "oblique-west") return { x: (1 - u) * WIDTH, y: v * HEIGHT };
-			if (direction === "oblique-north") return { x: v * WIDTH, y: (1 - u) * HEIGHT };
-			if (direction === "oblique-south") return { x: (1 - v) * WIDTH, y: u * HEIGHT };
-			return overscanWorldTransform
+			let pixel;
+			if (direction === "oblique-west") pixel = { x: (1 - u) * WIDTH, y: v * HEIGHT };
+			else if (direction === "oblique-north") pixel = { x: v * WIDTH, y: (1 - u) * HEIGHT };
+			else if (direction === "oblique-south") pixel = { x: (1 - v) * WIDTH, y: u * HEIGHT };
+			else pixel = overscanWorldTransform
 				? { x: u * (WIDTH + 4) - 2, y: v * HEIGHT }
 				: { x: u * WIDTH, y: v * HEIGHT };
+			pixel.y += CAMERA_CURVE * Math.sin(Math.PI * pixel.x / WIDTH);
+			return pixel;
 		};
 		const toWorld = ([x, y]) => {
 			let u, v;
-			if (direction === "oblique-west") { u = 1 - x / WIDTH; v = y / HEIGHT; }
-			else if (direction === "oblique-north") { u = 1 - y / HEIGHT; v = x / WIDTH; }
-			else if (direction === "oblique-south") { u = y / HEIGHT; v = 1 - x / WIDTH; }
-			else { u = x / WIDTH; v = y / HEIGHT; }
+			const baseY = y - CAMERA_CURVE * Math.sin(Math.PI * x / WIDTH);
+			if (direction === "oblique-west") { u = 1 - x / WIDTH; v = baseY / HEIGHT; }
+			else if (direction === "oblique-north") { u = 1 - baseY / HEIGHT; v = x / WIDTH; }
+			else if (direction === "oblique-south") { u = baseY / HEIGHT; v = 1 - x / WIDTH; }
+			else { u = x / WIDTH; v = baseY / HEIGHT; }
 			return { x: WEST + u * (EAST - WEST), y: NORTH - v * (NORTH - SOUTH) };
 		};
 		const points = body.operation === "world-2-pixel" ? values.map(toPixel) : values.map(toWorld);
@@ -199,6 +206,29 @@ await page.waitForFunction(() =>
 	!!document.querySelector(".dw-vex-route--exact .dw-vex-route-hit"),
 );
 
+const nonlinearAlignment = await page.evaluate(({ west, east, north, south, width, height, curve }) => {
+	const source = window.leafletPlan.currentLine[1].polyline.getLatLngs();
+	const a = source[0], b = source[source.length - 1];
+	const lng = (a.lng + b.lng) / 2, lat = (a.lat + b.lat) / 2;
+	const x = (lng - west) / (east - west) * width;
+	const baseY = (north - lat) / (north - south) * height;
+	const expected = { x, y: baseY + curve * Math.sin(Math.PI * x / width) };
+	const path = document.querySelector('.dw-vex-route-visual[data-source-index="0"]');
+	const length = path.getTotalLength();
+	let error = Infinity;
+	for (let i = 0; i <= 2000; i++) {
+		const point = path.getPointAtLength(length * i / 2000);
+		error = Math.min(error, Math.hypot(point.x - expected.x, point.y - expected.y));
+	}
+	return {
+		error,
+		vertices: (path.getAttribute("d").match(/[ML]/g) || []).length,
+	};
+}, {
+	west: WEST, east: EAST, north: NORTH, south: SOUTH,
+	width: WIDTH, height: HEIGHT, curve: CAMERA_CURVE,
+});
+
 const beforeInsert = await page.locator(".dw-vex-route-visual").evaluateAll(
 	(paths) => paths.map((path) => path.getAttribute("d")),
 );
@@ -226,7 +256,7 @@ const insertError = await via.evaluate((handle, target) => {
 		rect.top + rect.height / 2 - target.y);
 }, hitPoint);
 
-const viaBox = await via.boundingBox();
+let viaBox = await via.boundingBox();
 if (!viaBox) throw new Error("projected route handle is not visible");
 const beforeDrag = await page.evaluate(() => {
 	const segment = window.leafletPlan.currentLine[1];
@@ -237,22 +267,33 @@ const beforeDragPath = await page.locator(".dw-vex-route-visual").allTextContent
 	.then(async () => page.locator(".dw-vex-route-visual").evaluateAll(
 		(paths) => paths.map((path) => path.getAttribute("d")),
 	));
-const dragTarget = {
-	x: viaBox.x + viaBox.width / 2 + 80,
-	y: viaBox.y + viaBox.height / 2 - 55,
-};
-// Start a delayed exact reprojection, then keep the pointer down long enough
-// for it to finish. The callback must not replace the captured drag handle.
+// A pending route refresh must disable stale handles rather than accepting a
+// click against old camera pixels.
 delayNextWorldTransform = true;
 await page.evaluate(() => {
 	const polyline = window.leafletPlan.currentLine[1].polyline;
 	polyline.setLatLngs(polyline.getLatLngs());
 });
 await page.waitForTimeout(150);
+const staleHandleDisabled = await via.evaluate((handle) =>
+	getComputedStyle(handle).pointerEvents === "none");
+await page.waitForFunction(() => !!document.querySelector(".dw-vex-route--exact"));
+viaBox = await via.boundingBox();
+const dragTarget = {
+	x: viaBox.x + viaBox.width / 2 + 80,
+	y: viaBox.y + viaBox.height / 2 - 55,
+};
+// Once a valid drag owns pointer capture, a delayed exact reprojection must
+// not replace that handle before pointer-up.
 await page.mouse.move(viaBox.x + viaBox.width / 2, viaBox.y + viaBox.height / 2);
 await page.mouse.down();
 await page.mouse.move(dragTarget.x, dragTarget.y, { steps: 12 });
-await page.waitForTimeout(300);
+delayNextWorldTransform = true;
+await page.evaluate(() => {
+	const polyline = window.leafletPlan.currentLine[1].polyline;
+	polyline.setLatLngs(polyline.getLatLngs());
+});
+await page.waitForTimeout(450);
 const handleStayedConnected = await via.evaluate((handle) => handle.isConnected);
 await page.mouse.up();
 await page.waitForFunction(({ lat, lng }) => {
@@ -451,6 +492,9 @@ await page.locator('#travel-mode-popup a.travel-mode-a[data-id="waypoint"]').cli
 const waypointPoint = { x: mapBox.x + mapBox.width * 0.75, y: mapBox.y + mapBox.height * 0.72 };
 failNextPixelTransform = true;
 await page.mouse.click(waypointPoint.x, waypointPoint.y);
+await page.waitForTimeout(250);
+const failedPickRejected = await page.evaluate(() => window.leafletPlan.waypoints?.length === 0);
+await page.mouse.click(waypointPoint.x, waypointPoint.y);
 const waypointAdded = await page.waitForFunction(
 	() => window.leafletPlan.waypoints?.length === 1,
 	undefined, { timeout: 10_000 },
@@ -584,15 +628,21 @@ await page.waitForFunction(() =>
 result.worldToPixel = worldToPixel;
 result.pixelToWorld = pixelToWorld;
 result.pixelFallbacks = pixelFallbacks;
+result.failedPickRejected = failedPickRejected;
 result.insertError = insertError;
 result.waypointDragError = waypointDragError;
 result.handleStayedConnected = handleStayedConnected;
+result.staleHandleDisabled = staleHandleDisabled;
 result.overlayHits = overlayHits;
 result.angleResults = angleResults;
 result.compassState = compassState;
 result.flatState = flatState;
 result.clippedCrossingVisible = clippedCrossingVisible;
 result.repeatedCardinalStayed = repeatedCardinalStayed;
+result.nonlinearAlignment = nonlinearAlignment;
+result.dtmRequests = demPriorities.filter((priority) =>
+	priority === "vexcel-dtm,public-dtm,flat-dtm").length;
+result.transformRequests = demPriorities.length;
 result.popupAnchorError = popupAnchorError;
 result.deleteLineLength = await page.evaluate(() => window.leafletPlan.lines?.[0]?.length);
 result.pageErrors = pageErrors;
@@ -608,9 +658,12 @@ if (result.insertError > 3) failures.push(`inserted handle missed route click by
 if (result.viaDragError > 4) failures.push(`dragged handle missed cursor by ${result.viaDragError.toFixed(1)}px`);
 if (result.waypointDragError > 4) failures.push(`waypoint drag missed cursor by ${result.waypointDragError.toFixed(1)}px`);
 if (!handleStayedConnected) failures.push("exact reprojection replaced an active drag handle");
+if (!staleHandleDisabled) failures.push("stale route handle remained interactive during reprojection");
 if (!result.nativeMarkersHidden) failures.push("native flat-map markers leaked into perspective mode");
-if (worldToPixel < 12 || pixelToWorld < 10) failures.push("expected both Vexcel transform directions across all angles");
-if (pixelFallbacks !== 1) failures.push("failed pixel transform did not exercise exactly one fallback");
+if (worldToPixel < 12 || pixelToWorld < 11) failures.push("expected both Vexcel transform directions across all angles");
+if (pixelFallbacks !== 1 || !failedPickRejected) {
+	failures.push("failed pixel transform placed an approximate waypoint instead of rejecting the edit");
+}
 if (overlayHits !== 1 || result.waypoints !== 1) failures.push("perspective click capture stole an overlay event");
 if (popupAnchorError > 20) failures.push(`route-point popup missed projected handle by ${popupAnchorError.toFixed(1)}px`);
 if (result.deleteLineLength !== 2) failures.push("projected route-point delete did not update the course");
@@ -625,6 +678,13 @@ for (const angle of angleResults) {
 }
 if (!clippedCrossingVisible) failures.push("exact out-of-frame route pixels were dropped instead of clipped");
 if (!repeatedCardinalStayed) failures.push("selected cardinal still duplicates the center 2D action");
+if (nonlinearAlignment.vertices < 3 || nonlinearAlignment.error > 1) {
+	failures.push(`sparse route did not follow nonlinear camera: ${JSON.stringify(nonlinearAlignment)}`);
+}
+if (!demPriorities.length || demPriorities.some((priority) =>
+	priority !== "vexcel-dtm,public-dtm,flat-dtm")) {
+	failures.push(`route/click transforms did not consistently request ground DTM: ${JSON.stringify(demPriorities)}`);
+}
 if (compassState.flatButtons !== 1 || compassState.centerText?.trim() !== "2D" ||
 	compassState.directions.length !== 4 || compassState.directions.some((direction) => direction === "nadir")) {
 	failures.push(`compass still has duplicate flat/nadir actions: ${JSON.stringify(compassState)}`);

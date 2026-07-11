@@ -147,6 +147,39 @@ export function _vexcelClipPathToRect(path, width, height) {
 	return segments;
 }
 
+function _vexcelPathLengthMeters(path) {
+	let total = 0;
+	for (let i = 1; i < path.length; i++) {
+		const a = path[i - 1], b = path[i];
+		const meanLat = (a[1] + b[1]) * Math.PI / 360;
+		const dx = (b[0] - a[0]) * 111320 * Math.cos(meanLat);
+		const dy = (b[1] - a[1]) * 110540;
+		total += Math.hypot(dx, dy);
+	}
+	return total;
+}
+
+export function _vexcelDensifyPath(path, maxSegmentMeters) {
+	if (!Array.isArray(path) || path.length < 2) return Array.isArray(path) ? path.slice() : [];
+	const spacing = Math.max(1, Number(maxSegmentMeters) || 5);
+	const result = [path[0].slice()];
+	for (let i = 1; i < path.length; i++) {
+		const a = path[i - 1], b = path[i];
+		const meanLat = (a[1] + b[1]) * Math.PI / 360;
+		const dx = (b[0] - a[0]) * 111320 * Math.cos(meanLat);
+		const dy = (b[1] - a[1]) * 110540;
+		const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / spacing));
+		for (let step = 1; step <= steps; step++) {
+			const t = step / steps;
+			result.push([
+				a[0] + (b[0] - a[0]) * t,
+				a[1] + (b[1] - a[1]) * t,
+			]);
+		}
+	}
+	return result;
+}
+
 export function createVexcelObliqueLayer(options) {
 	options = options || {};
 	const PerspectiveLayer = L.Layer.extend({
@@ -244,6 +277,7 @@ export function createVexcelObliqueLayer(options) {
 			this._cancelInteractionRequests();
 			this._cancelProjectionRequests();
 			this._clearTiles();
+			if (this._routeSvg) this._routeSvg.replaceChildren();
 			clearTimeout(this._routeTimer);
 			if (this._routeObserver) { this._routeObserver.disconnect(); this._routeObserver = null; }
 			if (this._map && this._onPlannerLayerChange) {
@@ -320,6 +354,9 @@ export function createVexcelObliqueLayer(options) {
 			for (const hit of this._routeSvg.querySelectorAll(".dw-vex-route-hit")) {
 				hit.classList.remove("dw-vex-route-hit");
 			}
+			for (const handle of this._routeSvg.querySelectorAll(".dw-vex-route-handle")) {
+				handle.classList.add("dw-vex-route-handle--stale");
+			}
 			this._notify();
 			clearTimeout(this._routeTimer);
 			this._routeTimer = setTimeout(() => this._requestRoute(), 100);
@@ -335,6 +372,7 @@ export function createVexcelObliqueLayer(options) {
 			clearTimeout(this._routeTimer);
 			this._cancelProjectionRequests();
 			this._clearTiles();
+			if (this._routeSvg) this._routeSvg.replaceChildren();
 			this._frame = Object.assign({}, frame, {
 				w: Number(frame.w) || 10560,
 				h: Number(frame.h) || 14144,
@@ -433,10 +471,10 @@ export function createVexcelObliqueLayer(options) {
 			return [point.x, point.y];
 		},
 
-		_projectPixel(pixel, callback, isCurrent) {
+		_projectPixel(pixel, callback, isCurrent, onError) {
 			if (!pixel || !this._frame || !options.transformPoints) return;
 			this._interactionQueue.push({
-				pixel: pixel.slice(), callback, isCurrent,
+				pixel: pixel.slice(), callback, isCurrent, onError,
 				generation: this._generation, frame: this._frame,
 			});
 			this._pumpPixelProjection();
@@ -474,10 +512,9 @@ export function createVexcelObliqueLayer(options) {
 					(!request.isCurrent || request.isCurrent());
 				if (active) {
 					const exact = points && points[0];
-					const point = exact && Number.isFinite(exact[0]) && Number.isFinite(exact[1])
-						? exact : _vexcelBilinear(request.frame.corners,
-							request.pixel[0] / request.frame.w, request.pixel[1] / request.frame.h);
-					request.callback(point, !!exact);
+					if (exact && Number.isFinite(exact[0]) && Number.isFinite(exact[1])) {
+						request.callback(exact);
+					} else if (request.onError) request.onError();
 				}
 				if (handle !== null) this._pumpPixelProjection();
 			};
@@ -650,7 +687,8 @@ export function createVexcelObliqueLayer(options) {
 				marker.fire("dragend", { originalEvent: event });
 				this._scheduleRoute();
 			}, () => this._map && this._map.hasLayer(drag.markerEntry.marker) &&
-				this._routeMarkers.some((entry) => entry.marker === drag.markerEntry.marker));
+				this._routeMarkers.some((entry) => entry.marker === drag.markerEntry.marker),
+				() => this._requestRoute());
 		},
 
 		_routePointerCancel(event) {
@@ -820,13 +858,22 @@ export function createVexcelObliqueLayer(options) {
 			};
 			const sources = Array.isArray(rawModel && rawModel.paths) ? rawModel.paths
 				.filter((entry) => entry && Array.isArray(entry.points)) : [];
-			const paths = [];
+			const clippedPaths = [];
 			for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
 				for (const points of _vexcelClipPathToQuad(
 					sources[sourceIndex].points, this._frame.corners)) {
-					paths.push({ points, sourceIndex });
+					clippedPaths.push({ points, sourceIndex });
 				}
 			}
+			const totalMeters = clippedPaths.reduce((total, entry) =>
+				total + _vexcelPathLengthMeters(entry.points), 0);
+			// Three-metre ground samples follow terrain/lens curvature closely;
+			// very long routes are relaxed enough to keep API batches bounded.
+			const routeSpacing = Math.max(3, totalMeters / 1800);
+			const paths = clippedPaths.map((entry) => ({
+				sourceIndex: entry.sourceIndex,
+				points: _vexcelDensifyPath(entry.points, routeSpacing),
+			}));
 			const markers = (Array.isArray(rawModel && rawModel.markers) ? rawModel.markers : [])
 				.filter((entry) => entry && Array.isArray(entry.point) &&
 					Number.isFinite(entry.point[0]) && Number.isFinite(entry.point[1]) &&
@@ -849,26 +896,18 @@ export function createVexcelObliqueLayer(options) {
 			for (let pathIdx = 0; pathIdx < paths.length; pathIdx++) {
 				for (let pointIdx = 0; pointIdx < paths[pathIdx].points.length; pointIdx++) {
 					const [lng, lat] = paths[pathIdx].points[pointIdx];
-					const uv = _vexcelInvBilinear(this._frame.corners, lng, lat);
-					projected[pathIdx].points[pointIdx] =
-						[uv[0] * this._frame.w, uv[1] * this._frame.h];
 					flat.push([lng, lat]);
 					indices.push({ pathIdx, pointIdx });
 				}
 			}
 			for (let markerIdx = 0; markerIdx < markers.length; markerIdx++) {
 				const [lng, lat] = markers[markerIdx].point;
-				const uv = _vexcelInvBilinear(this._frame.corners, lng, lat);
-				projectedMarkers[markerIdx].point = [uv[0] * this._frame.w, uv[1] * this._frame.h];
 				flat.push([lng, lat]);
 				indices.push({ markerIdx });
 			}
 			this._routeExact = false;
 			this._routeError = false;
-			if (!this._drag) {
-				this._drawRoute(projected, projectedMarkers);
-				this._notify();
-			}
+			this._notify();
 			if (!flat.length) {
 				this._routeExact = true;
 				this._routeError = false;
@@ -877,6 +916,7 @@ export function createVexcelObliqueLayer(options) {
 			}
 			if (!options.transformPoints) {
 				this._routeError = true;
+				this._drawRoute([], []);
 				this._notify();
 				return;
 			}
@@ -888,6 +928,7 @@ export function createVexcelObliqueLayer(options) {
 					frame !== this._frame) return;
 				if (!pixels || pixels.length !== flat.length) {
 					this._routeError = true;
+					this._drawRoute([], []);
 					this._notify();
 					if (this._routeHandle === handle) this._routeHandle = null;
 					return;
@@ -902,13 +943,18 @@ export function createVexcelObliqueLayer(options) {
 					if (index.markerIdx != null) projectedMarkers[index.markerIdx].point = pixel;
 					else projected[index.pathIdx].points[index.pointIdx] = pixel;
 				}
-				if (this._drag) {
+				if (!complete) {
+					this._routeExact = false;
+					this._routeError = true;
+					this._drawRoute([], []);
+					this._notify();
+				} else if (this._drag) {
 					this._pendingRouteDraw = {
-						paths: projected, markers: projectedMarkers, exact: complete,
+						paths: projected, markers: projectedMarkers, exact: true,
 					};
 				} else {
-					this._routeExact = complete;
-					this._routeError = !this._routeExact;
+					this._routeExact = true;
+					this._routeError = false;
 					this._drawRoute(projected, projectedMarkers);
 					this._notify();
 				}

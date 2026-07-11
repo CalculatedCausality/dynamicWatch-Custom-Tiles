@@ -33,6 +33,7 @@ export {
 	_vexcelBilinear,
 	_vexcelClipPathToRect,
 	_vexcelClipPathToQuad,
+	_vexcelDensifyPath,
 	_vexcelFootprint,
 	_vexcelInvBilinear,
 	_vexcelMaxDownsample,
@@ -289,12 +290,17 @@ export function fetchVexcelPixelPoints(frame, points, operation, cb) {
 		}
 		const result = new Array(points.length);
 		let remaining = chunks.length;
-		for (const chunk of chunks) {
-			const coords = chunk.points.map((p) => `${Number(p[0])} ${Number(p[1])}`);
-			const wkt = coords.length === 1
-				? `POINT(${coords[0]})`
-				: `LINESTRING(${coords.join(",")})`;
-			const handle = gmJsonGet(
+		let nextChunk = 0, active = 0;
+		const pump = () => {
+			while (!request.aborted && active < 4 && nextChunk < chunks.length) {
+				const chunk = chunks[nextChunk++];
+				active++;
+				const coords = chunk.points.map((p) => `${Number(p[0])} ${Number(p[1])}`);
+				const wkt = coords.length === 1
+					? `POINT(${coords[0]})`
+					: `LINESTRING(${coords.join(",")})`;
+				let handle = null;
+				handle = gmJsonGet(
 				CFG.VEXCEL_API_BASE + "/v2/oriented/transform-points?token=" +
 					encodeURIComponent(token),
 				{
@@ -304,12 +310,17 @@ export function fetchVexcelPixelPoints(frame, points, operation, cb) {
 						"image-name": frame.name,
 						wkt,
 						srid: 4326,
+						// Courses are ground geometry. DSM (the API default) shifts
+						// roads onto roofs and tree canopy in an oblique camera.
+						"dem-priority": "vexcel-dtm,public-dtm,flat-dtm",
 						"metadata-format": "json",
 					}),
 					headers: _vexcelOriginHeaders({ "Content-Type": "application/json" }),
 				},
 				(err, data) => {
 					if (request.aborted) return;
+					active--;
+					request.handles = request.handles.filter((item) => item !== handle);
 					const transformed = !err && data && Array.isArray(data.points)
 						? data.points : null;
 					if (transformed && transformed.length === chunk.points.length) {
@@ -333,11 +344,13 @@ export function fetchVexcelPixelPoints(frame, points, operation, cb) {
 					if (--remaining === 0) {
 						request.completed = true;
 						cb(result);
-					}
+					} else pump();
 				},
 			);
-			request.handles.push(handle);
-		}
+				request.handles.push(handle);
+			}
+		};
+		pump();
 	});
 	return request;
 }
@@ -529,7 +542,7 @@ export function createVexcelControl() {
 					status.frame.name !== ctl._frame.name) return;
 				if (status.loaded > 0 && status.routeExact) setMsg("");
 				else if (status.loaded > 0 && status.routeError) {
-					setMsg("The oblique is loaded, but route projection is approximate.");
+					setMsg("The oblique is loaded, but route projection is unavailable.");
 				} else if (status.loaded > 0) {
 					setMsg("Projecting the route onto the oblique…");
 				}

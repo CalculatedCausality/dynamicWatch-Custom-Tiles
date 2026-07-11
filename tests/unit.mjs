@@ -1213,6 +1213,17 @@ t("_vexcelClipPathToRect clips exact image pixels without dropping crossings", (
 		"fully outside pixels omitted");
 });
 
+t("_vexcelDensifyPath samples sparse ground segments without moving endpoints", () => {
+	const path = [[153, -26.6], [153.001, -26.6]];
+	const dense = dw._vexcelDensifyPath(path, 10);
+	assert(dense.length >= 10, "roughly 100m segment receives intermediate samples");
+	deepEq(dense[0], path[0], "start retained exactly");
+	deepEq(dense[dense.length - 1], path[1], "end retained exactly");
+	for (let i = 1; i < dense.length; i++) {
+		assert(dense[i][0] > dense[i - 1][0], "samples retain route order");
+	}
+});
+
 t("_vexcelObliqueTileBase builds a token-scoped tile base", () => {
 	const jwt = fakeJwt(Math.floor(Date.now() / 1000) + 3600);
 	const b = dw._vexcelObliqueTileBase("img~n", "urban", jwt);

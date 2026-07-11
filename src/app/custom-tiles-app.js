@@ -1156,6 +1156,7 @@ export class CustomTilesApp {
 			".dw-vex-route-handle { pointer-events: all !important; cursor: grab; touch-action: none; }",
 			".dw-vex-route-handle--dragging { cursor: grabbing; }",
 			".dw-vex-route-handle--disabled { cursor: pointer; }",
+			".dw-vex-route-handle--stale { pointer-events: none !important; }",
 			".dw-vex-perspective-active .leaflet-overlay-pane .route-polyline { opacity: 0 !important; pointer-events: none !important; }",
 			".dw-vex-perspective-active .leaflet-marker-pane .dist-marker, .dw-vex-perspective-active .leaflet-marker-pane .circle.lightgreen, .dw-vex-perspective-active .leaflet-marker-pane .circle.red, .dw-vex-perspective-active .leaflet-marker-pane .circle.blue, .dw-vex-perspective-active .leaflet-marker-pane .circle.white { opacity: 0 !important; pointer-events: none !important; }",
 			".dw-scc-notif-badge { color: #dc2626; font-weight: 600; }",

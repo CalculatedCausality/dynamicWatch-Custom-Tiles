@@ -3242,6 +3242,37 @@
     flush();
     return segments;
   }
+  function _vexcelPathLengthMeters(path) {
+    let total = 0;
+    for (let i = 1; i < path.length; i++) {
+      const a = path[i - 1], b = path[i];
+      const meanLat = (a[1] + b[1]) * Math.PI / 360;
+      const dx = (b[0] - a[0]) * 111320 * Math.cos(meanLat);
+      const dy = (b[1] - a[1]) * 110540;
+      total += Math.hypot(dx, dy);
+    }
+    return total;
+  }
+  function _vexcelDensifyPath(path, maxSegmentMeters) {
+    if (!Array.isArray(path) || path.length < 2) return Array.isArray(path) ? path.slice() : [];
+    const spacing = Math.max(1, Number(maxSegmentMeters) || 5);
+    const result = [path[0].slice()];
+    for (let i = 1; i < path.length; i++) {
+      const a = path[i - 1], b = path[i];
+      const meanLat = (a[1] + b[1]) * Math.PI / 360;
+      const dx = (b[0] - a[0]) * 111320 * Math.cos(meanLat);
+      const dy = (b[1] - a[1]) * 110540;
+      const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / spacing));
+      for (let step = 1; step <= steps; step++) {
+        const t = step / steps;
+        result.push([
+          a[0] + (b[0] - a[0]) * t,
+          a[1] + (b[1] - a[1]) * t
+        ]);
+      }
+    }
+    return result;
+  }
   function createVexcelObliqueLayer(options) {
     options = options || {};
     const PerspectiveLayer = L.Layer.extend({
@@ -3339,6 +3370,7 @@
         this._cancelInteractionRequests();
         this._cancelProjectionRequests();
         this._clearTiles();
+        if (this._routeSvg) this._routeSvg.replaceChildren();
         clearTimeout(this._routeTimer);
         if (this._routeObserver) {
           this._routeObserver.disconnect();
@@ -3411,6 +3443,9 @@
         for (const hit of this._routeSvg.querySelectorAll(".dw-vex-route-hit")) {
           hit.classList.remove("dw-vex-route-hit");
         }
+        for (const handle of this._routeSvg.querySelectorAll(".dw-vex-route-handle")) {
+          handle.classList.add("dw-vex-route-handle--stale");
+        }
         this._notify();
         clearTimeout(this._routeTimer);
         this._routeTimer = setTimeout(() => this._requestRoute(), 100);
@@ -3423,6 +3458,7 @@
         clearTimeout(this._routeTimer);
         this._cancelProjectionRequests();
         this._clearTiles();
+        if (this._routeSvg) this._routeSvg.replaceChildren();
         this._frame = Object.assign({}, frame, {
           w: Number(frame.w) || 10560,
           h: Number(frame.h) || 14144
@@ -3523,12 +3559,13 @@
         }
         return [point.x, point.y];
       },
-      _projectPixel(pixel, callback, isCurrent) {
+      _projectPixel(pixel, callback, isCurrent, onError) {
         if (!pixel || !this._frame || !options.transformPoints) return;
         this._interactionQueue.push({
           pixel: pixel.slice(),
           callback,
           isCurrent,
+          onError,
           generation: this._generation,
           frame: this._frame
         });
@@ -3568,12 +3605,9 @@
           const active = request.generation === this._generation && request.frame === this._frame && (!request.isCurrent || request.isCurrent());
           if (active) {
             const exact = points && points[0];
-            const point = exact && Number.isFinite(exact[0]) && Number.isFinite(exact[1]) ? exact : _vexcelBilinear(
-              request.frame.corners,
-              request.pixel[0] / request.frame.w,
-              request.pixel[1] / request.frame.h
-            );
-            request.callback(point, !!exact);
+            if (exact && Number.isFinite(exact[0]) && Number.isFinite(exact[1])) {
+              request.callback(exact);
+            } else if (request.onError) request.onError();
           }
           if (handle !== null) this._pumpPixelProjection();
         };
@@ -3734,14 +3768,19 @@
         this._routeHandle = null;
         this._pendingRouteDraw = null;
         this._suppressMarkerClickUntil = Date.now() + 500;
-        this._projectPixel(drag.pixel, ([lng, lat]) => {
-          const marker = drag.markerEntry.marker;
-          if (!marker || typeof marker.setLatLng !== "function") return;
-          marker.fire("dragstart", { originalEvent: event });
-          marker.setLatLng(L.latLng(lat, lng));
-          marker.fire("dragend", { originalEvent: event });
-          this._scheduleRoute();
-        }, () => this._map && this._map.hasLayer(drag.markerEntry.marker) && this._routeMarkers.some((entry) => entry.marker === drag.markerEntry.marker));
+        this._projectPixel(
+          drag.pixel,
+          ([lng, lat]) => {
+            const marker = drag.markerEntry.marker;
+            if (!marker || typeof marker.setLatLng !== "function") return;
+            marker.fire("dragstart", { originalEvent: event });
+            marker.setLatLng(L.latLng(lat, lng));
+            marker.fire("dragend", { originalEvent: event });
+            this._scheduleRoute();
+          },
+          () => this._map && this._map.hasLayer(drag.markerEntry.marker) && this._routeMarkers.some((entry) => entry.marker === drag.markerEntry.marker),
+          () => this._requestRoute()
+        );
       },
       _routePointerCancel(event) {
         const drag = this._drag;
@@ -3917,15 +3956,21 @@
           markers: []
         };
         const sources = Array.isArray(rawModel && rawModel.paths) ? rawModel.paths.filter((entry) => entry && Array.isArray(entry.points)) : [];
-        const paths = [];
+        const clippedPaths = [];
         for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
           for (const points of _vexcelClipPathToQuad(
             sources[sourceIndex].points,
             this._frame.corners
           )) {
-            paths.push({ points, sourceIndex });
+            clippedPaths.push({ points, sourceIndex });
           }
         }
+        const totalMeters = clippedPaths.reduce((total, entry) => total + _vexcelPathLengthMeters(entry.points), 0);
+        const routeSpacing = Math.max(3, totalMeters / 1800);
+        const paths = clippedPaths.map((entry) => ({
+          sourceIndex: entry.sourceIndex,
+          points: _vexcelDensifyPath(entry.points, routeSpacing)
+        }));
         const markers = (Array.isArray(rawModel && rawModel.markers) ? rawModel.markers : []).filter((entry) => entry && Array.isArray(entry.point) && Number.isFinite(entry.point[0]) && Number.isFinite(entry.point[1]) && _pointInQuad(this._frame.corners, entry.point[0], entry.point[1]));
         this._routeSources = sources;
         this._routeMarkers = markers;
@@ -3945,25 +3990,18 @@
         for (let pathIdx = 0; pathIdx < paths.length; pathIdx++) {
           for (let pointIdx = 0; pointIdx < paths[pathIdx].points.length; pointIdx++) {
             const [lng, lat] = paths[pathIdx].points[pointIdx];
-            const uv = _vexcelInvBilinear(this._frame.corners, lng, lat);
-            projected[pathIdx].points[pointIdx] = [uv[0] * this._frame.w, uv[1] * this._frame.h];
             flat.push([lng, lat]);
             indices.push({ pathIdx, pointIdx });
           }
         }
         for (let markerIdx = 0; markerIdx < markers.length; markerIdx++) {
           const [lng, lat] = markers[markerIdx].point;
-          const uv = _vexcelInvBilinear(this._frame.corners, lng, lat);
-          projectedMarkers[markerIdx].point = [uv[0] * this._frame.w, uv[1] * this._frame.h];
           flat.push([lng, lat]);
           indices.push({ markerIdx });
         }
         this._routeExact = false;
         this._routeError = false;
-        if (!this._drag) {
-          this._drawRoute(projected, projectedMarkers);
-          this._notify();
-        }
+        this._notify();
         if (!flat.length) {
           this._routeExact = true;
           this._routeError = false;
@@ -3972,6 +4010,7 @@
         }
         if (!options.transformPoints) {
           this._routeError = true;
+          this._drawRoute([], []);
           this._notify();
           return;
         }
@@ -3982,6 +4021,7 @@
           if (generation !== this._generation || routeGeneration !== this._routeGeneration || frame !== this._frame) return;
           if (!pixels || pixels.length !== flat.length) {
             this._routeError = true;
+            this._drawRoute([], []);
             this._notify();
             if (this._routeHandle === handle) this._routeHandle = null;
             return;
@@ -3997,15 +4037,20 @@
             if (index.markerIdx != null) projectedMarkers[index.markerIdx].point = pixel;
             else projected[index.pathIdx].points[index.pointIdx] = pixel;
           }
-          if (this._drag) {
+          if (!complete) {
+            this._routeExact = false;
+            this._routeError = true;
+            this._drawRoute([], []);
+            this._notify();
+          } else if (this._drag) {
             this._pendingRouteDraw = {
               paths: projected,
               markers: projectedMarkers,
-              exact: complete
+              exact: true
             };
           } else {
-            this._routeExact = complete;
-            this._routeError = !this._routeExact;
+            this._routeExact = true;
+            this._routeError = false;
             this._drawRoute(projected, projectedMarkers);
             this._notify();
           }
@@ -4421,47 +4466,59 @@
       }
       const result = new Array(points.length);
       let remaining = chunks.length;
-      for (const chunk of chunks) {
-        const coords = chunk.points.map((p) => `${Number(p[0])} ${Number(p[1])}`);
-        const wkt = coords.length === 1 ? `POINT(${coords[0]})` : `LINESTRING(${coords.join(",")})`;
-        const handle = gmJsonGet(
-          CFG.VEXCEL_API_BASE + "/v2/oriented/transform-points?token=" + encodeURIComponent(token),
-          {
-            method: "POST",
-            data: JSON.stringify({
-              operation,
-              "image-name": frame.name,
-              wkt,
-              srid: 4326,
-              "metadata-format": "json"
-            }),
-            headers: _vexcelOriginHeaders({ "Content-Type": "application/json" })
-          },
-          (err, data) => {
-            if (request.aborted) return;
-            const transformed = !err && data && Array.isArray(data.points) ? data.points : null;
-            if (transformed && transformed.length === chunk.points.length) {
-              for (let i = 0; i < transformed.length; i++) {
-                const p = transformed[i] || {};
-                const validCoord = (value2) => (typeof value2 === "number" || typeof value2 === "string" && value2.trim() !== "") && Number.isFinite(Number(value2));
-                const directValid = validCoord(p.x) && validCoord(p.y);
-                const directUsable = directValid && (operation === "world-2-pixel" || Math.abs(Number(p.x)) <= 180 && Math.abs(Number(p.y)) <= 90);
-                const value = directUsable ? p : p.location || {};
-                const x = Number(value.x), y = Number(value.y);
-                const inRange = operation === "world-2-pixel" || Math.abs(x) <= 180 && Math.abs(y) <= 90;
-                if (validCoord(value.x) && validCoord(value.y) && inRange) {
-                  result[chunk.start + i] = [x, y];
+      let nextChunk = 0, active = 0;
+      const pump = () => {
+        while (!request.aborted && active < 4 && nextChunk < chunks.length) {
+          const chunk = chunks[nextChunk++];
+          active++;
+          const coords = chunk.points.map((p) => `${Number(p[0])} ${Number(p[1])}`);
+          const wkt = coords.length === 1 ? `POINT(${coords[0]})` : `LINESTRING(${coords.join(",")})`;
+          let handle = null;
+          handle = gmJsonGet(
+            CFG.VEXCEL_API_BASE + "/v2/oriented/transform-points?token=" + encodeURIComponent(token),
+            {
+              method: "POST",
+              data: JSON.stringify({
+                operation,
+                "image-name": frame.name,
+                wkt,
+                srid: 4326,
+                // Courses are ground geometry. DSM (the API default) shifts
+                // roads onto roofs and tree canopy in an oblique camera.
+                "dem-priority": "vexcel-dtm,public-dtm,flat-dtm",
+                "metadata-format": "json"
+              }),
+              headers: _vexcelOriginHeaders({ "Content-Type": "application/json" })
+            },
+            (err, data) => {
+              if (request.aborted) return;
+              active--;
+              request.handles = request.handles.filter((item) => item !== handle);
+              const transformed = !err && data && Array.isArray(data.points) ? data.points : null;
+              if (transformed && transformed.length === chunk.points.length) {
+                for (let i = 0; i < transformed.length; i++) {
+                  const p = transformed[i] || {};
+                  const validCoord = (value2) => (typeof value2 === "number" || typeof value2 === "string" && value2.trim() !== "") && Number.isFinite(Number(value2));
+                  const directValid = validCoord(p.x) && validCoord(p.y);
+                  const directUsable = directValid && (operation === "world-2-pixel" || Math.abs(Number(p.x)) <= 180 && Math.abs(Number(p.y)) <= 90);
+                  const value = directUsable ? p : p.location || {};
+                  const x = Number(value.x), y = Number(value.y);
+                  const inRange = operation === "world-2-pixel" || Math.abs(x) <= 180 && Math.abs(y) <= 90;
+                  if (validCoord(value.x) && validCoord(value.y) && inRange) {
+                    result[chunk.start + i] = [x, y];
+                  }
                 }
               }
+              if (--remaining === 0) {
+                request.completed = true;
+                cb(result);
+              } else pump();
             }
-            if (--remaining === 0) {
-              request.completed = true;
-              cb(result);
-            }
-          }
-        );
-        request.handles.push(handle);
-      }
+          );
+          request.handles.push(handle);
+        }
+      };
+      pump();
     });
     return request;
   }
@@ -4646,7 +4703,7 @@
           if (!ctl.obliqueActive || !status.frame || !ctl._frame || status.frame.name !== ctl._frame.name) return;
           if (status.loaded > 0 && status.routeExact) setMsg("");
           else if (status.loaded > 0 && status.routeError) {
-            setMsg("The oblique is loaded, but route projection is approximate.");
+            setMsg("The oblique is loaded, but route projection is unavailable.");
           } else if (status.loaded > 0) {
             setMsg("Projecting the route onto the oblique…");
           } else if (status.error && status.pending === 0) {
@@ -10625,6 +10682,7 @@
         ".dw-vex-route-handle { pointer-events: all !important; cursor: grab; touch-action: none; }",
         ".dw-vex-route-handle--dragging { cursor: grabbing; }",
         ".dw-vex-route-handle--disabled { cursor: pointer; }",
+        ".dw-vex-route-handle--stale { pointer-events: none !important; }",
         ".dw-vex-perspective-active .leaflet-overlay-pane .route-polyline { opacity: 0 !important; pointer-events: none !important; }",
         ".dw-vex-perspective-active .leaflet-marker-pane .dist-marker, .dw-vex-perspective-active .leaflet-marker-pane .circle.lightgreen, .dw-vex-perspective-active .leaflet-marker-pane .circle.red, .dw-vex-perspective-active .leaflet-marker-pane .circle.blue, .dw-vex-perspective-active .leaflet-marker-pane .circle.white { opacity: 0 !important; pointer-events: none !important; }",
         ".dw-scc-notif-badge { color: #dc2626; font-weight: 600; }",
@@ -10789,6 +10847,7 @@
         _vexcelInvBilinear,
         _vexcelClipPathToQuad,
         _vexcelClipPathToRect,
+        _vexcelDensifyPath,
         _vexcelIsCredString,
         LayerProvider,
         tileProvider,
