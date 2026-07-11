@@ -1152,6 +1152,7 @@ export class CustomTilesApp {
 			".dw-3d-active .dw-vex-ctl { display: none; }",
 			".dw-vex-warp, .dw-vex-warp-tile, .dw-vex-warp img, .dw-vex-route { pointer-events: none !important; user-select: none; }",
 			".dw-vex-warp, .dw-vex-route { will-change: transform; }",
+			".dw-vex-flat-suppressed { visibility: hidden !important; }",
 			".dw-vex-route-hit { pointer-events: stroke !important; cursor: crosshair; }",
 			".dw-vex-route-handle { pointer-events: all !important; cursor: grab; touch-action: none; }",
 			".dw-vex-route-handle--dragging { cursor: grabbing; }",

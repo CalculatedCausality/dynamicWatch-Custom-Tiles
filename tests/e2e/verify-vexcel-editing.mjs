@@ -17,7 +17,7 @@ if (!existsSync(STATE)) {
 
 const b64 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
 const TOKEN = `${b64({ alg: "HS256" })}.${b64({ exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`;
-const WIDTH = 1200, HEIGHT = 900;
+const WIDTH = 4800, HEIGHT = 3600;
 const WEST = 153.0, EAST = 153.01, NORTH = -26.6, SOUTH = -26.61;
 const CAMERA_CURVE = 30;
 const COLLECTION = "au-qld-editing-2026";
@@ -55,6 +55,7 @@ let delayNextWorldTransform = false;
 let failNextPixelTransform = false;
 let overscanWorldTransform = false;
 const demPriorities = [];
+const tileRequestsByImage = new Map();
 await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 	const request = route.request();
 	const url = request.url();
@@ -111,6 +112,7 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 	if (url.includes("/v2/oriented/query")) {
 		const body = request.postDataJSON();
 		const requested = body["product-type"];
+		await new Promise((done) => setTimeout(done, requested ? 40 : 300));
 		await route.fulfill({
 			status: 200,
 			contentType: "application/json",
@@ -130,7 +132,14 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 		});
 		return;
 	}
-	if (url.includes("/v2/oriented/tile") || url.includes("/v2/ortho/")) {
+	if (url.includes("/v2/oriented/tile")) {
+		const image = new URL(url).searchParams.get("image-name") || "unknown";
+		tileRequestsByImage.set(image, (tileRequestsByImage.get(image) || 0) + 1);
+		await new Promise((done) => setTimeout(done, 60));
+		await route.fulfill({ status: 200, contentType: "image/png", body: PNG });
+		return;
+	}
+	if (url.includes("/v2/ortho/")) {
 		await route.fulfill({ status: 200, contentType: "image/png", body: PNG });
 		return;
 	}
@@ -185,8 +194,31 @@ await page.evaluate(() => {
 	if (!map.hasLayer(vexcel)) map.addLayer(vexcel);
 });
 await page.waitForSelector('.dw-vex-dir[data-dir="oblique-east"]');
+const coldLoadStarted = Date.now();
 await page.locator('.dw-vex-dir[data-dir="oblique-east"]').click();
+const loadingBaseState = await page.evaluate(() => {
+	const entry = window._dwLayerCtrl._layers.find((item) => item.name === "Vexcel Aerial");
+	const container = entry?.layer?.getContainer?.() || entry?.layer?._container;
+	return {
+		visible: !!container && getComputedStyle(container).visibility !== "hidden",
+		suppressed: !!container?.classList.contains("dw-vex-flat-suppressed"),
+	};
+});
 await page.waitForSelector(".dw-vex-warp-tile-loaded", { timeout: 20_000 });
+const firstObliqueTileMs = Date.now() - coldLoadStarted;
+const activeBaseState = await page.evaluate(() => {
+	const entry = window._dwLayerCtrl._layers.find((item) => item.name === "Vexcel Aerial");
+	const layer = entry?.layer;
+	const container = layer?.getContainer?.() || layer?._container;
+	return {
+		baseStillSelected: !!layer && window._dwLayerCtrl._map.hasLayer(layer) && !entry.overlay,
+		hidden: !!container && getComputedStyle(container).visibility === "hidden",
+		suppressed: !!container?.classList.contains("dw-vex-flat-suppressed"),
+		suppressedContainers: document.querySelectorAll(".dw-vex-flat-suppressed").length,
+	};
+});
+await page.waitForTimeout(250);
+const initialEastTileRequests = tileRequestsByImage.get("mock-oblique-east-rgb") || 0;
 
 const mapBox = await page.locator("#leaflet").boundingBox();
 if (!mapBox) throw new Error("planner map is not visible");
@@ -478,6 +510,11 @@ const flatState = await page.evaluate(() => ({
 	warp: !!document.querySelector(".dw-vex-warp"),
 	perspective: document.querySelector("#leaflet")?.classList.contains("dw-vex-perspective-active"),
 	centerActive: document.querySelector(".dw-vex-flat")?.classList.contains("dw-vex-dir--on"),
+	flatVisible: (() => {
+		const entry = window._dwLayerCtrl._layers.find((item) => item.name === "Vexcel Aerial");
+		const container = entry?.layer?.getContainer?.() || entry?.layer?._container;
+		return !!container && getComputedStyle(container).visibility !== "hidden";
+	})(),
 }));
 await page.locator('.dw-vex-dir[data-dir="oblique-east"]').click();
 await page.waitForFunction(() =>
@@ -640,9 +677,12 @@ result.flatState = flatState;
 result.clippedCrossingVisible = clippedCrossingVisible;
 result.repeatedCardinalStayed = repeatedCardinalStayed;
 result.nonlinearAlignment = nonlinearAlignment;
-result.dtmRequests = demPriorities.filter((priority) =>
-	priority === "vexcel-dtm,public-dtm,flat-dtm").length;
+result.unsupportedDemOverrides = demPriorities.filter((priority) => priority != null).length;
 result.transformRequests = demPriorities.length;
+result.firstObliqueTileMs = firstObliqueTileMs;
+result.loadingBaseState = loadingBaseState;
+result.activeBaseState = activeBaseState;
+result.initialEastTileRequests = initialEastTileRequests;
 result.popupAnchorError = popupAnchorError;
 result.deleteLineLength = await page.evaluate(() => window.leafletPlan.lines?.[0]?.length);
 result.pageErrors = pageErrors;
@@ -681,16 +721,26 @@ if (!repeatedCardinalStayed) failures.push("selected cardinal still duplicates t
 if (nonlinearAlignment.vertices < 3 || nonlinearAlignment.error > 1) {
 	failures.push(`sparse route did not follow nonlinear camera: ${JSON.stringify(nonlinearAlignment)}`);
 }
-if (!demPriorities.length || demPriorities.some((priority) =>
-	priority !== "vexcel-dtm,public-dtm,flat-dtm")) {
-	failures.push(`route/click transforms did not consistently request ground DTM: ${JSON.stringify(demPriorities)}`);
+if (!demPriorities.length || demPriorities.some((priority) => priority != null)) {
+	failures.push(`POST transforms included an unsupported DEM override: ${JSON.stringify(demPriorities)}`);
 }
 if (compassState.flatButtons !== 1 || compassState.centerText?.trim() !== "2D" ||
 	compassState.directions.length !== 4 || compassState.directions.some((direction) => direction === "nadir")) {
 	failures.push(`compass still has duplicate flat/nadir actions: ${JSON.stringify(compassState)}`);
 }
-if (flatState.warp || flatState.perspective || !flatState.centerActive) {
+if (flatState.warp || flatState.perspective || !flatState.centerActive || !flatState.flatVisible) {
 	failures.push(`center 2D action did not restore flat map: ${JSON.stringify(flatState)}`);
+}
+if (!loadingBaseState.visible || loadingBaseState.suppressed) {
+	failures.push(`flat base was hidden before the oblique could paint: ${JSON.stringify(loadingBaseState)}`);
+}
+if (!activeBaseState.baseStillSelected || !activeBaseState.hidden || !activeBaseState.suppressed ||
+	activeBaseState.suppressedContainers !== 1) {
+	failures.push(`oblique did not replace only the flat Vexcel base: ${JSON.stringify(activeBaseState)}`);
+}
+if (firstObliqueTileMs > 350) failures.push(`cold oblique first tile took ${firstObliqueTileMs}ms`);
+if (initialEastTileRequests > 24) {
+	failures.push(`initial oblique over-fetched ${initialEastTileRequests} tiles`);
 }
 if (pageErrors.length) failures.push(`page errors: ${pageErrors.join("; ")}`);
 

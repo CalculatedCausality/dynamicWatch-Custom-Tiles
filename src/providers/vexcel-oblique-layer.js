@@ -200,6 +200,7 @@ export function createVexcelObliqueLayer(options) {
 			this._routeTimer = null;
 			this._routeExact = false;
 			this._routeError = false;
+			this._routeDeferred = false;
 			this._routeSources = [];
 			this._routeMarkers = [];
 			this._interactionQueue = [];
@@ -405,6 +406,7 @@ export function createVexcelObliqueLayer(options) {
 			if (this._routeSvg) this._routeSvg.replaceChildren();
 			this._routeSources = [];
 			this._routeMarkers = [];
+			this._routeDeferred = false;
 		},
 
 		getFrame() { return this._frame; },
@@ -717,9 +719,9 @@ export function createVexcelObliqueLayer(options) {
 			const frame = this._frame;
 			const sourceScale = 2 ** downsample;
 			const span = TILE_SIZE * sourceScale;
-			const topLeft = this._map.containerPointToLayerPoint([-160, -160]);
+			const topLeft = this._map.containerPointToLayerPoint([-96, -96]);
 			const size = this._map.getSize();
-			const bottomRight = this._map.containerPointToLayerPoint([size.x + 160, size.y + 160]);
+			const bottomRight = this._map.containerPointToLayerPoint([size.x + 96, size.y + 96]);
 			const minX = Math.max(0, (Math.min(topLeft.x, bottomRight.x) - layout.left) / layout.scale);
 			const minY = Math.max(0, (Math.min(topLeft.y, bottomRight.y) - layout.top) / layout.scale);
 			const maxX = Math.min(frame.w, (Math.max(topLeft.x, bottomRight.x) - layout.left) / layout.scale);
@@ -750,7 +752,7 @@ export function createVexcelObliqueLayer(options) {
 		_chooseTiles(layout) {
 			const dpr = Math.max(1, Number(globalThis.devicePixelRatio) || 1);
 			let downsample = Math.max(0, Math.min(3,
-				Math.floor(Math.log2(Math.max(1, 1 / (layout.scale * dpr))))));
+				Math.ceil(Math.log2(Math.max(1, 1 / (layout.scale * dpr))))));
 			let tiles = this._visibleTiles(downsample, layout);
 			const budget = L.Browser && L.Browser.mobile ? 48 : 96;
 			while (tiles.length > budget && downsample < 3) {
@@ -847,6 +849,11 @@ export function createVexcelObliqueLayer(options) {
 		_requestRoute() {
 			if (!this._map || !this._frame || !this._routeSvg ||
 				(!options.getRouteModel && !options.getRoutePaths)) return;
+			if (this._tiles.size && this.getLoadedTileCount() === 0) {
+				this._routeDeferred = true;
+				return;
+			}
+			this._routeDeferred = false;
 			clearTimeout(this._routeTimer);
 			this._routeGeneration++;
 			if (this._routeHandle && typeof this._routeHandle.abort === "function") {
@@ -1048,7 +1055,7 @@ export function createVexcelObliqueLayer(options) {
 		},
 
 		_pump() {
-			const max = L.Browser && L.Browser.mobile ? 4 : 6;
+			const max = L.Browser && L.Browser.mobile ? 4 : 8;
 			while (this._inflight < max && this._queue.length) {
 				const tile = this._queue.shift();
 				if (!tile || tile.removed || tile.loaded || tile.loading) continue;
@@ -1092,9 +1099,12 @@ export function createVexcelObliqueLayer(options) {
 					tile.failed = true;
 					tile.retryAt = Date.now() + Math.min(30000, 1000 * (2 ** tile.tries));
 					const retryGeneration = this._generation;
-					if (tile.tries < 3) setTimeout(() => {
+					const status = response && response.status;
+					const retryable = !status || status === 429 || status >= 500;
+					if (retryable && tile.tries < 3) setTimeout(() => {
 						if (retryGeneration === this._generation && this._map) this._update();
 					}, tile.retryAt - Date.now());
+					else if (!retryable) tile.tries = 3;
 					this._notify(err || new Error("Vexcel HTTP " + (response && response.status)));
 					return;
 				}
@@ -1106,16 +1116,17 @@ export function createVexcelObliqueLayer(options) {
 					tile.root.classList.add("dw-vex-warp-tile-loaded");
 					tile.img.style.opacity = "1";
 					this._notify();
+					if (this._routeDeferred) {
+						this._routeDeferred = false;
+						this._requestRoute();
+					}
 				};
 				tile.img.onerror = () => {
 					if (tile.removed) return;
 						tile.failed = true;
 						tile.retryAt = Date.now() + Math.min(30000, 1000 * (2 ** tile.tries));
 						if (tile.objectUrl) { URL.revokeObjectURL(tile.objectUrl); tile.objectUrl = null; }
-						const retryGeneration = this._generation;
-						if (tile.tries < 3) setTimeout(() => {
-							if (retryGeneration === this._generation && this._map) this._update();
-						}, tile.retryAt - Date.now());
+						tile.tries = 3;
 						this._notify(new Error("Vexcel decode failed"));
 				};
 				tile.img.src = tile.objectUrl;

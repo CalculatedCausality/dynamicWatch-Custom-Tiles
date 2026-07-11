@@ -119,11 +119,22 @@ function _vexcelInitSession(token, cb) {
 }
 
 // Ensure the current token has a cached session. Always resolves.
+const _sessionFlights = new Map();
 export function _ensureSession(token, cb) {
 	cb = cb || function () {};
 	if (!_vexcelTokenValid(token)) { cb(""); return; }
 	if (_sessionMintedFor(token)) { cb(_getStoredSession()); return; }
-	_vexcelInitSession(token, (s) => { _storeSession(s, token); cb(s); });
+	if (_sessionFlights.has(token)) {
+		_sessionFlights.get(token).push(cb);
+		return;
+	}
+	_sessionFlights.set(token, [cb]);
+	_vexcelInitSession(token, (s) => {
+		_storeSession(s, token);
+		const waiters = _sessionFlights.get(token) || [];
+		_sessionFlights.delete(token);
+		for (const waiter of waiters) waiter(s);
+	});
 }
 
 // Every Vexcel request must look as though it came from the ANZ viewer.

@@ -131,6 +131,8 @@ const routeSurface = await page.evaluate(() => {
 		.map((tile) => tile.getBoundingClientRect());
 	const routeStyle = route ? getComputedStyle(route) : null;
 	const mapRect = map.getContainer().getBoundingClientRect();
+	const baseEntry = window._dwLayerCtrl._layers.find((entry) => entry.name === "Vexcel Aerial");
+	const baseContainer = baseEntry?.layer?.getContainer?.() || baseEntry?.layer?._container;
 	return {
 		warpOnMainMap: !!document.querySelector(".dw-vex-warp") && !!pane,
 		exactRoute: !!document.querySelector(".dw-vex-route--exact"),
@@ -151,6 +153,10 @@ const routeSurface = await page.evaluate(() => {
 			getComputedStyle(document.querySelector(".dw-vex-warp")).transform !== "none" &&
 			!document.querySelector(".dw-vex-warp-cell") &&
 			tiles.every((tile) => getComputedStyle(tile).transform === "none"),
+		flatBaseReplaced: !!baseContainer && getComputedStyle(baseContainer).visibility === "hidden" &&
+			baseContainer.classList.contains("dw-vex-flat-suppressed") &&
+			document.querySelectorAll(".dw-vex-flat-suppressed").length === 1 &&
+			map.hasLayer(baseEntry.layer) && !baseEntry.overlay,
 	};
 });
 
@@ -192,7 +198,8 @@ await page.locator(".dw-vex-rose .dw-vex-flat").click();
 const flatOk = await page.waitForFunction(() =>
 	!document.querySelector(".dw-vex-warp") &&
 	!document.querySelector("#leaflet.dw-vex-perspective-active") &&
-	document.querySelector(".dw-vex-flat")?.classList.contains("dw-vex-dir--on"),
+	document.querySelector(".dw-vex-flat")?.classList.contains("dw-vex-dir--on") &&
+	document.querySelectorAll(".dw-vex-flat-suppressed").length === 0,
 	undefined, { timeout: 10_000 },
 ).then(() => true).catch(() => false);
 await page.locator('.dw-vex-dir[data-dir="oblique-east"]').click();
@@ -256,7 +263,8 @@ const continuousPan = newFrames.length >= 1; // crossed into an adjacent frame
 const routeOk = routeSurface.warpOnMainMap && routeSurface.warpPointerEvents === "none" &&
 	routeSurface.routeConnected && routeSurface.routeAboveWarp && routeSurface.routeOverImagery &&
 	routeSurface.nativeRouteHidden && routeSurface.projectedRouteVisible &&
-	routeSurface.perspectivePreserved && routeSurface.exactRoute && transform200 > 0;
+	routeSurface.perspectivePreserved && routeSurface.flatBaseReplaced &&
+	routeSurface.exactRoute && transform200 > 0;
 const ok = queryOk && modelOk && tilesOk && panLoadsTiles && barGating &&
 	flatOk && reopenOk && continuousPan && routeOk && mapMoved;
 console.log(`  date bar on basemap: ${barGating}  |  center 2D: ${flatOk}  |  reopen oblique: ${reopenOk}  |  continuous pan (frame switch): ${continuousPan}`);

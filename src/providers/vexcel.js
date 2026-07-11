@@ -232,19 +232,21 @@ export function fetchVexcelFrame(lng, lat, collection, dir, band, cb) {
 }
 function _fetchVexcelFrame(lng, lat, collection, dir, band, token, session, cb) {
 	if (!_vexcelTokenValid(token)) { cb(null); return; }
+	const query = {
+		wkt: `POINT(${Number(lng)} ${Number(lat)})`,
+		srid: "4326", layer: "wide-area,urban",
+		"product-type": dir, bands: band || "rgb",
+		"order-by": "image-center-distance-asc", "total-records": 1,
+		include: "image-name,source-layer,raster-size-width," +
+			"raster-size-height,geometry",
+	};
+	if (collection) query.collection = collection;
 	gmJsonGet(
 		CFG.VEXCEL_API_BASE + "/v2/oriented/query?session=" +
 			encodeURIComponent(session) + "&token=" + encodeURIComponent(token),
 		{
 			method: "POST",
-			data: JSON.stringify({
-				wkt: `POINT(${Number(lng)} ${Number(lat)})`,
-				srid: "4326", layer: "wide-area,urban",
-				collection, "product-type": dir, bands: band || "rgb",
-				"order-by": "image-center-distance-asc", "total-records": 1,
-				include: "image-name,source-layer,raster-size-width," +
-					"raster-size-height,geometry",
-			}),
+			data: JSON.stringify(query),
 			headers: _vexcelOriginHeaders({ "Content-Type": "application/json" }),
 		},
 		(err, data) => {
@@ -310,9 +312,6 @@ export function fetchVexcelPixelPoints(frame, points, operation, cb) {
 						"image-name": frame.name,
 						wkt,
 						srid: 4326,
-						// Courses are ground geometry. DSM (the API default) shifts
-						// roads onto roofs and tree canopy in an oblique camera.
-						"dem-priority": "vexcel-dtm,public-dtm,flat-dtm",
 						"metadata-format": "json",
 					}),
 					headers: _vexcelOriginHeaders({ "Content-Type": "application/json" }),
@@ -517,6 +516,11 @@ export function createVexcelControl() {
 	};
 
 	const setMsg = (text) => ctl.setBaseMsg(text);
+	const setFlatSuppressed = (suppressed) => {
+		const container = _vexLayer &&
+			(typeof _vexLayer.getContainer === "function" ? _vexLayer.getContainer() : _vexLayer._container);
+		if (container) container.classList.toggle("dw-vex-flat-suppressed", !!suppressed);
+	};
 	ctl.isObliqueActive = () => ctl.obliqueActive;
 	ctl.isOverlayOpen = ctl.isObliqueActive;
 
@@ -540,6 +544,7 @@ export function createVexcelControl() {
 			onStatus(status) {
 				if (!ctl.obliqueActive || !status.frame || !ctl._frame ||
 					status.frame.name !== ctl._frame.name) return;
+				if (status.loaded > 0) setFlatSuppressed(true);
 				if (status.loaded > 0 && status.routeExact) setMsg("");
 				else if (status.loaded > 0 && status.routeError) {
 					setMsg("The oblique is loaded, but route projection is unavailable.");
@@ -555,6 +560,7 @@ export function createVexcelControl() {
 	};
 
 	const hideOblique = (message) => {
+		setFlatSuppressed(false);
 		ctl.viewGen++;
 		ctl.frameGen++;
 		ctl.pendingOblique = false;
@@ -573,6 +579,7 @@ export function createVexcelControl() {
 	};
 
 	const loadFrame = (frame, preserveScale) => {
+		setFlatSuppressed(false);
 		const base = _vexcelObliqueTileBase(
 			frame.name, frame.layer, _getStoredToken(), _getStoredSession());
 		if (!base) {
@@ -638,13 +645,13 @@ export function createVexcelControl() {
 		updateIrBtn();
 	}
 
-	const ensureObModel = (cb) => {
+	const ensureObModel = (cb, quiet) => {
 		if (!ctl._map) return;
 		const center = ctl._map.getCenter();
 		ctl.lat = center.lat; ctl.lng = center.lng;
 		const key = center.lat.toFixed(5) + "," + center.lng.toFixed(5);
 		if (ctl.obModel && ctl.obAtKey === key) { cb(); return; }
-		setMsg("Loading oblique imagery…");
+		if (!quiet) setMsg("Loading oblique imagery…");
 		const generation = ++ctl.viewGen;
 		ctl.obRequestKey = key;
 		fetchVexcelObliques(center.lat, center.lng, (model) => {
@@ -669,7 +676,28 @@ export function createVexcelControl() {
 		ctl.frameGen++;
 		ctl.pendingOblique = true;
 		setMsg("Loading oblique imagery…");
-		ensureObModel(() => { ctl.pendingOblique = false; markActiveDir(); load(); });
+		const center = ctl._map && ctl._map.getCenter();
+		const direction = ctl.dir, band = ctl.band;
+		const fastGeneration = ctl.frameGen;
+		const loadFromModel = () => ensureObModel(() => {
+			ctl.pendingOblique = false; markActiveDir(); load();
+		});
+		if (!center) { loadFromModel(); return; }
+		let fastFinished = false;
+		const fallbackTimer = setTimeout(() => {
+			if (!fastFinished && ctl.pendingOblique && fastGeneration === ctl.frameGen) loadFromModel();
+		}, 1200);
+		fetchVexcelFrame(center.lng, center.lat, curCollection(), direction, band, (frame) => {
+			if (!ctl._map || fastGeneration !== ctl.frameGen || direction !== ctl.dir || band !== ctl.band) return;
+			fastFinished = true;
+			clearTimeout(fallbackTimer);
+			if (!frame || !frame.name) { loadFromModel(); return; }
+			ctl.pendingOblique = false;
+			loadFrame(Object.assign({ collection: curCollection() }, frame));
+			setTimeout(() => {
+				if (ctl._map && direction === ctl.dir) ensureObModel(markActiveDir, true);
+			}, 500);
+		});
 	}));
 	if (flatBtn) flatBtn.addEventListener("click", () => {
 		if (ctl.obliqueActive) hideOblique();
