@@ -202,6 +202,8 @@ export function createVexcelObliqueLayer(options) {
 			this._routeHandle = null;
 			this._routeGeneration = 0;
 			this._routeTimer = null;
+			this._routeRetryTimer = null;
+			this._routeRetryCount = 0;
 			this._routeExact = false;
 			this._routeError = false;
 			this._routeDeferred = false;
@@ -281,7 +283,7 @@ export function createVexcelObliqueLayer(options) {
 			this._requestRoute();
 		},
 
-			onRemove() {
+		onRemove() {
 			this._generation++;
 			this._cancelInteractionRequests();
 			this._cancelProjectionRequests();
@@ -289,6 +291,7 @@ export function createVexcelObliqueLayer(options) {
 			this._clearFrameTransition();
 			if (this._routeSvg) this._routeSvg.replaceChildren();
 			clearTimeout(this._routeTimer);
+			clearTimeout(this._routeRetryTimer);
 			if (this._routeObserver) { this._routeObserver.disconnect(); this._routeObserver = null; }
 			if (this._map && this._onPlannerLayerChange) {
 				this._map.off("layeradd layerremove", this._onPlannerLayerChange);
@@ -364,6 +367,8 @@ export function createVexcelObliqueLayer(options) {
 			this._pendingRouteDraw = null;
 			this._routeExact = false;
 			this._routeError = false;
+			this._routeRetryCount = 0;
+			clearTimeout(this._routeRetryTimer);
 			for (const hit of this._routeSvg.querySelectorAll(".dw-vex-route-hit")) {
 				hit.classList.remove("dw-vex-route-hit");
 			}
@@ -372,6 +377,7 @@ export function createVexcelObliqueLayer(options) {
 			}
 			this._notify();
 			clearTimeout(this._routeTimer);
+			clearTimeout(this._routeRetryTimer);
 			this._routeTimer = setTimeout(() => this._requestRoute(), 100);
 		},
 
@@ -384,6 +390,7 @@ export function createVexcelObliqueLayer(options) {
 			this._generation++;
 			this._cancelInteractionRequests();
 			clearTimeout(this._routeTimer);
+			clearTimeout(this._routeRetryTimer);
 			this._cancelProjectionRequests();
 			this._clearTiles();
 			if (this._routeSvg) this._routeSvg.replaceChildren();
@@ -398,6 +405,7 @@ export function createVexcelObliqueLayer(options) {
 			this._centerRequestKey = "";
 			this._routeExact = false;
 			this._routeError = false;
+			this._routeRetryCount = 0;
 			if (this._map) {
 				this._ensureScale();
 				this._update();
@@ -411,6 +419,7 @@ export function createVexcelObliqueLayer(options) {
 			this._clearFrameTransition();
 			this._cancelInteractionRequests();
 			clearTimeout(this._routeTimer);
+			clearTimeout(this._routeRetryTimer);
 			this._frame = null;
 			this._nativeScale = 0;
 			this._centerPixel = null;
@@ -423,6 +432,7 @@ export function createVexcelObliqueLayer(options) {
 			this._routeSources = [];
 			this._routeMarkers = [];
 			this._routeDeferred = false;
+			this._routeRetryCount = 0;
 		},
 
 		getFrame() { return this._frame; },
@@ -1167,7 +1177,19 @@ export function createVexcelObliqueLayer(options) {
 			handle = options.transformPoints(frame, flat, "world-2-pixel", (pixels, transformStatus) => {
 				if (generation !== this._generation || routeGeneration !== this._routeGeneration ||
 					frame !== this._frame) return;
-				if (transformStatus && transformStatus.failedChunks > 0) {
+				if (transformStatus && transformStatus.failedChunks > 0 &&
+					transformStatus.successfulChunks === 0) {
+					if (this._routeRetryCount < 2) {
+						this._routeRetryCount++;
+						const retryGeneration = this._generation;
+						this._routeRetryTimer = setTimeout(() => {
+							if (retryGeneration === this._generation && frame === this._frame) {
+								this._requestRoute();
+							}
+						}, 300 * this._routeRetryCount);
+						if (this._routeHandle === handle) this._routeHandle = null;
+						return;
+					}
 					this._routeError = true;
 					this._notify();
 					if (this._routeHandle === handle) this._routeHandle = null;
@@ -1180,6 +1202,8 @@ export function createVexcelObliqueLayer(options) {
 					if (this._routeHandle === handle) this._routeHandle = null;
 					return;
 				}
+				this._routeRetryCount = 0;
+				clearTimeout(this._routeRetryTimer);
 				let complete = true;
 				for (let i = 0; i < indices.length; i++) {
 					const pixel = pixels[i];

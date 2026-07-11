@@ -3319,6 +3319,8 @@
         this._routeHandle = null;
         this._routeGeneration = 0;
         this._routeTimer = null;
+        this._routeRetryTimer = null;
+        this._routeRetryCount = 0;
         this._routeExact = false;
         this._routeError = false;
         this._routeDeferred = false;
@@ -3406,6 +3408,7 @@
         this._clearFrameTransition();
         if (this._routeSvg) this._routeSvg.replaceChildren();
         clearTimeout(this._routeTimer);
+        clearTimeout(this._routeRetryTimer);
         if (this._routeObserver) {
           this._routeObserver.disconnect();
           this._routeObserver = null;
@@ -3477,6 +3480,8 @@
         this._pendingRouteDraw = null;
         this._routeExact = false;
         this._routeError = false;
+        this._routeRetryCount = 0;
+        clearTimeout(this._routeRetryTimer);
         for (const hit of this._routeSvg.querySelectorAll(".dw-vex-route-hit")) {
           hit.classList.remove("dw-vex-route-hit");
         }
@@ -3485,6 +3490,7 @@
         }
         this._notify();
         clearTimeout(this._routeTimer);
+        clearTimeout(this._routeRetryTimer);
         this._routeTimer = setTimeout(() => this._requestRoute(), 100);
       },
       setFrame(frame) {
@@ -3494,6 +3500,7 @@
         this._generation++;
         this._cancelInteractionRequests();
         clearTimeout(this._routeTimer);
+        clearTimeout(this._routeRetryTimer);
         this._cancelProjectionRequests();
         this._clearTiles();
         if (this._routeSvg) this._routeSvg.replaceChildren();
@@ -3508,6 +3515,7 @@
         this._centerRequestKey = "";
         this._routeExact = false;
         this._routeError = false;
+        this._routeRetryCount = 0;
         if (this._map) {
           this._ensureScale();
           this._update();
@@ -3520,6 +3528,7 @@
         this._clearFrameTransition();
         this._cancelInteractionRequests();
         clearTimeout(this._routeTimer);
+        clearTimeout(this._routeRetryTimer);
         this._frame = null;
         this._nativeScale = 0;
         this._centerPixel = null;
@@ -3532,6 +3541,7 @@
         this._routeSources = [];
         this._routeMarkers = [];
         this._routeDeferred = false;
+        this._routeRetryCount = 0;
       },
       getFrame() {
         return this._frame;
@@ -4268,7 +4278,18 @@
         let handle = null;
         handle = options.transformPoints(frame, flat, "world-2-pixel", (pixels, transformStatus) => {
           if (generation !== this._generation || routeGeneration !== this._routeGeneration || frame !== this._frame) return;
-          if (transformStatus && transformStatus.failedChunks > 0) {
+          if (transformStatus && transformStatus.failedChunks > 0 && transformStatus.successfulChunks === 0) {
+            if (this._routeRetryCount < 2) {
+              this._routeRetryCount++;
+              const retryGeneration = this._generation;
+              this._routeRetryTimer = setTimeout(() => {
+                if (retryGeneration === this._generation && frame === this._frame) {
+                  this._requestRoute();
+                }
+              }, 300 * this._routeRetryCount);
+              if (this._routeHandle === handle) this._routeHandle = null;
+              return;
+            }
             this._routeError = true;
             this._notify();
             if (this._routeHandle === handle) this._routeHandle = null;
@@ -4281,6 +4302,8 @@
             if (this._routeHandle === handle) this._routeHandle = null;
             return;
           }
+          this._routeRetryCount = 0;
+          clearTimeout(this._routeRetryTimer);
           let complete = true;
           for (let i = 0; i < indices.length; i++) {
             const pixel = pixels[i];
@@ -4755,8 +4778,9 @@
       let remaining = chunks.length;
       let nextChunk = 0, active = 0;
       let successfulChunks = 0, failedChunks = 0;
+      const maxConcurrent = operation === "world-2-pixel" ? 2 : 4;
       const pump = () => {
-        while (!request.aborted && active < 4 && nextChunk < chunks.length) {
+        while (!request.aborted && active < maxConcurrent && nextChunk < chunks.length) {
           const chunk = chunks[nextChunk++];
           active++;
           const coords = chunk.points.map((p) => `${Number(p[0])} ${Number(p[1])}`);
@@ -4780,9 +4804,9 @@
               active--;
               request.handles = request.handles.filter((item) => item !== handle);
               const transformed = !err && data && Array.isArray(data.points) ? data.points : null;
-              if (transformed && transformed.length === chunk.points.length) {
+              if (transformed) {
                 successfulChunks++;
-                for (let i = 0; i < transformed.length; i++) {
+                for (let i = 0; i < Math.min(transformed.length, chunk.points.length); i++) {
                   const p = transformed[i] || {};
                   const validCoord = (value2) => (typeof value2 === "number" || typeof value2 === "string" && value2.trim() !== "") && Number.isFinite(Number(value2));
                   const directValid = validCoord(p.x) && validCoord(p.y);

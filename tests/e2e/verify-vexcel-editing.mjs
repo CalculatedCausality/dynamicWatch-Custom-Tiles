@@ -55,7 +55,8 @@ const context = await browser.newContext({
 let worldToPixel = 0, pixelToWorld = 0, pixelFallbacks = 0;
 let delayNextWorldTransform = false;
 let failNextPixelTransform = false;
-let failNextWorldTransform = false;
+let failWorldTransforms = false;
+let shortenNextWorldTransform = false;
 let overscanWorldTransform = false;
 const demPriorities = [];
 const tileRequestsByImage = new Map();
@@ -97,8 +98,7 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 		const points = body.operation === "world-2-pixel" ? values.map(toPixel) : values.map(toWorld);
 		if (body.operation === "world-2-pixel") worldToPixel++;
 		else pixelToWorld++;
-		if (body.operation === "world-2-pixel" && failNextWorldTransform) {
-			failNextWorldTransform = false;
+		if (body.operation === "world-2-pixel" && failWorldTransforms) {
 			await route.fulfill({ status: 503, contentType: "application/json", body: "{}" });
 			return;
 		}
@@ -112,10 +112,15 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 		const useFallback = body.operation !== "world-2-pixel" && failNextPixelTransform;
 		if (useFallback) failNextPixelTransform = false;
 		if (useFallback) pixelFallbacks++;
+		const responsePoints = body.operation === "world-2-pixel" && shortenNextWorldTransform
+			? points.slice(0, -1) : points;
+		if (body.operation === "world-2-pixel" && shortenNextWorldTransform) {
+			shortenNextWorldTransform = false;
+		}
 		await route.fulfill({
 			status: 200,
 			contentType: "application/json",
-			body: JSON.stringify({ points: useFallback ? [] : points }),
+			body: JSON.stringify({ points: useFallback ? [] : responsePoints }),
 		});
 		return;
 	}
@@ -548,7 +553,7 @@ await page.waitForFunction(() =>
 
 // A transport failure is different from a valid off-frame response. Keep the
 // last exact drawing visible, but report that fresh projection is unavailable.
-failNextWorldTransform = true;
+failWorldTransforms = true;
 await page.evaluate(() => {
 	const polyline = window.leafletPlan.currentLine[1].polyline;
 	polyline.setLatLngs(polyline.getLatLngs());
@@ -557,12 +562,26 @@ await page.waitForFunction(() =>
 	/projection is unavailable/i.test(document.querySelector(".dw-vex-basemsg")?.textContent || ""));
 const transformOutagePreservedRoute = await page.evaluate(() =>
 	document.querySelectorAll(".dw-vex-route-visual").length === 2);
+failWorldTransforms = false;
 await page.evaluate(() => {
 	const polyline = window.leafletPlan.currentLine[1].polyline;
 	polyline.setLatLngs(polyline.getLatLngs());
 });
 await page.waitForFunction(() =>
 	!!document.querySelector(".dw-vex-route--exact") &&
+	!/projection is unavailable/i.test(document.querySelector(".dw-vex-basemsg")?.textContent || ""));
+shortenNextWorldTransform = true;
+await page.evaluate(() => {
+	const polyline = window.leafletPlan.currentLine[1].polyline;
+	polyline.setLatLngs(polyline.getLatLngs());
+});
+await page.waitForFunction(() =>
+	!!document.querySelector(".dw-vex-route--exact") &&
+	document.querySelectorAll(".dw-vex-route-visual").length > 0 &&
+	!/projection is unavailable/i.test(document.querySelector(".dw-vex-basemsg")?.textContent || ""));
+const shortenedTransformAccepted = await page.evaluate(() =>
+	!!document.querySelector(".dw-vex-route--exact") &&
+	document.querySelectorAll(".dw-vex-route-visual").length > 0 &&
 	!/projection is unavailable/i.test(document.querySelector(".dw-vex-basemsg")?.textContent || ""));
 
 const inspectProjectedRoute = () => page.evaluate(() => {
@@ -941,6 +960,7 @@ result.routeTouchDragState = routeTouchDragState;
 result.routeTouchTapState = routeTouchTapState;
 result.offFrameRouteOk = offFrameRouteOk;
 result.transformOutagePreservedRoute = transformOutagePreservedRoute;
+result.shortenedTransformAccepted = shortenedTransformAccepted;
 result.popupAnchorError = popupAnchorError;
 result.deleteLineLength = await page.evaluate(() => window.leafletPlan.lines?.[0]?.length);
 result.pageErrors = pageErrors;
@@ -1018,6 +1038,7 @@ if (routeTouchTapState.lineLength !== 3 || routeTouchTapState.clicks !== 1) {
 }
 if (!offFrameRouteOk) failures.push("off-frame route was reported as an unavailable projection");
 if (!transformOutagePreservedRoute) failures.push("transform outage erased the last exact projected route");
+if (!shortenedTransformAccepted) failures.push("shortened successful transform was reported as unavailable");
 if (pageErrors.length) failures.push(`page errors: ${pageErrors.join("; ")}`);
 
 await browser.close();

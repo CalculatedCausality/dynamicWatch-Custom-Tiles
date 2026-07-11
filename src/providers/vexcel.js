@@ -294,8 +294,9 @@ export function fetchVexcelPixelPoints(frame, points, operation, cb) {
 		let remaining = chunks.length;
 		let nextChunk = 0, active = 0;
 		let successfulChunks = 0, failedChunks = 0;
+		const maxConcurrent = operation === "world-2-pixel" ? 2 : 4;
 		const pump = () => {
-			while (!request.aborted && active < 4 && nextChunk < chunks.length) {
+			while (!request.aborted && active < maxConcurrent && nextChunk < chunks.length) {
 				const chunk = chunks[nextChunk++];
 				active++;
 				const coords = chunk.points.map((p) => `${Number(p[0])} ${Number(p[1])}`);
@@ -323,9 +324,9 @@ export function fetchVexcelPixelPoints(frame, points, operation, cb) {
 					request.handles = request.handles.filter((item) => item !== handle);
 					const transformed = !err && data && Array.isArray(data.points)
 						? data.points : null;
-					if (transformed && transformed.length === chunk.points.length) {
+					if (transformed) {
 						successfulChunks++;
-						for (let i = 0; i < transformed.length; i++) {
+						for (let i = 0; i < Math.min(transformed.length, chunk.points.length); i++) {
 							const p = transformed[i] || {};
 							const validCoord = (value) => (typeof value === "number" ||
 								(typeof value === "string" && value.trim() !== "")) &&
