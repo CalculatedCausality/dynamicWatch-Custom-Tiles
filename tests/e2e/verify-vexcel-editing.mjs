@@ -188,6 +188,9 @@ await page.locator('#travel-mode-popup a.travel-mode-a[data-id="none"]').click()
 
 await page.evaluate(() => {
 	const map = window._dwLayerCtrl._map;
+	// Exercise the oblique layer's lower-concurrency mobile tile path while
+	// retaining the desktop planner layout used by the editing assertions.
+	L.Browser.mobile = true;
 	const control = window._dwLayerCtrl;
 	const vexcel = control._layers.find((entry) => entry.name === "Vexcel Aerial")?.layer;
 	control._layers.filter((entry) => !entry.overlay).forEach((entry) => {
@@ -229,8 +232,18 @@ const panBefore = await page.evaluate(() => ({
 	tiles: [...document.querySelectorAll(".dw-vex-warp-tile-loaded")].map((tile) => tile.dataset.tile),
 }));
 const frameQueriesBeforePan = frameQueryCount;
+await page.evaluate(() => {
+	window._dwVexcelMinimumLoadedTiles = document.querySelectorAll(".dw-vex-warp-tile-loaded").length;
+	window._dwVexcelTileObserver = new MutationObserver(() => {
+		window._dwVexcelMinimumLoadedTiles = Math.min(window._dwVexcelMinimumLoadedTiles,
+			document.querySelectorAll(".dw-vex-warp-tile-loaded").length);
+	});
+	window._dwVexcelTileObserver.observe(document.querySelector(".dw-vex-warp"), {
+		subtree: true, childList: true, attributes: true, attributeFilter: ["class"],
+	});
+});
 let maxReleaseJump = 0;
-for (const [dx, dy] of [[0, 30], [35, 0], [0, -25], [-30, 0]]) {
+for (const [dx, dy] of [[0, 120], [120, 0], [0, -110], [-110, 0]]) {
 	const x = mapBox.x + mapBox.width / 2, y = mapBox.y + mapBox.height / 2;
 	await page.mouse.move(x, y);
 	await page.mouse.down();
@@ -248,9 +261,15 @@ for (const [dx, dy] of [[0, 30], [35, 0], [0, -25], [-30, 0]]) {
 	}, { width: WIDTH, height: HEIGHT });
 	maxReleaseJump = Math.max(maxReleaseJump,
 		Math.hypot(afterRelease.x - beforeRelease.x, afterRelease.y - beforeRelease.y));
-	await page.waitForTimeout(25);
+	// Exceed the 350ms frame-refresh delay after every drag. The active photo
+	// must not be replaced merely because one mobile viewport edge crossed it.
+	await page.waitForTimeout(425);
 }
 await page.waitForTimeout(800);
+const minimumLoadedTiles = await page.evaluate(() => {
+	window._dwVexcelTileObserver.disconnect();
+	return window._dwVexcelMinimumLoadedTiles;
+});
 const panAfter = await page.evaluate(({ west, east, north, south, width, height, curve }) => {
 	const map = window.leafletPlan.map;
 	const center = map.getCenter();
@@ -277,6 +296,7 @@ const panState = {
 	retention: panBefore.tiles.length ? retainedTiles / panBefore.tiles.length : 0,
 	centerError: panAfter.centerError,
 	maxReleaseJump,
+	minimumLoadedTiles,
 	baseStillSuppressed: await page.evaluate(() => {
 		const entry = window._dwLayerCtrl._layers.find((item) => item.name === "Vexcel Aerial");
 		const container = entry?.layer?.getContainer?.() || entry?.layer?._container;
@@ -430,6 +450,8 @@ const inspectProjectedRoute = () => page.evaluate(() => {
 	const children = [...svg.children];
 	const visuals = children.map((node, index) => node.classList.contains("dw-vex-route-visual") ? index : -1)
 		.filter((index) => index >= 0);
+	const casings = children.map((node, index) => node.classList.contains("dw-vex-route-casing") ? index : -1)
+		.filter((index) => index >= 0);
 	const hits = children.map((node, index) => node.classList.contains("dw-vex-route-hit") ? index : -1)
 		.filter((index) => index >= 0);
 	const endpoints = visuals.flatMap((index) => {
@@ -468,21 +490,29 @@ const inspectProjectedRoute = () => page.evaluate(() => {
 		if (!source) return false;
 		const options = source.options || {};
 		return path.getAttribute("stroke").toLowerCase() === String(options.color || "#9400D3").toLowerCase() &&
-			Math.abs(Number(path.getAttribute("stroke-width")) - Number(options.weight || 8)) < 1e-9 &&
-			Math.abs(Number(path.getAttribute("stroke-opacity")) - Number(options.opacity ?? 0.4)) < 1e-9 &&
+			Number(path.getAttribute("stroke-width")) >= Math.max(8, Number(options.weight || 8)) &&
+			Number(path.getAttribute("stroke-opacity")) >= Math.max(0.9, Number(options.opacity ?? 0.4)) &&
 			path.getAttribute("stroke-linecap") === String(options.lineCap || "round") &&
 			path.getAttribute("stroke-linejoin") === String(options.lineJoin || "round");
 	});
+	const casingVisible = casings.length === visuals.length && casings.every((index) => {
+		const path = children[index];
+		return path.getAttribute("stroke") === "#fff" &&
+			Number(path.getAttribute("stroke-width")) >= 13 &&
+			Number(path.getAttribute("stroke-opacity")) >= 0.9;
+	});
 	return {
 		visuals: visuals.length,
+		casings: casings.length,
 		hits: hits.length,
-		paintOrder: visuals.length > 0 && hits.length > 0 &&
-			Math.max(...visuals) < Math.min(...hits),
+		paintOrder: casings.length > 0 && visuals.length > 0 && hits.length > 0 &&
+			Math.max(...casings) < Math.min(...visuals) && Math.max(...visuals) < Math.min(...hits),
 		finite: [...svg.querySelectorAll("path")].every((path) =>
 			!/NaN|Infinity|undefined/.test(path.getAttribute("d") || "")),
 		maxEndpointError,
 		adjacencyError,
 		styleMatches,
+		casingVisible,
 	};
 });
 
@@ -797,7 +827,8 @@ if (result.deleteLineLength !== 2) failures.push("projected route-point delete d
 for (const angle of angleResults) {
 	if (angle.insertionError > 3) failures.push(`${angle.direction} insertion missed by ${angle.insertionError.toFixed(1)}px`);
 	for (const [state, quality] of [["inserted", angle.insertedQuality], ["restored", angle.restoredQuality]]) {
-		if (!quality.paintOrder || !quality.finite || !quality.styleMatches || quality.maxEndpointError > 0.5 ||
+		if (!quality.paintOrder || !quality.finite || !quality.styleMatches || !quality.casingVisible ||
+			quality.maxEndpointError > 0.5 ||
 			quality.adjacencyError > 0.5) {
 			failures.push(`${angle.direction} ${state} route rendered poorly: ${JSON.stringify(quality)}`);
 		}
@@ -830,7 +861,8 @@ if (initialEastTileRequests > 24) {
 	failures.push(`initial oblique over-fetched ${initialEastTileRequests} tiles`);
 }
 if (!panState.sameFrame || panState.frameQueries !== 0 || panState.retention < 0.7 ||
-	panState.centerError > 1 || panState.maxReleaseJump > 1 || !panState.baseStillSuppressed) {
+	panState.centerError > 1 || panState.maxReleaseJump > 1 || panState.minimumLoadedTiles < 1 ||
+	!panState.baseStillSuppressed) {
 	failures.push(`small oblique pan reloaded or lost its camera center: ${JSON.stringify(panState)}`);
 }
 if (!offFrameRouteOk) failures.push("off-frame route was reported as an unavailable projection");

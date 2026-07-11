@@ -786,7 +786,10 @@ export function createVexcelControl() {
 	};
 	const refreshFrame = () => {
 		if (!ctl._map || !ctl.obliqueActive || !ctl._frame) return;
-		if (ctl._warpLayer && ctl._warpLayer.coversCurrentView()) return;
+		// A photograph should remain stable while its center is still usable.
+		// Switching when only a viewport edge crosses the footprint causes a
+		// complete tile churn after nearly every drag on narrow mobile screens.
+		if (ctl._warpLayer && ctl._warpLayer.containsCurrentCenter()) return;
 		const center = ctl._map.getCenter();
 		const collection = ctl._frame.collection || obliqueCollection();
 		const direction = ctl.dir, band = ctl.frameBand;

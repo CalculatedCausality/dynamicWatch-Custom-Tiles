@@ -417,19 +417,43 @@ export function createVexcelObliqueLayer(options) {
 		},
 
 		getFrame() { return this._frame; },
+		_estimatedCenterPixel() {
+			if (!this._map || !this._frame) return null;
+			const mapCenter = this._map.getCenter();
+			const centerKey = mapCenter.lat.toFixed(6) + "," + mapCenter.lng.toFixed(6);
+			if (this._centerPixelKey === centerKey && this._centerPixel) return this._centerPixel;
+			if (this._centerPixel && this._centerLatLng) {
+				const zoom = this._map.getZoom();
+				const scale = this._scale();
+				const previous = this._map.project(this._centerLatLng, zoom);
+				const current = this._map.project(mapCenter, zoom);
+				return [
+					this._centerPixel[0] + (current.x - previous.x) / scale,
+					this._centerPixel[1] + (current.y - previous.y) / scale,
+				];
+			}
+			return this._fallbackPixel(mapCenter);
+		},
+		containsCurrentCenter() {
+			if (!this._map || !this._frame) return false;
+			const center = this._estimatedCenterPixel();
+			if (!center) return false;
+			const tolerance = 96 / this._scale();
+			return center[0] >= -tolerance && center[0] <= this._frame.w + tolerance &&
+				center[1] >= -tolerance && center[1] <= this._frame.h + tolerance;
+		},
 		coversCurrentView() {
-			if (!this._map || !this._frame || !this._centerPixel) return false;
-			const center = this._map.getCenter();
-			const key = center.lat.toFixed(6) + "," + center.lng.toFixed(6);
-			if (key !== this._centerPixelKey) return false;
+			if (!this._map || !this._frame) return false;
+			const center = this._estimatedCenterPixel();
+			if (!center) return false;
 			const scale = this._scale();
 			const size = this._map.getSize();
 			const halfX = size.x / (2 * scale), halfY = size.y / (2 * scale);
 			const tolerance = 48 / scale;
-			return this._centerPixel[0] - halfX >= -tolerance &&
-				this._centerPixel[0] + halfX <= this._frame.w + tolerance &&
-				this._centerPixel[1] - halfY >= -tolerance &&
-				this._centerPixel[1] + halfY <= this._frame.h + tolerance;
+			return center[0] - halfX >= -tolerance &&
+				center[0] + halfX <= this._frame.w + tolerance &&
+				center[1] - halfY >= -tolerance &&
+				center[1] + halfY <= this._frame.h + tolerance;
 		},
 		getLoadedTileCount() {
 			let count = 0;
@@ -515,22 +539,8 @@ export function createVexcelObliqueLayer(options) {
 		_layout() {
 			if (!this._map || !this._frame || !this._container || !this._routeSvg) return null;
 			const scale = this._scale();
-			const mapCenter = this._map.getCenter();
-			const centerKey = mapCenter.lat.toFixed(6) + "," + mapCenter.lng.toFixed(6);
-			let center;
-			if (this._centerPixelKey === centerKey && this._centerPixel) {
-				center = this._centerPixel;
-			} else if (this._centerPixel && this._centerLatLng) {
-				const zoom = this._map.getZoom();
-				const previous = this._map.project(this._centerLatLng, zoom);
-				const current = this._map.project(mapCenter, zoom);
-				center = [
-					this._centerPixel[0] + (current.x - previous.x) / scale,
-					this._centerPixel[1] + (current.y - previous.y) / scale,
-				];
-			} else {
-				center = this._fallbackPixel(mapCenter);
-			}
+			const center = this._estimatedCenterPixel();
+			if (!center) return null;
 			const size = this._map.getSize();
 			const layerCenter = this._map.containerPointToLayerPoint([size.x / 2, size.y / 2]);
 			const left = layerCenter.x - center[0] * scale;
@@ -1086,21 +1096,35 @@ export function createVexcelObliqueLayer(options) {
 				const points = entry.points || entry;
 				const source = this._routeSources[entry.sourceIndex];
 				const options = source && source.polyline && source.polyline.options || {};
-				const weight = Number.isFinite(Number(options.weight)) ? Number(options.weight) : 8;
-				const opacity = Number.isFinite(Number(options.opacity)) ? Number(options.opacity) : 0.4;
+				const sourceWeight = Number.isFinite(Number(options.weight)) ? Number(options.weight) : 8;
+				const sourceOpacity = Number.isFinite(Number(options.opacity)) ? Number(options.opacity) : 0.4;
 				for (const segment of _vexcelClipPathToRect(points, this._frame.w, this._frame.h)) {
 					rendered.push({
 						d: segment.map((p, i) => (i ? "L" : "M") + p[0] + " " + p[1]).join(" "),
 						sourceIndex: entry.sourceIndex == null ? -1 : entry.sourceIndex,
 						color: String(options.color || "#9400D3"),
-						weight,
-						opacity,
+						weight: Math.max(8, sourceWeight),
+						opacity: Math.max(0.9, sourceOpacity),
 						lineCap: String(options.lineCap || "round"),
 						lineJoin: String(options.lineJoin || "round"),
 						dashArray: options.dashArray == null ? "" : String(options.dashArray),
 						dashOffset: options.dashOffset == null ? "" : String(options.dashOffset),
 					});
 				}
+			}
+			for (const item of rendered) {
+				const casing = document.createElementNS("http://www.w3.org/2000/svg", "path");
+				casing.classList.add("dw-vex-route-casing");
+				casing.dataset.sourceIndex = String(item.sourceIndex);
+				casing.setAttribute("d", item.d);
+				casing.setAttribute("fill", "none");
+				casing.setAttribute("stroke", "#fff");
+				casing.setAttribute("stroke-width", String(item.weight + 5));
+				casing.setAttribute("stroke-opacity", "0.9");
+				casing.setAttribute("stroke-linecap", "round");
+				casing.setAttribute("stroke-linejoin", "round");
+				casing.setAttribute("vector-effect", "non-scaling-stroke");
+				this._routeSvg.appendChild(casing);
 			}
 			for (const item of rendered) {
 				const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
