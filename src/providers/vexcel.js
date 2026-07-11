@@ -293,6 +293,7 @@ export function fetchVexcelPixelPoints(frame, points, operation, cb) {
 		const result = new Array(points.length);
 		let remaining = chunks.length;
 		let nextChunk = 0, active = 0;
+		let successfulChunks = 0, failedChunks = 0;
 		const pump = () => {
 			while (!request.aborted && active < 4 && nextChunk < chunks.length) {
 				const chunk = chunks[nextChunk++];
@@ -323,6 +324,7 @@ export function fetchVexcelPixelPoints(frame, points, operation, cb) {
 					const transformed = !err && data && Array.isArray(data.points)
 						? data.points : null;
 					if (transformed && transformed.length === chunk.points.length) {
+						successfulChunks++;
 						for (let i = 0; i < transformed.length; i++) {
 							const p = transformed[i] || {};
 							const validCoord = (value) => (typeof value === "number" ||
@@ -339,10 +341,10 @@ export function fetchVexcelPixelPoints(frame, points, operation, cb) {
 								result[chunk.start + i] = [x, y];
 							}
 						}
-					}
+					} else failedChunks++;
 					if (--remaining === 0) {
 						request.completed = true;
-						cb(result);
+						cb(result, { successfulChunks, failedChunks });
 					} else pump();
 				},
 			);
@@ -541,6 +543,11 @@ export function createVexcelControl() {
 			},
 			transformPoints: fetchVexcelPixelPoints,
 			getRouteModel: _dwGetRouteModel,
+			onZoomState(zooming) {
+				// Perspective containers use Leaflet's zoom-hide behavior. Keep the
+				// ordinary base visible during a mobile pinch instead of flashing blank.
+				if (zooming) setFlatSuppressed(false);
+			},
 			onStatus(status) {
 				if (!ctl.obliqueActive || !status.frame || !ctl._frame ||
 					status.frame.name !== ctl._frame.name) return;
@@ -560,7 +567,9 @@ export function createVexcelControl() {
 	};
 
 	const hideOblique = (message) => {
-		setFlatSuppressed(false);
+		if (!ctl._warpLayer || ctl._warpLayer.getLoadedTileCount() === 0) {
+			setFlatSuppressed(false);
+		}
 		ctl.viewGen++;
 		ctl.frameGen++;
 		ctl.pendingOblique = false;
@@ -573,6 +582,9 @@ export function createVexcelControl() {
 			ctl._warpLayer.clearFrame();
 			if (ctl._map && ctl._map.hasLayer(ctl._warpLayer)) ctl._map.removeLayer(ctl._warpLayer);
 		}
+		// Teardown can synchronously flush pending layer status callbacks. Make
+		// flat visibility the final state after all perspective cleanup.
+		setFlatSuppressed(false);
 		setMsg(message || "");
 		markActiveDir();
 		ctl._fire("overlaytoggle");

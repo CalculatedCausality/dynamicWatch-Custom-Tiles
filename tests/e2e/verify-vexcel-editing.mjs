@@ -49,10 +49,13 @@ const browser = await chromium.launch({
 	headless: !process.env.HEADED,
 	args: ["--disable-web-security", "--disable-features=IsolateOrigins,site-per-process"],
 });
-const context = await browser.newContext({ storageState: STATE, viewport: { width: 1400, height: 900 } });
+const context = await browser.newContext({
+	storageState: STATE, viewport: { width: 1400, height: 900 }, hasTouch: true,
+});
 let worldToPixel = 0, pixelToWorld = 0, pixelFallbacks = 0;
 let delayNextWorldTransform = false;
 let failNextPixelTransform = false;
+let failNextWorldTransform = false;
 let overscanWorldTransform = false;
 const demPriorities = [];
 const tileRequestsByImage = new Map();
@@ -93,6 +96,11 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 		const points = body.operation === "world-2-pixel" ? values.map(toPixel) : values.map(toWorld);
 		if (body.operation === "world-2-pixel") worldToPixel++;
 		else pixelToWorld++;
+		if (body.operation === "world-2-pixel" && failNextWorldTransform) {
+			failNextWorldTransform = false;
+			await route.fulfill({ status: 503, contentType: "application/json", body: "{}" });
+			return;
+		}
 		// Interaction transforms are deliberately slower. The fifth one also
 		// returns no point so Add Waypoint must use the safe footprint fallback.
 		if (body.operation !== "world-2-pixel") await new Promise((done) => setTimeout(done, 80));
@@ -265,6 +273,28 @@ for (const [dx, dy] of [[0, 120], [120, 0], [0, -110], [-110, 0]]) {
 	// must not be replaced merely because one mobile viewport edge crossed it.
 	await page.waitForTimeout(425);
 }
+const touchCenterBefore = await page.evaluate(() => {
+	const center = window.leafletPlan.map.getCenter();
+	return { lat: center.lat, lng: center.lng };
+});
+const cdp = await context.newCDPSession(page);
+const touchStart = { x: mapBox.x + mapBox.width / 2, y: mapBox.y + mapBox.height / 2 };
+await cdp.send("Input.dispatchTouchEvent", {
+	type: "touchStart", touchPoints: [{ ...touchStart, id: 1 }],
+});
+await page.waitForTimeout(180);
+for (let step = 1; step <= 6; step++) {
+	await cdp.send("Input.dispatchTouchEvent", {
+		type: "touchMove",
+		touchPoints: [{ x: touchStart.x + 90 * step / 6, y: touchStart.y, id: 1 }],
+	});
+}
+await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+await page.waitForTimeout(425);
+const touchCenterDistance = await page.evaluate((before) => {
+	const center = window.leafletPlan.map.getCenter();
+	return Math.hypot(center.lat - before.lat, center.lng - before.lng);
+}, touchCenterBefore);
 await page.waitForTimeout(800);
 const minimumLoadedTiles = await page.evaluate(() => {
 	window._dwVexcelTileObserver.disconnect();
@@ -297,6 +327,7 @@ const panState = {
 	centerError: panAfter.centerError,
 	maxReleaseJump,
 	minimumLoadedTiles,
+	touchCenterDistance,
 	baseStillSuppressed: await page.evaluate(() => {
 		const entry = window._dwLayerCtrl._layers.find((item) => item.name === "Vexcel Aerial");
 		const container = entry?.layer?.getContainer?.() || entry?.layer?._container;
@@ -445,6 +476,25 @@ await page.waitForFunction(() =>
 	!!document.querySelector(".dw-vex-route--exact"),
 );
 
+// A transport failure is different from a valid off-frame response. Keep the
+// last exact drawing visible, but report that fresh projection is unavailable.
+failNextWorldTransform = true;
+await page.evaluate(() => {
+	const polyline = window.leafletPlan.currentLine[1].polyline;
+	polyline.setLatLngs(polyline.getLatLngs());
+});
+await page.waitForFunction(() =>
+	/projection is unavailable/i.test(document.querySelector(".dw-vex-basemsg")?.textContent || ""));
+const transformOutagePreservedRoute = await page.evaluate(() =>
+	document.querySelectorAll(".dw-vex-route-visual").length === 2);
+await page.evaluate(() => {
+	const polyline = window.leafletPlan.currentLine[1].polyline;
+	polyline.setLatLngs(polyline.getLatLngs());
+});
+await page.waitForFunction(() =>
+	!!document.querySelector(".dw-vex-route--exact") &&
+	!/projection is unavailable/i.test(document.querySelector(".dw-vex-basemsg")?.textContent || ""));
+
 const inspectProjectedRoute = () => page.evaluate(() => {
 	const svg = document.querySelector(".dw-vex-route");
 	const children = [...svg.children];
@@ -521,6 +571,16 @@ const inspectProjectedRoute = () => page.evaluate(() => {
 // lands on that click, then undo and continue to the next camera.
 const angleResults = [];
 for (const direction of ["oblique-north", "oblique-south", "oblique-west", "oblique-east"]) {
+	await page.evaluate(() => {
+		window._dwSwitchMinimumTiles = document.querySelectorAll(".dw-vex-warp-tile-loaded").length;
+		window._dwSwitchObserver = new MutationObserver(() => {
+			window._dwSwitchMinimumTiles = Math.min(window._dwSwitchMinimumTiles,
+				document.querySelectorAll(".dw-vex-warp-tile-loaded").length);
+		});
+		window._dwSwitchObserver.observe(document.querySelector(".leaflet-map-pane"), {
+			subtree: true, childList: true, attributes: true, attributeFilter: ["class"],
+		});
+	});
 	const directionButton = page.locator(`.dw-vex-dir[data-dir="${direction}"]`);
 	await directionButton.click();
 	const angleReady = await page.waitForFunction((activeDirection) => {
@@ -544,6 +604,10 @@ for (const direction of ["oblique-north", "oblique-south", "oblique-west", "obli
 		}));
 		throw new Error(`${direction} did not become ready: ${JSON.stringify({ state, pageErrors })}`);
 	}
+	const switchMinimumLoadedTiles = await page.evaluate(() => {
+		window._dwSwitchObserver.disconnect();
+		return window._dwSwitchMinimumTiles;
+	});
 	const beforeCount = await page.evaluate(() => window.leafletPlan.lines[0].length);
 	const angleHit = await page.locator(".dw-vex-route-hit").first().evaluate((path) => {
 		const local = path.getPointAtLength(path.getTotalLength() * 0.45);
@@ -571,7 +635,9 @@ for (const direction of ["oblique-north", "oblique-south", "oblique-west", "obli
 		document.querySelectorAll(".dw-vex-route-hit").length === segments &&
 		!!document.querySelector(".dw-vex-route--exact"), beforeCount - 1);
 	const restoredQuality = await inspectProjectedRoute();
-	angleResults.push({ direction, insertionError, insertedQuality, restoredQuality });
+	angleResults.push({
+		direction, insertionError, insertedQuality, restoredQuality, switchMinimumLoadedTiles,
+	});
 }
 await page.locator('.dw-vex-dir[data-dir="oblique-east"]').click();
 await page.waitForTimeout(250);
@@ -800,6 +866,7 @@ result.activeBaseState = activeBaseState;
 result.initialEastTileRequests = initialEastTileRequests;
 result.panState = panState;
 result.offFrameRouteOk = offFrameRouteOk;
+result.transformOutagePreservedRoute = transformOutagePreservedRoute;
 result.popupAnchorError = popupAnchorError;
 result.deleteLineLength = await page.evaluate(() => window.leafletPlan.lines?.[0]?.length);
 result.pageErrors = pageErrors;
@@ -826,6 +893,7 @@ if (popupAnchorError > 20) failures.push(`route-point popup missed projected han
 if (result.deleteLineLength !== 2) failures.push("projected route-point delete did not update the course");
 for (const angle of angleResults) {
 	if (angle.insertionError > 3) failures.push(`${angle.direction} insertion missed by ${angle.insertionError.toFixed(1)}px`);
+	if (angle.switchMinimumLoadedTiles < 1) failures.push(`${angle.direction} frame switch flashed blank`);
 	for (const [state, quality] of [["inserted", angle.insertedQuality], ["restored", angle.restoredQuality]]) {
 		if (!quality.paintOrder || !quality.finite || !quality.styleMatches || !quality.casingVisible ||
 			quality.maxEndpointError > 0.5 ||
@@ -862,10 +930,11 @@ if (initialEastTileRequests > 24) {
 }
 if (!panState.sameFrame || panState.frameQueries !== 0 || panState.retention < 0.7 ||
 	panState.centerError > 1 || panState.maxReleaseJump > 1 || panState.minimumLoadedTiles < 1 ||
-	!panState.baseStillSuppressed) {
+	panState.touchCenterDistance < 1e-7 || !panState.baseStillSuppressed) {
 	failures.push(`small oblique pan reloaded or lost its camera center: ${JSON.stringify(panState)}`);
 }
 if (!offFrameRouteOk) failures.push("off-frame route was reported as an unavailable projection");
+if (!transformOutagePreservedRoute) failures.push("transform outage erased the last exact projected route");
 if (pageErrors.length) failures.push(`page errors: ${pageErrors.join("; ")}`);
 
 await browser.close();

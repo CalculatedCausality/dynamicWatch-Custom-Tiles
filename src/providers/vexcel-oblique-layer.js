@@ -198,6 +198,7 @@ export function createVexcelObliqueLayer(options) {
 			this._centerHandle = null;
 			this._panHandle = null;
 			this._panStart = null;
+			this._panRequestId = 0;
 			this._routeHandle = null;
 			this._routeGeneration = 0;
 			this._routeTimer = null;
@@ -209,6 +210,8 @@ export function createVexcelObliqueLayer(options) {
 			this._interactionQueue = [];
 			this._interactionHandle = null;
 			this._drag = null;
+			this._transitionContainer = null;
+			this._transitionRouteSvg = null;
 		},
 
 		onAdd(map) {
@@ -276,11 +279,12 @@ export function createVexcelObliqueLayer(options) {
 			this._requestRoute();
 		},
 
-		onRemove() {
+			onRemove() {
 			this._generation++;
 			this._cancelInteractionRequests();
 			this._cancelProjectionRequests();
 			this._clearTiles();
+			this._clearFrameTransition();
 			if (this._routeSvg) this._routeSvg.replaceChildren();
 			clearTimeout(this._routeTimer);
 			if (this._routeObserver) { this._routeObserver.disconnect(); this._routeObserver = null; }
@@ -319,7 +323,8 @@ export function createVexcelObliqueLayer(options) {
 				moveend: this._update,
 				dragstart: this._onMapDragStart,
 				dragend: this._onMapDragEnd,
-				zoomend: this._update,
+				zoomstart: this._onMapZoomStart,
+				zoomend: this._onMapZoomEnd,
 				viewreset: this._update,
 				resize: this._update,
 			};
@@ -373,6 +378,7 @@ export function createVexcelObliqueLayer(options) {
 				frame.corners.length !== 4) return false;
 			if (this._frame && this._frame.name === frame.name &&
 				this._frame.tileBase === frame.tileBase) return true;
+			this._beginFrameTransition();
 			this._generation++;
 			this._cancelInteractionRequests();
 			clearTimeout(this._routeTimer);
@@ -400,6 +406,7 @@ export function createVexcelObliqueLayer(options) {
 
 		clearFrame() {
 			this._generation++;
+			this._clearFrameTransition();
 			this._cancelInteractionRequests();
 			clearTimeout(this._routeTimer);
 			this._frame = null;
@@ -417,6 +424,32 @@ export function createVexcelObliqueLayer(options) {
 		},
 
 		getFrame() { return this._frame; },
+		_beginFrameTransition() {
+			this._clearFrameTransition();
+			if (this._container && this.getLoadedTileCount() > 0 && this._container.parentNode) {
+				this._transitionContainer = this._container.cloneNode(true);
+				this._transitionContainer.classList.add("dw-vex-frame-transition");
+				this._container.parentNode.insertBefore(this._transitionContainer, this._container);
+			}
+			if (this._routeSvg && this._routeSvg.children.length && this._routeSvg.parentNode) {
+				this._transitionRouteSvg = this._routeSvg.cloneNode(true);
+				this._transitionRouteSvg.classList.remove("dw-vex-route--exact");
+				this._transitionRouteSvg.classList.add("dw-vex-route-transition");
+				for (const node of this._transitionRouteSvg.querySelectorAll(
+					".dw-vex-route-hit,.dw-vex-route-handle")) node.remove();
+				this._routeSvg.parentNode.insertBefore(this._transitionRouteSvg, this._routeSvg);
+			}
+		},
+		_clearFrameTransition(imageryOnly) {
+			if (this._transitionContainer) {
+				this._transitionContainer.remove();
+				this._transitionContainer = null;
+			}
+			if (!imageryOnly && this._transitionRouteSvg) {
+				this._transitionRouteSvg.remove();
+				this._transitionRouteSvg = null;
+			}
+		},
 		_estimatedCenterPixel() {
 			if (!this._map || !this._frame) return null;
 			const mapCenter = this._map.getCenter();
@@ -436,11 +469,13 @@ export function createVexcelObliqueLayer(options) {
 		},
 		containsCurrentCenter() {
 			if (!this._map || !this._frame) return false;
+			const mapCenter = this._map.getCenter();
+			if (!this._centerPixel &&
+				!_pointInQuad(this._frame.corners, mapCenter.lng, mapCenter.lat)) return false;
 			const center = this._estimatedCenterPixel();
 			if (!center) return false;
-			const tolerance = 96 / this._scale();
-			return center[0] >= -tolerance && center[0] <= this._frame.w + tolerance &&
-				center[1] >= -tolerance && center[1] <= this._frame.h + tolerance;
+			return center[0] >= 0 && center[0] <= this._frame.w &&
+				center[1] >= 0 && center[1] <= this._frame.h;
 		},
 		coversCurrentView() {
 			if (!this._map || !this._frame) return false;
@@ -475,18 +510,34 @@ export function createVexcelObliqueLayer(options) {
 		},
 
 		_onMapDragStart() {
-			if (!this._map || !this._frame || !this._centerPixel) return;
+			this._panRequestId++;
+			if (this._panHandle && typeof this._panHandle.abort === "function") this._panHandle.abort();
+			this._panHandle = null;
+			if (!this._map || !this._frame) return;
 			const center = this._map.getCenter();
-			const key = center.lat.toFixed(6) + "," + center.lng.toFixed(6);
-			if (key !== this._centerPixelKey) return;
+			const imagePixel = this._estimatedCenterPixel();
+			if (!imagePixel) return;
 			this._panStart = {
 				frame: this._frame,
 				generation: this._generation,
 				zoom: this._map.getZoom(),
 				mapPixel: this._map.project(center, this._map.getZoom()),
-				imagePixel: this._centerPixel.slice(),
+				imagePixel: imagePixel.slice(),
 				scale: this._scale(),
 			};
+		},
+
+		_onMapZoomStart() {
+			this._panRequestId++;
+			this._panStart = null;
+			if (this._panHandle && typeof this._panHandle.abort === "function") this._panHandle.abort();
+			this._panHandle = null;
+			if (options.onZoomState) options.onZoomState(true);
+		},
+
+		_onMapZoomEnd() {
+			this._update();
+			if (options.onZoomState) options.onZoomState(false);
 		},
 
 		_onMapDragEnd() {
@@ -501,18 +552,27 @@ export function createVexcelObliqueLayer(options) {
 				start.imagePixel[0] + (mapPixel.x - start.mapPixel.x) / start.scale,
 				start.imagePixel[1] + (mapPixel.y - start.mapPixel.y) / start.scale,
 			];
-			if (target[0] < 0 || target[1] < 0 || target[0] > this._frame.w || target[1] > this._frame.h) return;
+			this._panRequestId++;
+			if (this._panHandle && typeof this._panHandle.abort === "function") this._panHandle.abort();
+			this._panHandle = null;
+			if (target[0] < 0 || target[1] < 0 || target[0] > this._frame.w || target[1] > this._frame.h) {
+				this._centerPixelKey = "";
+				this._update();
+				return;
+			}
 			const provisionalKey = center.lat.toFixed(6) + "," + center.lng.toFixed(6);
 			this._centerPixel = target;
 			this._centerPixelKey = provisionalKey;
 			this._centerLatLng = L.latLng(center);
 			this._centerRequestKey = "";
 			this._update();
-			if (this._panHandle && typeof this._panHandle.abort === "function") this._panHandle.abort();
 			const generation = this._generation, frame = this._frame;
+			const requestId = this._panRequestId, zoom = start.zoom;
 			let handle = null;
 			handle = options.transformPoints(frame, [target], "pixel-2-world", (points) => {
-				if (generation !== this._generation || frame !== this._frame) return;
+				if (generation !== this._generation || frame !== this._frame ||
+					requestId !== this._panRequestId || !this._map || this._map.getZoom() !== zoom ||
+					(this._map.dragging && this._map.dragging.moving && this._map.dragging.moving())) return;
 				const point = points && points[0];
 				if (point && Number.isFinite(point[0]) && Number.isFinite(point[1])) {
 					const corrected = L.latLng(point[1], point[0]);
@@ -520,7 +580,7 @@ export function createVexcelObliqueLayer(options) {
 					this._centerPixelKey = corrected.lat.toFixed(6) + "," + corrected.lng.toFixed(6);
 					this._centerLatLng = corrected;
 					this._centerRequestKey = "";
-					this._map.setView(corrected, start.zoom, { animate: false });
+					this._map.setView(corrected, zoom, { animate: false });
 				} else {
 					this._centerPixelKey = "";
 					this._update();
@@ -726,7 +786,8 @@ export function createVexcelObliqueLayer(options) {
 		_routePointerDown(event) {
 			const handle = event.target && event.target.closest &&
 				event.target.closest(".dw-vex-route-handle");
-			if (!handle || event.button !== 0) return;
+			if (!handle || event.button !== 0 || this._drag ||
+				handle.classList.contains("dw-vex-route-handle--stale")) return;
 			const markerIndex = Number(handle.dataset.markerIndex);
 			const markerEntry = this._routeMarkers[markerIndex];
 			if (!markerEntry || !markerEntry.marker) return;
@@ -901,13 +962,26 @@ export function createVexcelObliqueLayer(options) {
 		},
 
 		_pruneStaleTiles() {
-			if (!this._requiredTiles || !this._requiredTiles.size) return;
+			if (!this._requiredTiles) return;
+			if (!this._requiredTiles.size) {
+				for (const [key, tile] of [...this._tiles]) this._removeTile(key, tile);
+				return;
+			}
+			let settled = true;
 			for (const key of this._requiredTiles) {
 				const tile = this._tiles.get(key);
-				if (!tile || !tile.loaded) return;
+				if (!tile || (!tile.loaded && !(tile.failed && tile.tries >= 3))) {
+					settled = false;
+					break;
+				}
 			}
-			for (const [key, tile] of [...this._tiles]) {
-				if (!this._requiredTiles.has(key)) this._removeTile(key, tile);
+			const stale = [...this._tiles].filter(([key, tile]) =>
+				!this._requiredTiles.has(key) && tile.loaded);
+			const staleLimit = L.Browser && L.Browser.mobile ? 48 : 96;
+			const removeCount = settled ? stale.length : Math.max(0, stale.length - staleLimit);
+			for (let i = 0; i < removeCount; i++) {
+				const [key, tile] = stale[i];
+				this._removeTile(key, tile);
 			}
 		},
 
@@ -1045,9 +1119,15 @@ export function createVexcelObliqueLayer(options) {
 			const generation = this._generation, routeGeneration = this._routeGeneration;
 			const frame = this._frame;
 			let handle = null;
-			handle = options.transformPoints(frame, flat, "world-2-pixel", (pixels) => {
+			handle = options.transformPoints(frame, flat, "world-2-pixel", (pixels, transformStatus) => {
 				if (generation !== this._generation || routeGeneration !== this._routeGeneration ||
 					frame !== this._frame) return;
+				if (transformStatus && transformStatus.failedChunks > 0) {
+					this._routeError = true;
+					this._notify();
+					if (this._routeHandle === handle) this._routeHandle = null;
+					return;
+				}
 				if (!pixels || pixels.length !== flat.length) {
 					this._routeError = true;
 					this._drawRoute([], []);
@@ -1065,7 +1145,11 @@ export function createVexcelObliqueLayer(options) {
 					if (index.markerIdx != null) projectedMarkers[index.markerIdx].point = pixel;
 					else projected[index.pathIdx].points[index.pointIdx] = pixel;
 				}
-				if (!complete) {
+				if (this._drag) {
+					this._pendingRouteDraw = {
+						paths: projected, markers: projectedMarkers, exact: true,
+					};
+				} else if (!complete) {
 					// Footprint boundaries and off-frame route portions may not
 					// have camera pixels. Draw only contiguous exact samples; an
 					// empty off-frame route is a valid state, not a projection error.
@@ -1073,10 +1157,6 @@ export function createVexcelObliqueLayer(options) {
 					this._routeError = false;
 					this._drawRoute(projected, projectedMarkers);
 					this._notify();
-				} else if (this._drag) {
-					this._pendingRouteDraw = {
-						paths: projected, markers: projectedMarkers, exact: true,
-					};
 				} else {
 					this._routeExact = true;
 					this._routeError = false;
@@ -1090,6 +1170,10 @@ export function createVexcelObliqueLayer(options) {
 
 		_drawRoute(paths, markers) {
 			if (!this._routeSvg || !this._frame) return;
+			if (this._transitionRouteSvg) {
+				this._transitionRouteSvg.remove();
+				this._transitionRouteSvg = null;
+			}
 			this._routeSvg.replaceChildren();
 			const rendered = [];
 			for (const entry of paths) {
@@ -1237,6 +1321,7 @@ export function createVexcelObliqueLayer(options) {
 						if (retryGeneration === this._generation && this._map) this._update();
 					}, tile.retryAt - Date.now());
 					else if (!retryable) tile.tries = 3;
+					this._pruneStaleTiles();
 					this._notify(err || new Error("Vexcel HTTP " + (response && response.status)));
 					return;
 				}
@@ -1247,6 +1332,7 @@ export function createVexcelObliqueLayer(options) {
 					tile.loaded = true;
 					tile.root.classList.add("dw-vex-warp-tile-loaded");
 					tile.img.style.opacity = "1";
+					this._clearFrameTransition(true);
 					this._pruneStaleTiles();
 					this._notify();
 					if (this._routeDeferred) {
@@ -1259,8 +1345,9 @@ export function createVexcelObliqueLayer(options) {
 						tile.failed = true;
 						tile.retryAt = Date.now() + Math.min(30000, 1000 * (2 ** tile.tries));
 						if (tile.objectUrl) { URL.revokeObjectURL(tile.objectUrl); tile.objectUrl = null; }
-						tile.tries = 3;
-						this._notify(new Error("Vexcel decode failed"));
+					tile.tries = 3;
+					this._pruneStaleTiles();
+					this._notify(new Error("Vexcel decode failed"));
 				};
 				tile.img.src = tile.objectUrl;
 			});
@@ -1310,7 +1397,10 @@ export function createVexcelObliqueLayer(options) {
 
 		_notify(error) {
 			let loaded = 0, pending = 0;
-			for (const tile of this._tiles.values()) {
+			const currentTiles = this._requiredTiles
+				? [...this._requiredTiles].map((key) => this._tiles.get(key)).filter(Boolean)
+				: [...this._tiles.values()];
+			for (const tile of currentTiles) {
 				if (tile.loaded) loaded++;
 				else if (!tile.failed) pending++;
 			}
