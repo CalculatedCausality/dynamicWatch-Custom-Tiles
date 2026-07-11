@@ -2822,7 +2822,11 @@
   }
   function _storeToken(t) {
     try {
+      const previous = GM_getValue(CFG.VEXCEL_TOKEN_KEY, "") || "";
       GM_setValue(CFG.VEXCEL_TOKEN_KEY, t);
+      if (_vexcelTokKey(previous) !== _vexcelTokKey(t)) {
+        GM_setValue(CFG.VEXCEL_SESSION_KEY, "");
+      }
     } catch (_) {
     }
   }
@@ -2832,7 +2836,7 @@
   function _getStoredSession() {
     try {
       const o = JSON.parse(GM_getValue(CFG.VEXCEL_SESSION_KEY, "") || "null");
-      return o && o.s || "";
+      return o && o.k === _vexcelTokKey(_getStoredToken()) ? o.s || "" : "";
     } catch (_) {
       return "";
     }
@@ -2875,13 +2879,13 @@
     cb = cb || function() {
     };
     if (!_vexcelTokenValid(token)) {
-      cb("");
+      cb("", false);
       return;
     }
     const ts = typeof Date !== "undefined" && Date.now ? Date.now() : 0;
     _vexcelHashCode(CFG.VEXCEL_APP_NAME + "_" + ts, (hash) => {
       if (!hash) {
-        cb("");
+        cb("", false);
         return;
       }
       gmJsonGet(
@@ -2897,8 +2901,12 @@
           }
         },
         (err, data) => {
+          if (err || !data) {
+            cb("", false);
+            return;
+          }
           const s = data && (data.session || data.data && data.data.session);
-          cb(s ? String(s) : "");
+          cb(s ? String(s) : "", true);
         }
       );
     });
@@ -2920,11 +2928,12 @@
       return;
     }
     _sessionFlights.set(token, [cb]);
-    _vexcelInitSession(token, (s) => {
-      _storeSession(s, token);
+    _vexcelInitSession(token, (s, succeeded) => {
+      const current = _getStoredToken() === token;
+      if (succeeded && current) _storeSession(s, token);
       const waiters = _sessionFlights.get(token) || [];
       _sessionFlights.delete(token);
-      for (const waiter of waiters) waiter(s);
+      for (const waiter of waiters) waiter(succeeded && current ? s : "");
     });
   }
   function _vexcelOriginHeaders(extra) {
@@ -3042,13 +3051,20 @@
     cb(null);
   }
   function _ensureQueryAuth(cb) {
-    _ensureTokenSilent((tok) => {
+    const resolve = () => _ensureTokenSilent((tok) => {
       if (!_vexcelTokenValid(tok)) {
         cb(null);
         return;
       }
-      _ensureSession(tok, (sess) => cb(tok, sess || ""));
+      _ensureSession(tok, (sess) => {
+        if (_getStoredToken() !== tok) {
+          resolve();
+          return;
+        }
+        cb(tok, sess || "");
+      });
     });
+    resolve();
   }
   function _ensureAuthedToken(lead, cb) {
     const tok = _getStoredToken();
@@ -3311,6 +3327,8 @@
         this._interactionQueue = [];
         this._interactionHandle = null;
         this._drag = null;
+        this._routeTouch = null;
+        this._suppressRouteTouchClick = null;
         this._transitionContainer = null;
         this._transitionRouteSvg = null;
       },
@@ -3778,6 +3796,14 @@
         }
       },
       _projectMapEvent(event, type) {
+        const suppressed = type === "click" && this._suppressRouteTouchClick;
+        if (suppressed && Date.now() <= suppressed.until && Math.hypot(event.clientX - suppressed.x, event.clientY - suppressed.y) <= 12) {
+          this._suppressRouteTouchClick = null;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
+        if (suppressed && Date.now() > suppressed.until) this._suppressRouteTouchClick = null;
         if (!this._map || !this._frame || event.defaultPrevented || this._map.dragging && this._map.dragging.moved && this._map.dragging.moved()) return;
         const target = event.target;
         if (target && target.closest && target.closest(
@@ -3825,6 +3851,9 @@
         if (!hit) return;
         event.preventDefault();
         event.stopPropagation();
+        this._activateRouteHit(hit, event);
+      },
+      _activateRouteHit(hit, event) {
         const source = this._routeSources[Number(hit.dataset.sourceIndex)];
         const pixel = this._eventPixel(event);
         if (!source || !source.polyline || !pixel) return;
@@ -3868,6 +3897,18 @@
         L.DomUtil.setPosition(popup._container, point);
       },
       _routePointerDown(event) {
+        const hit = event.target && event.target.closest && event.target.closest(".dw-vex-route-hit");
+        if (event.pointerType === "touch" && hit && event.isPrimary !== false) {
+          this._routeTouch = {
+            pointerId: event.pointerId,
+            hit,
+            startX: event.clientX,
+            startY: event.clientY,
+            moved: false
+          };
+          return;
+        }
+        if (event.pointerType === "touch" && this._routeTouch) this._routeTouch = null;
         const handle = event.target && event.target.closest && event.target.closest(".dw-vex-route-handle");
         if (!handle || event.button !== 0 || this._drag || handle.classList.contains("dw-vex-route-handle--stale")) return;
         const markerIndex = Number(handle.dataset.markerIndex);
@@ -3887,6 +3928,10 @@
         };
       },
       _routePointerMove(event) {
+        const touch = this._routeTouch;
+        if (touch && touch.pointerId === event.pointerId && Math.hypot(event.clientX - touch.startX, event.clientY - touch.startY) > 8) {
+          touch.moved = true;
+        }
         const drag = this._drag;
         if (!drag || drag.pointerId !== event.pointerId) return;
         event.preventDefault();
@@ -3906,6 +3951,19 @@
         drag.handle.setAttribute("cy", String(pixel[1]));
       },
       _routePointerUp(event) {
+        const touch = this._routeTouch;
+        if (touch && touch.pointerId === event.pointerId) {
+          this._routeTouch = null;
+          const mapMoved = this._map && this._map.dragging && this._map.dragging.moved && this._map.dragging.moved();
+          if (!touch.moved && !mapMoved && touch.hit.isConnected) {
+            this._suppressRouteTouchClick = {
+              x: event.clientX,
+              y: event.clientY,
+              until: Date.now() + 700
+            };
+            this._activateRouteHit(touch.hit, event);
+          }
+        }
         const drag = this._drag;
         if (!drag || drag.pointerId !== event.pointerId) return;
         this._drag = null;
@@ -3941,6 +3999,9 @@
         );
       },
       _routePointerCancel(event) {
+        if (this._routeTouch && this._routeTouch.pointerId === event.pointerId) {
+          this._routeTouch = null;
+        }
         const drag = this._drag;
         if (!drag || drag.pointerId !== event.pointerId) return;
         this._drag = null;
@@ -4464,6 +4525,8 @@
       },
       _cancelInteractionRequests() {
         this._interactionQueue = [];
+        this._routeTouch = null;
+        this._suppressRouteTouchClick = null;
         if (this._interactionHandle && typeof this._interactionHandle.abort === "function") {
           this._interactionHandle.abort();
         }
@@ -4844,6 +4907,8 @@
       frameBand: "rgb",
       obModel: null,
       obAtKey: "",
+      obModelLat: null,
+      obModelLng: null,
       obRequestKey: "",
       capturePendingKey: "",
       pendingOblique: false,
@@ -4898,6 +4963,11 @@
     const cellFor = (dir) => {
       if (!ctl.obModel) return null;
       return ctl.obModel.images[dir + "@" + obliqueCollection()] || null;
+    };
+    const hasCurrentObModel = () => {
+      if (!ctl._map || !ctl.obModel) return false;
+      const center = ctl._map.getCenter();
+      return ctl.obAtKey === center.lat.toFixed(5) + "," + center.lng.toFixed(5);
     };
     const setMsg = (text) => ctl.setBaseMsg(text);
     const setFlatSuppressed = (suppressed) => {
@@ -5057,6 +5127,8 @@
         ctl.obRequestKey = "";
         ctl.obModel = model || null;
         ctl.obAtKey = key;
+        ctl.obModelLat = center.lat;
+        ctl.obModelLng = center.lng;
         markActiveDir();
         cb();
       });
@@ -5115,7 +5187,7 @@
         updateIrBtn();
         if (ctl.obliqueActive) load();
       };
-      if (ctl.obliqueActive && !ctl.obModel) ensureObModel(toggle);
+      if (ctl.obliqueActive && !hasCurrentObModel()) ensureObModel(toggle);
       else toggle();
     });
     ctl.getCaptureCount = () => ctl.captures.length;
@@ -5131,7 +5203,7 @@
       markActiveDir();
       if (reloadOblique && ctl.obliqueActive) {
         ctl.frameGen++;
-        if (ctl.obModel) {
+        if (hasCurrentObModel()) {
           markActiveDir();
           load();
         } else ensureObModel(() => {
@@ -5141,9 +5213,12 @@
       }
     };
     ctl.setCapture = (i) => {
+      ctl.captureGen++;
+      ctl.capturePendingKey = "";
       ctl.frameGen++;
       ctl.capIdx = Math.max(0, Math.min(Number(i) || 0, Math.max(0, ctl.captures.length - 1)));
       applyCaptureSelection(true);
+      if (!ctl.queried) setTimeout(refreshCaptures, 0);
     };
     let refreshTimer = null, frameTimer = null, modelTimer = null;
     const refreshCaptures = () => {
@@ -5163,6 +5238,8 @@
       if (!ctl.obliqueActive) {
         ctl.obModel = null;
         ctl.obAtKey = "";
+        ctl.obModelLat = null;
+        ctl.obModelLng = null;
         markActiveDir();
       }
       if (!_vexcelTokenValid(_getStoredToken()) && !_hasCreds()) {
@@ -5193,9 +5270,6 @@
         else if (ctl.capIdx >= ctl.captures.length) ctl.capIdx = 0;
         const changed = curCollection() !== previous;
         applyCaptureSelection(changed);
-        if (ctl.obliqueActive && !changed && !ctl.obModel) {
-          ensureObModel(() => markActiveDir());
-        }
       });
     };
     const refreshFrame = () => {
@@ -5212,6 +5286,7 @@
         if (!ctl._map || !ctl.obliqueActive || generation !== ctl.frameGen || direction !== ctl.dir || band !== ctl.frameBand || currentKey !== centerKey || !frame || !frame.name) return;
         if (ctl._frame && frame.name === ctl._frame.name) return;
         loadFrame(Object.assign({ collection }, frame), true);
+        ensureObModel(markActiveDir, true);
       });
     };
     const scheduleRefresh = () => {
@@ -5219,12 +5294,14 @@
       const center = ctl._map.getCenter();
       const key5 = center.lat.toFixed(5) + "," + center.lng.toFixed(5);
       const key4 = center.lat.toFixed(4) + "," + center.lng.toFixed(4);
-      const modelMoved = !ctl.obliqueActive && (ctl.obRequestKey && ctl.obRequestKey !== key5 || ctl.obAtKey && ctl.obAtKey !== key5);
-      if (modelMoved) {
+      const modelMoved = ctl.obRequestKey && ctl.obRequestKey !== key5 || ctl.obAtKey && ctl.obAtKey !== key5;
+      if (modelMoved && !ctl.obliqueActive) {
         ctl.viewGen++;
         ctl.obRequestKey = "";
         ctl.obModel = null;
         ctl.obAtKey = "";
+        ctl.obModelLat = null;
+        ctl.obModelLng = null;
         markActiveDir();
       }
       if (ctl.capturePendingKey && ctl.capturePendingKey !== key4) {
@@ -5237,7 +5314,8 @@
       clearTimeout(modelTimer);
       refreshTimer = setTimeout(refreshCaptures, 500);
       if (ctl.obliqueActive) frameTimer = setTimeout(refreshFrame, 350);
-      const needsModel = ctl.pendingOblique || ctl.obliqueActive && !ctl.obModel;
+      const modelDistance = Number.isFinite(ctl.obModelLat) && Number.isFinite(ctl.obModelLng) ? Math.hypot(center.lat - ctl.obModelLat, center.lng - ctl.obModelLng) : Infinity;
+      const needsModel = ctl.pendingOblique || ctl.obliqueActive && (!ctl.obModel || modelDistance > 2e-3);
       if (needsModel && ctl.obRequestKey !== key5) {
         modelTimer = setTimeout(() => {
           ensureObModel(() => {
@@ -5247,7 +5325,7 @@
               load();
             } else markActiveDir();
           });
-        }, 350);
+        }, 900);
       }
     };
     const sync3d = () => {
@@ -5287,6 +5365,8 @@
       ctl.atKey = "";
       ctl.obModel = null;
       ctl.obAtKey = "";
+      ctl.obModelLat = null;
+      ctl.obModelLng = null;
       ctl.obRequestKey = "";
       ctl.capturePendingKey = "";
       return ctl;

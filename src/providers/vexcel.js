@@ -472,6 +472,8 @@ export function createVexcelControl() {
 		frameBand: "rgb",
 		obModel: null,
 		obAtKey: "",
+		obModelLat: null,
+		obModelLng: null,
 		obRequestKey: "",
 		capturePendingKey: "",
 		pendingOblique: false,
@@ -515,6 +517,11 @@ export function createVexcelControl() {
 	const cellFor = (dir) => {
 		if (!ctl.obModel) return null;
 		return ctl.obModel.images[dir + "@" + obliqueCollection()] || null;
+	};
+	const hasCurrentObModel = () => {
+		if (!ctl._map || !ctl.obModel) return false;
+		const center = ctl._map.getCenter();
+		return ctl.obAtKey === center.lat.toFixed(5) + "," + center.lng.toFixed(5);
 	};
 
 	const setMsg = (text) => ctl.setBaseMsg(text);
@@ -673,6 +680,8 @@ export function createVexcelControl() {
 			ctl.obRequestKey = "";
 			ctl.obModel = model || null;
 			ctl.obAtKey = key;
+			ctl.obModelLat = center.lat;
+			ctl.obModelLng = center.lng;
 			markActiveDir();
 			cb();
 		});
@@ -725,7 +734,7 @@ export function createVexcelControl() {
 			updateIrBtn();
 			if (ctl.obliqueActive) load();
 		};
-		if (ctl.obliqueActive && !ctl.obModel) ensureObModel(toggle);
+		if (ctl.obliqueActive && !hasCurrentObModel()) ensureObModel(toggle);
 		else toggle();
 	});
 
@@ -742,14 +751,17 @@ export function createVexcelControl() {
 		markActiveDir();
 		if (reloadOblique && ctl.obliqueActive) {
 			ctl.frameGen++;
-			if (ctl.obModel) { markActiveDir(); load(); }
+			if (hasCurrentObModel()) { markActiveDir(); load(); }
 			else ensureObModel(() => { markActiveDir(); load(); });
 		}
 	};
 	ctl.setCapture = (i) => {
+		ctl.captureGen++;
+		ctl.capturePendingKey = "";
 		ctl.frameGen++;
 		ctl.capIdx = Math.max(0, Math.min(Number(i) || 0, Math.max(0, ctl.captures.length - 1)));
 		applyCaptureSelection(true);
+		if (!ctl.queried) setTimeout(refreshCaptures, 0);
 	};
 
 	let refreshTimer = null, frameTimer = null, modelTimer = null;
@@ -765,6 +777,7 @@ export function createVexcelControl() {
 		ctl.lat = c.lat; ctl.lng = c.lng;
 		if (!ctl.obliqueActive) {
 			ctl.obModel = null; ctl.obAtKey = "";
+			ctl.obModelLat = null; ctl.obModelLng = null;
 			markActiveDir();
 		}
 		if (!_vexcelTokenValid(_getStoredToken()) && !_hasCreds()) {
@@ -791,9 +804,6 @@ export function createVexcelControl() {
 			else if (ctl.capIdx >= ctl.captures.length) ctl.capIdx = 0;
 			const changed = curCollection() !== previous;
 			applyCaptureSelection(changed);
-			if (ctl.obliqueActive && !changed && !ctl.obModel) {
-				ensureObModel(() => markActiveDir());
-			}
 		});
 	};
 	const refreshFrame = () => {
@@ -815,6 +825,7 @@ export function createVexcelControl() {
 				!frame || !frame.name) return;
 			if (ctl._frame && frame.name === ctl._frame.name) return;
 			loadFrame(Object.assign({ collection }, frame), true);
+			ensureObModel(markActiveDir, true);
 		});
 	};
 	const scheduleRefresh = () => {
@@ -822,13 +833,15 @@ export function createVexcelControl() {
 		const center = ctl._map.getCenter();
 		const key5 = center.lat.toFixed(5) + "," + center.lng.toFixed(5);
 		const key4 = center.lat.toFixed(4) + "," + center.lng.toFixed(4);
-		const modelMoved = !ctl.obliqueActive && ((ctl.obRequestKey && ctl.obRequestKey !== key5) ||
-			(ctl.obAtKey && ctl.obAtKey !== key5));
-		if (modelMoved) {
+		const modelMoved = (ctl.obRequestKey && ctl.obRequestKey !== key5) ||
+			(ctl.obAtKey && ctl.obAtKey !== key5);
+		if (modelMoved && !ctl.obliqueActive) {
 			ctl.viewGen++;
 			ctl.obRequestKey = "";
 			ctl.obModel = null;
 			ctl.obAtKey = "";
+			ctl.obModelLat = null;
+			ctl.obModelLng = null;
 			markActiveDir();
 		}
 		if (ctl.capturePendingKey && ctl.capturePendingKey !== key4) {
@@ -841,14 +854,17 @@ export function createVexcelControl() {
 		clearTimeout(modelTimer);
 		refreshTimer = setTimeout(refreshCaptures, 500);
 		if (ctl.obliqueActive) frameTimer = setTimeout(refreshFrame, 350);
-		const needsModel = ctl.pendingOblique || (ctl.obliqueActive && !ctl.obModel);
+		const modelDistance = Number.isFinite(ctl.obModelLat) && Number.isFinite(ctl.obModelLng)
+			? Math.hypot(center.lat - ctl.obModelLat, center.lng - ctl.obModelLng) : Infinity;
+		const needsModel = ctl.pendingOblique ||
+			(ctl.obliqueActive && (!ctl.obModel || modelDistance > 0.002));
 		if (needsModel && ctl.obRequestKey !== key5) {
 			modelTimer = setTimeout(() => {
 				ensureObModel(() => {
 					if (ctl.pendingOblique) { ctl.pendingOblique = false; markActiveDir(); load(); }
 					else markActiveDir();
 				});
-			}, 350);
+			}, 900);
 		}
 	};
 	const sync3d = () => {
@@ -886,6 +902,8 @@ export function createVexcelControl() {
 		ctl.atKey = "";
 		ctl.obModel = null;
 		ctl.obAtKey = "";
+		ctl.obModelLat = null;
+		ctl.obModelLng = null;
 		ctl.obRequestKey = "";
 		ctl.capturePendingKey = "";
 		return ctl;

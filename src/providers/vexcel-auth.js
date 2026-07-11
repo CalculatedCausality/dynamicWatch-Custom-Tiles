@@ -36,7 +36,13 @@ export function _getStoredToken() {
 }
 
 export function _storeToken(t) {
-	try { GM_setValue(CFG.VEXCEL_TOKEN_KEY, t); } catch (_) {}
+	try {
+		const previous = GM_getValue(CFG.VEXCEL_TOKEN_KEY, "") || "";
+		GM_setValue(CFG.VEXCEL_TOKEN_KEY, t);
+		if (_vexcelTokKey(previous) !== _vexcelTokKey(t)) {
+			GM_setValue(CFG.VEXCEL_SESSION_KEY, "");
+		}
+	} catch (_) {}
 }
 
 /* -- Session (the viewer's proper tile credential) ---------------------
@@ -55,7 +61,7 @@ function _vexcelTokKey(token) { return String(token || "").split(".")[2] || ""; 
 export function _getStoredSession() {
 	try {
 		const o = JSON.parse(GM_getValue(CFG.VEXCEL_SESSION_KEY, "") || "null");
-		return (o && o.s) || "";
+		return o && o.k === _vexcelTokKey(_getStoredToken()) ? (o.s || "") : "";
 	} catch (_) { return ""; }
 }
 
@@ -93,10 +99,10 @@ function _vexcelHashCode(str, cb) {
 // Exchange a valid JWT for the viewer `session` via configuration/init.
 function _vexcelInitSession(token, cb) {
 	cb = cb || function () {};
-	if (!_vexcelTokenValid(token)) { cb(""); return; }
+	if (!_vexcelTokenValid(token)) { cb("", false); return; }
 	const ts = (typeof Date !== "undefined" && Date.now) ? Date.now() : 0;
 	_vexcelHashCode(CFG.VEXCEL_APP_NAME + "_" + ts, (hash) => {
-		if (!hash) { cb(""); return; }
+		if (!hash) { cb("", false); return; }
 		gmJsonGet(
 			CFG.VEXCEL_INIT_URL + "?token=" + encodeURIComponent(token),
 			{
@@ -111,8 +117,9 @@ function _vexcelInitSession(token, cb) {
 				},
 			},
 			(err, data) => {
+				if (err || !data) { cb("", false); return; }
 				const s = data && (data.session || (data.data && data.data.session));
-				cb(s ? String(s) : "");
+				cb(s ? String(s) : "", true);
 			},
 		);
 	});
@@ -129,11 +136,12 @@ export function _ensureSession(token, cb) {
 		return;
 	}
 	_sessionFlights.set(token, [cb]);
-	_vexcelInitSession(token, (s) => {
-		_storeSession(s, token);
+	_vexcelInitSession(token, (s, succeeded) => {
+		const current = _getStoredToken() === token;
+		if (succeeded && current) _storeSession(s, token);
 		const waiters = _sessionFlights.get(token) || [];
 		_sessionFlights.delete(token);
-		for (const waiter of waiters) waiter(s);
+		for (const waiter of waiters) waiter(succeeded && current ? s : "");
 	});
 }
 
@@ -240,10 +248,14 @@ function _ensureTokenSilent(cb) {
 
 // Resolve a valid token and its session for metadata and oblique requests.
 export function _ensureQueryAuth(cb) {
-	_ensureTokenSilent((tok) => {
+	const resolve = () => _ensureTokenSilent((tok) => {
 		if (!_vexcelTokenValid(tok)) { cb(null); return; }
-		_ensureSession(tok, (sess) => cb(tok, sess || ""));
+		_ensureSession(tok, (sess) => {
+			if (_getStoredToken() !== tok) { resolve(); return; }
+			cb(tok, sess || "");
+		});
 	});
+	resolve();
 }
 
 // Get a usable token, prompting only when silent authentication cannot.

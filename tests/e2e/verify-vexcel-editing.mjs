@@ -60,6 +60,7 @@ let overscanWorldTransform = false;
 const demPriorities = [];
 const tileRequestsByImage = new Map();
 let frameQueryCount = 0;
+const modelQueryPoints = [];
 await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 	const request = route.request();
 	const url = request.url();
@@ -122,6 +123,10 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 		const body = request.postDataJSON();
 		const requested = body["product-type"];
 		if (requested) frameQueryCount++;
+		else {
+			const point = /POINT\((-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\)/.exec(String(body.wkt));
+			if (point) modelQueryPoints.push([Number(point[1]), Number(point[2])]);
+		}
 		await new Promise((done) => setTimeout(done, requested ? 40 : 300));
 		await route.fulfill({
 			status: 200,
@@ -240,6 +245,7 @@ const panBefore = await page.evaluate(() => ({
 	tiles: [...document.querySelectorAll(".dw-vex-warp-tile-loaded")].map((tile) => tile.dataset.tile),
 }));
 const frameQueriesBeforePan = frameQueryCount;
+const modelQueriesBeforePan = modelQueryPoints.length;
 await page.evaluate(() => {
 	window._dwVexcelMinimumLoadedTiles = document.querySelectorAll(".dw-vex-warp-tile-loaded").length;
 	window._dwVexcelTileObserver = new MutationObserver(() => {
@@ -312,6 +318,7 @@ const panAfter = await page.evaluate(({ west, east, north, south, width, height,
 	return {
 		frame: document.querySelector(".dw-vex-warp-tile-loaded")?.dataset.imageName,
 		tiles: [...document.querySelectorAll(".dw-vex-warp-tile-loaded")].map((tile) => tile.dataset.tile),
+		center: { lat: center.lat, lng: center.lng },
 		centerError: Math.hypot(screen.x - (rect.left + rect.width / 2),
 			screen.y - (rect.top + rect.height / 2)),
 	};
@@ -320,6 +327,8 @@ const panAfter = await page.evaluate(({ west, east, north, south, width, height,
 	width: WIDTH, height: HEIGHT, curve: CAMERA_CURVE,
 });
 const retainedTiles = panBefore.tiles.filter((key) => panAfter.tiles.includes(key)).length;
+const movedModelQueries = modelQueryPoints.slice(modelQueriesBeforePan);
+const lastModelQuery = movedModelQueries[movedModelQueries.length - 1];
 const panState = {
 	sameFrame: panBefore.frame === panAfter.frame,
 	frameQueries: frameQueryCount - frameQueriesBeforePan,
@@ -328,6 +337,10 @@ const panState = {
 	maxReleaseJump,
 	minimumLoadedTiles,
 	touchCenterDistance,
+	modelRefreshes: movedModelQueries.length,
+	modelCenterDistance: lastModelQuery
+		? Math.hypot(lastModelQuery[0] - panAfter.center.lng, lastModelQuery[1] - panAfter.center.lat)
+		: Infinity,
 	baseStillSuppressed: await page.evaluate(() => {
 		const entry = window._dwLayerCtrl._layers.find((item) => item.name === "Vexcel Aerial");
 		const container = entry?.layer?.getContainer?.() || entry?.layer?._container;
@@ -349,6 +362,23 @@ await page.waitForFunction(() =>
 	document.querySelectorAll(".dw-vex-route-handle").length === 2 &&
 	!!document.querySelector(".dw-vex-route--exact .dw-vex-route-hit"),
 );
+const initialAddErrors = await page.evaluate(({ first, second }) => {
+	const centers = [...document.querySelectorAll(".dw-vex-route-handle")].map((handle) => {
+		const rect = handle.getBoundingClientRect();
+		return {
+			className: handle.getAttribute("class"),
+			x: rect.left + rect.width / 2,
+			y: rect.top + rect.height / 2,
+		};
+	});
+	const distance = (point, target) => Math.hypot(point.x - target.x, point.y - target.y);
+	const start = centers.find((point) => point.className.includes("--start"));
+	const end = centers.find((point) => point.className.includes("--end"));
+	return {
+		start: start ? distance(start, first) : Infinity,
+		end: end ? distance(end, second) : Infinity,
+	};
+}, { first, second });
 
 const nonlinearAlignment = await page.evaluate(({ west, east, north, south, width, height, curve }) => {
 	const source = window.leafletPlan.currentLine[1].polyline.getLatLngs();
@@ -373,16 +403,56 @@ const nonlinearAlignment = await page.evaluate(({ west, east, north, south, widt
 	width: WIDTH, height: HEIGHT, curve: CAMERA_CURVE,
 });
 
-const beforeInsert = await page.locator(".dw-vex-route-visual").evaluateAll(
-	(paths) => paths.map((path) => path.getAttribute("d")),
-);
-const hitPoint = await page.locator(".dw-vex-route-hit").first().evaluate((path) => {
+let hitPoint = await page.locator(".dw-vex-route-hit").first().evaluate((path) => {
 	const local = path.getPointAtLength(path.getTotalLength() / 2);
 	const screen = new DOMPoint(local.x, local.y).matrixTransform(path.getScreenCTM());
 	return { x: screen.x, y: screen.y };
 });
-await page.mouse.click(hitPoint.x, hitPoint.y);
+await page.evaluate(() => {
+	window._dwRouteTouchClicks = 0;
+	window.leafletPlan.currentLine[1].polyline.on("click", () => window._dwRouteTouchClicks++);
+});
+const routeTouchCenterBefore = await page.evaluate(() => {
+	const center = window.leafletPlan.map.getCenter();
+	return { lat: center.lat, lng: center.lng };
+});
+await cdp.send("Input.dispatchTouchEvent", {
+	type: "touchStart", touchPoints: [{ x: hitPoint.x, y: hitPoint.y, id: 2 }],
+});
+for (let step = 1; step <= 6; step++) {
+	await cdp.send("Input.dispatchTouchEvent", {
+		type: "touchMove",
+		touchPoints: [{ x: hitPoint.x + 80 * step / 6, y: hitPoint.y, id: 2 }],
+	});
+}
+await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+await page.waitForTimeout(425);
+const routeTouchDragState = await page.evaluate((before) => {
+	const center = window.leafletPlan.map.getCenter();
+	return {
+		centerDistance: Math.hypot(center.lat - before.lat, center.lng - before.lng),
+		lineLength: window.leafletPlan.currentLine.length,
+		clicks: window._dwRouteTouchClicks,
+	};
+}, routeTouchCenterBefore);
+hitPoint = await page.locator(".dw-vex-route-hit").first().evaluate((path) => {
+	const local = path.getPointAtLength(path.getTotalLength() / 2);
+	const screen = new DOMPoint(local.x, local.y).matrixTransform(path.getScreenCTM());
+	return { x: screen.x, y: screen.y };
+});
+const beforeInsert = await page.locator(".dw-vex-route-visual").evaluateAll(
+	(paths) => paths.map((path) => path.getAttribute("d")),
+);
+await cdp.send("Input.dispatchTouchEvent", {
+	type: "touchStart", touchPoints: [{ x: hitPoint.x, y: hitPoint.y, id: 3 }],
+});
+await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 await page.waitForFunction(() => window.leafletPlan.currentLine?.length === 3);
+await page.waitForTimeout(750);
+const routeTouchTapState = await page.evaluate(() => ({
+	lineLength: window.leafletPlan.currentLine.length,
+	clicks: window._dwRouteTouchClicks,
+}));
 await page.waitForFunction(() =>
 	document.querySelectorAll(".dw-vex-route-handle--via").length === 1 &&
 	document.querySelectorAll(".dw-vex-route-hit").length === 2,
@@ -865,6 +935,10 @@ result.loadingBaseState = loadingBaseState;
 result.activeBaseState = activeBaseState;
 result.initialEastTileRequests = initialEastTileRequests;
 result.panState = panState;
+result.startError = initialAddErrors.start;
+result.endError = initialAddErrors.end;
+result.routeTouchDragState = routeTouchDragState;
+result.routeTouchTapState = routeTouchTapState;
 result.offFrameRouteOk = offFrameRouteOk;
 result.transformOutagePreservedRoute = transformOutagePreservedRoute;
 result.popupAnchorError = popupAnchorError;
@@ -930,8 +1004,17 @@ if (initialEastTileRequests > 24) {
 }
 if (!panState.sameFrame || panState.frameQueries !== 0 || panState.retention < 0.7 ||
 	panState.centerError > 1 || panState.maxReleaseJump > 1 || panState.minimumLoadedTiles < 1 ||
-	panState.touchCenterDistance < 1e-7 || !panState.baseStillSuppressed) {
+	panState.touchCenterDistance < 1e-7 || panState.modelRefreshes > 3 ||
+	(panState.modelRefreshes > 0 && panState.modelCenterDistance > 2e-5) ||
+	!panState.baseStillSuppressed) {
 	failures.push(`small oblique pan reloaded or lost its camera center: ${JSON.stringify(panState)}`);
+}
+if (routeTouchDragState.centerDistance < 1e-7 || routeTouchDragState.lineLength !== 2 ||
+	routeTouchDragState.clicks !== 0) {
+	failures.push(`route-line touch drag did not remain a map pan: ${JSON.stringify(routeTouchDragState)}`);
+}
+if (routeTouchTapState.lineLength !== 3 || routeTouchTapState.clicks !== 1) {
+	failures.push(`route-line touch tap was not inserted exactly once: ${JSON.stringify(routeTouchTapState)}`);
 }
 if (!offFrameRouteOk) failures.push("off-frame route was reported as an unavailable projection");
 if (!transformOutagePreservedRoute) failures.push("transform outage erased the last exact projected route");

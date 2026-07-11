@@ -210,6 +210,8 @@ export function createVexcelObliqueLayer(options) {
 			this._interactionQueue = [];
 			this._interactionHandle = null;
 			this._drag = null;
+			this._routeTouch = null;
+			this._suppressRouteTouchClick = null;
 			this._transitionContainer = null;
 			this._transitionRouteSvg = null;
 		},
@@ -689,6 +691,15 @@ export function createVexcelObliqueLayer(options) {
 		},
 
 		_projectMapEvent(event, type) {
+			const suppressed = type === "click" && this._suppressRouteTouchClick;
+			if (suppressed && Date.now() <= suppressed.until &&
+				Math.hypot(event.clientX - suppressed.x, event.clientY - suppressed.y) <= 12) {
+				this._suppressRouteTouchClick = null;
+				event.preventDefault();
+				event.stopImmediatePropagation();
+				return;
+			}
+			if (suppressed && Date.now() > suppressed.until) this._suppressRouteTouchClick = null;
 			if (!this._map || !this._frame || event.defaultPrevented ||
 				this._map.dragging && this._map.dragging.moved && this._map.dragging.moved()) return;
 			const target = event.target;
@@ -738,6 +749,10 @@ export function createVexcelObliqueLayer(options) {
 			if (!hit) return;
 			event.preventDefault();
 			event.stopPropagation();
+			this._activateRouteHit(hit, event);
+		},
+
+		_activateRouteHit(hit, event) {
 			const source = this._routeSources[Number(hit.dataset.sourceIndex)];
 			const pixel = this._eventPixel(event);
 			if (!source || !source.polyline || !pixel) return;
@@ -784,6 +799,16 @@ export function createVexcelObliqueLayer(options) {
 		},
 
 		_routePointerDown(event) {
+			const hit = event.target && event.target.closest &&
+				event.target.closest(".dw-vex-route-hit");
+			if (event.pointerType === "touch" && hit && event.isPrimary !== false) {
+				this._routeTouch = {
+					pointerId: event.pointerId, hit,
+					startX: event.clientX, startY: event.clientY, moved: false,
+				};
+				return;
+			}
+			if (event.pointerType === "touch" && this._routeTouch) this._routeTouch = null;
 			const handle = event.target && event.target.closest &&
 				event.target.closest(".dw-vex-route-handle");
 			if (!handle || event.button !== 0 || this._drag ||
@@ -803,6 +828,11 @@ export function createVexcelObliqueLayer(options) {
 		},
 
 		_routePointerMove(event) {
+			const touch = this._routeTouch;
+			if (touch && touch.pointerId === event.pointerId &&
+				Math.hypot(event.clientX - touch.startX, event.clientY - touch.startY) > 8) {
+				touch.moved = true;
+			}
 			const drag = this._drag;
 			if (!drag || drag.pointerId !== event.pointerId) return;
 			event.preventDefault();
@@ -821,6 +851,18 @@ export function createVexcelObliqueLayer(options) {
 		},
 
 		_routePointerUp(event) {
+			const touch = this._routeTouch;
+			if (touch && touch.pointerId === event.pointerId) {
+				this._routeTouch = null;
+				const mapMoved = this._map && this._map.dragging && this._map.dragging.moved &&
+					this._map.dragging.moved();
+				if (!touch.moved && !mapMoved && touch.hit.isConnected) {
+					this._suppressRouteTouchClick = {
+						x: event.clientX, y: event.clientY, until: Date.now() + 700,
+					};
+					this._activateRouteHit(touch.hit, event);
+				}
+			}
 			const drag = this._drag;
 			if (!drag || drag.pointerId !== event.pointerId) return;
 			this._drag = null;
@@ -854,6 +896,9 @@ export function createVexcelObliqueLayer(options) {
 		},
 
 		_routePointerCancel(event) {
+			if (this._routeTouch && this._routeTouch.pointerId === event.pointerId) {
+				this._routeTouch = null;
+			}
 			const drag = this._drag;
 			if (!drag || drag.pointerId !== event.pointerId) return;
 			this._drag = null;
@@ -1384,6 +1429,8 @@ export function createVexcelObliqueLayer(options) {
 
 		_cancelInteractionRequests() {
 			this._interactionQueue = [];
+			this._routeTouch = null;
+			this._suppressRouteTouchClick = null;
 			if (this._interactionHandle && typeof this._interactionHandle.abort === "function") {
 				this._interactionHandle.abort();
 			}
