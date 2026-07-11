@@ -268,7 +268,7 @@ function _fetchVexcelFrame(lng, lat, collection, dir, band, token, session, cb) 
 // Transform points through Vexcel's camera model. `pixel-2-world` accepts
 // image pixels and returns [lng,lat]; `world-2-pixel` does the reverse so the
 // route can be drawn in the untouched perspective photograph.
-export function fetchVexcelPixelPoints(frame, points, operation, cb) {
+export function fetchVexcelPixelPoints(frame, points, operation, cb, onProgress) {
 	if (typeof operation === "function") { cb = operation; operation = "pixel-2-world"; }
 	operation = operation === "world-2-pixel" ? operation : "pixel-2-world";
 	cb = cb || function () {};
@@ -329,6 +329,7 @@ export function fetchVexcelPixelPoints(frame, points, operation, cb) {
 						? data.points : null;
 					if (transformed) {
 						successfulChunks++;
+						const chunkResult = new Array(chunk.points.length);
 						for (let i = 0; i < Math.min(transformed.length, chunk.points.length); i++) {
 							const p = transformed[i] || {};
 							const validCoord = (value) => (typeof value === "number" ||
@@ -342,9 +343,10 @@ export function fetchVexcelPixelPoints(frame, points, operation, cb) {
 							const inRange = operation === "world-2-pixel" ||
 								(Math.abs(x) <= 180 && Math.abs(y) <= 90);
 							if (validCoord(value.x) && validCoord(value.y) && inRange) {
-								result[chunk.start + i] = [x, y];
+								chunkResult[i] = result[chunk.start + i] = [x, y];
 							}
 						}
+						if (onProgress && !request.aborted) onProgress(chunkResult, chunk.start);
 					} else failedChunks++;
 					if (--remaining === 0) {
 						request.completed = true;

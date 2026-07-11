@@ -3327,6 +3327,7 @@
         this._routeRetryCount = 0;
         this._routeExact = false;
         this._routeError = false;
+        this._routeProgressive = false;
         this._routeDeferred = false;
         this._routeSources = [];
         this._routeMarkers = [];
@@ -3484,6 +3485,7 @@
         this._pendingRouteDraw = null;
         this._routeExact = false;
         this._routeError = false;
+        this._routeProgressive = false;
         this._routeRetryCount = 0;
         clearTimeout(this._routeRetryTimer);
         for (const hit of this._routeSvg.querySelectorAll(".dw-vex-route-hit")) {
@@ -3519,6 +3521,7 @@
         this._centerRequestKey = "";
         this._routeExact = false;
         this._routeError = false;
+        this._routeProgressive = false;
         this._routeRetryCount = 0;
         if (this._map) {
           this._ensureScale();
@@ -3546,6 +3549,7 @@
         this._routeMarkers = [];
         this._routeDeferred = false;
         this._routeRetryCount = 0;
+        this._routeProgressive = false;
       },
       getFrame() {
         return this._frame;
@@ -4264,6 +4268,7 @@
         }
         this._routeExact = false;
         this._routeError = false;
+        this._routeProgressive = false;
         this._notify();
         if (!flat.length) {
           this._routeExact = true;
@@ -4279,6 +4284,19 @@
         }
         const generation = this._generation, routeGeneration = this._routeGeneration;
         const frame = this._frame;
+        const applyPixels = (pixels, start) => {
+          let valid = false;
+          for (let i = 0; i < pixels.length; i++) {
+            const pixel = pixels[i];
+            if (!pixel || !isFinite(pixel[0]) || !isFinite(pixel[1])) continue;
+            valid = true;
+            const index = indices[start + i];
+            if (!index) continue;
+            if (index.markerIdx != null) projectedMarkers[index.markerIdx].point = pixel;
+            else projected[index.pathIdx].points[index.pointIdx] = pixel;
+          }
+          return valid;
+        };
         let handle = null;
         handle = options.transformPoints(frame, flat, "world-2-pixel", (pixels, transformStatus) => {
           if (generation !== this._generation || routeGeneration !== this._routeGeneration || frame !== this._frame) return;
@@ -4315,10 +4333,9 @@
               complete = false;
               continue;
             }
-            const index = indices[i];
-            if (index.markerIdx != null) projectedMarkers[index.markerIdx].point = pixel;
-            else projected[index.pathIdx].points[index.pointIdx] = pixel;
           }
+          applyPixels(pixels, 0);
+          this._routeProgressive = false;
           if (this._drag) {
             this._pendingRouteDraw = {
               paths: projected,
@@ -4337,10 +4354,15 @@
             this._notify();
           }
           if (this._routeHandle === handle) this._routeHandle = null;
+        }, (chunkPixels, start) => {
+          if (generation !== this._generation || routeGeneration !== this._routeGeneration || frame !== this._frame || this._drag || !applyPixels(chunkPixels, start)) return;
+          this._routeProgressive = true;
+          this._drawRoute(projected, [], false);
+          this._notify();
         });
         this._routeHandle = handle && !handle.completed ? handle : null;
       },
-      _drawRoute(paths, markers) {
+      _drawRoute(paths, markers, interactive = true) {
         if (!this._routeSvg || !this._frame) return;
         if (this._transitionRouteSvg) {
           this._transitionRouteSvg.remove();
@@ -4398,7 +4420,7 @@
           path.setAttribute("vector-effect", "non-scaling-stroke");
           this._routeSvg.appendChild(path);
         }
-        for (const item of rendered) {
+        if (interactive) for (const item of rendered) {
           const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
           hit.classList.add("dw-vex-route-hit");
           hit.dataset.sourceIndex = String(item.sourceIndex);
@@ -4412,7 +4434,7 @@
           this._routeSvg.appendChild(hit);
         }
         const scale = this._scale() || 1;
-        for (let markerIdx = 0; markerIdx < (markers || []).length; markerIdx++) {
+        if (interactive) for (let markerIdx = 0; markerIdx < (markers || []).length; markerIdx++) {
           const marker = markers[markerIdx];
           const point = marker && marker.point;
           if (!point || !Number.isFinite(point[0]) || !Number.isFinite(point[1]) || point[0] < 0 || point[1] < 0 || point[0] > this._frame.w || point[1] > this._frame.h) {
@@ -4572,6 +4594,10 @@
           else if (!tile.failed) pending++;
         }
         if (this._routeSvg) this._routeSvg.classList.toggle("dw-vex-route--exact", this._routeExact);
+        if (this._routeSvg) this._routeSvg.classList.toggle(
+          "dw-vex-route--progressive",
+          this._routeProgressive
+        );
         if (!options.onStatus) return;
         options.onStatus({
           loaded,
@@ -4745,7 +4771,7 @@
       }
     );
   }
-  function fetchVexcelPixelPoints(frame, points, operation, cb) {
+  function fetchVexcelPixelPoints(frame, points, operation, cb, onProgress) {
     if (typeof operation === "function") {
       cb = operation;
       operation = "pixel-2-world";
@@ -4810,6 +4836,7 @@
               const transformed = !err && data && Array.isArray(data.points) ? data.points : null;
               if (transformed) {
                 successfulChunks++;
+                const chunkResult = new Array(chunk.points.length);
                 for (let i = 0; i < Math.min(transformed.length, chunk.points.length); i++) {
                   const p = transformed[i] || {};
                   const validCoord = (value2) => (typeof value2 === "number" || typeof value2 === "string" && value2.trim() !== "") && Number.isFinite(Number(value2));
@@ -4819,9 +4846,10 @@
                   const x = Number(value.x), y = Number(value.y);
                   const inRange = operation === "world-2-pixel" || Math.abs(x) <= 180 && Math.abs(y) <= 90;
                   if (validCoord(value.x) && validCoord(value.y) && inRange) {
-                    result[chunk.start + i] = [x, y];
+                    chunkResult[i] = result[chunk.start + i] = [x, y];
                   }
                 }
+                if (onProgress && !request.aborted) onProgress(chunkResult, chunk.start);
               } else failedChunks++;
               if (--remaining === 0) {
                 request.completed = true;

@@ -206,6 +206,7 @@ export function createVexcelObliqueLayer(options) {
 			this._routeRetryCount = 0;
 			this._routeExact = false;
 			this._routeError = false;
+			this._routeProgressive = false;
 			this._routeDeferred = false;
 			this._routeSources = [];
 			this._routeMarkers = [];
@@ -367,6 +368,7 @@ export function createVexcelObliqueLayer(options) {
 			this._pendingRouteDraw = null;
 			this._routeExact = false;
 			this._routeError = false;
+			this._routeProgressive = false;
 			this._routeRetryCount = 0;
 			clearTimeout(this._routeRetryTimer);
 			for (const hit of this._routeSvg.querySelectorAll(".dw-vex-route-hit")) {
@@ -405,6 +407,7 @@ export function createVexcelObliqueLayer(options) {
 			this._centerRequestKey = "";
 			this._routeExact = false;
 			this._routeError = false;
+			this._routeProgressive = false;
 			this._routeRetryCount = 0;
 			if (this._map) {
 				this._ensureScale();
@@ -433,6 +436,7 @@ export function createVexcelObliqueLayer(options) {
 			this._routeMarkers = [];
 			this._routeDeferred = false;
 			this._routeRetryCount = 0;
+			this._routeProgressive = false;
 		},
 
 		getFrame() { return this._frame; },
@@ -1158,6 +1162,7 @@ export function createVexcelObliqueLayer(options) {
 			}
 			this._routeExact = false;
 			this._routeError = false;
+			this._routeProgressive = false;
 			this._notify();
 			if (!flat.length) {
 				this._routeExact = true;
@@ -1173,6 +1178,19 @@ export function createVexcelObliqueLayer(options) {
 			}
 			const generation = this._generation, routeGeneration = this._routeGeneration;
 			const frame = this._frame;
+			const applyPixels = (pixels, start) => {
+				let valid = false;
+				for (let i = 0; i < pixels.length; i++) {
+					const pixel = pixels[i];
+					if (!pixel || !isFinite(pixel[0]) || !isFinite(pixel[1])) continue;
+					valid = true;
+					const index = indices[start + i];
+					if (!index) continue;
+					if (index.markerIdx != null) projectedMarkers[index.markerIdx].point = pixel;
+					else projected[index.pathIdx].points[index.pointIdx] = pixel;
+				}
+				return valid;
+			};
 			let handle = null;
 			handle = options.transformPoints(frame, flat, "world-2-pixel", (pixels, transformStatus) => {
 				if (generation !== this._generation || routeGeneration !== this._routeGeneration ||
@@ -1210,10 +1228,9 @@ export function createVexcelObliqueLayer(options) {
 					if (!pixel || !isFinite(pixel[0]) || !isFinite(pixel[1])) {
 						complete = false; continue;
 					}
-					const index = indices[i];
-					if (index.markerIdx != null) projectedMarkers[index.markerIdx].point = pixel;
-					else projected[index.pathIdx].points[index.pointIdx] = pixel;
 				}
+				applyPixels(pixels, 0);
+				this._routeProgressive = false;
 				if (this._drag) {
 					this._pendingRouteDraw = {
 						paths: projected, markers: projectedMarkers, exact: true,
@@ -1233,11 +1250,17 @@ export function createVexcelObliqueLayer(options) {
 					this._notify();
 				}
 				if (this._routeHandle === handle) this._routeHandle = null;
+			}, (chunkPixels, start) => {
+				if (generation !== this._generation || routeGeneration !== this._routeGeneration ||
+					frame !== this._frame || this._drag || !applyPixels(chunkPixels, start)) return;
+				this._routeProgressive = true;
+				this._drawRoute(projected, [], false);
+				this._notify();
 			});
 			this._routeHandle = handle && !handle.completed ? handle : null;
 		},
 
-		_drawRoute(paths, markers) {
+		_drawRoute(paths, markers, interactive = true) {
 			if (!this._routeSvg || !this._frame) return;
 			if (this._transitionRouteSvg) {
 				this._transitionRouteSvg.remove();
@@ -1295,7 +1318,7 @@ export function createVexcelObliqueLayer(options) {
 				path.setAttribute("vector-effect", "non-scaling-stroke");
 				this._routeSvg.appendChild(path);
 			}
-			for (const item of rendered) {
+			if (interactive) for (const item of rendered) {
 				const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
 				hit.classList.add("dw-vex-route-hit");
 				hit.dataset.sourceIndex = String(item.sourceIndex);
@@ -1309,7 +1332,7 @@ export function createVexcelObliqueLayer(options) {
 				this._routeSvg.appendChild(hit);
 			}
 			const scale = this._scale() || 1;
-			for (let markerIdx = 0; markerIdx < (markers || []).length; markerIdx++) {
+			if (interactive) for (let markerIdx = 0; markerIdx < (markers || []).length; markerIdx++) {
 				const marker = markers[markerIdx];
 				const point = marker && marker.point;
 				if (!point || !Number.isFinite(point[0]) || !Number.isFinite(point[1]) ||
@@ -1476,6 +1499,8 @@ export function createVexcelObliqueLayer(options) {
 				else if (!tile.failed) pending++;
 			}
 			if (this._routeSvg) this._routeSvg.classList.toggle("dw-vex-route--exact", this._routeExact);
+			if (this._routeSvg) this._routeSvg.classList.toggle(
+				"dw-vex-route--progressive", this._routeProgressive);
 			if (!options.onStatus) return;
 			options.onStatus({
 				loaded, pending, error: error || null, frame: this._frame,

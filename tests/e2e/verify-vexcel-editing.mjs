@@ -59,6 +59,8 @@ let failNextPixelTransform = false;
 let failWorldTransforms = false;
 let shortenNextWorldTransform = false;
 let overscanWorldTransform = false;
+let staggerWorldTransforms = false;
+let staggerStarted = 0, staggerPending = 0;
 const demPriorities = [];
 const tileRequestsByImage = new Map();
 let frameQueryCount = 0;
@@ -110,6 +112,12 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 		if (body.operation === "world-2-pixel" && delayNextWorldTransform) {
 			delayNextWorldTransform = false;
 			await new Promise((done) => setTimeout(done, 250));
+		}
+		if (body.operation === "world-2-pixel" && staggerWorldTransforms) {
+			const sequence = ++staggerStarted;
+			staggerPending++;
+			await new Promise((done) => setTimeout(done, sequence === 1 ? 40 : 600));
+			staggerPending--;
 		}
 		const useFallback = body.operation !== "world-2-pixel" && failNextPixelTransform;
 		if (useFallback) failNextPixelTransform = false;
@@ -740,6 +748,8 @@ const repeatedCardinalStayed = await page.evaluate(() =>
 // the geographic segment crosses the frame. Exercise the renderer itself,
 // not only the clipping helper, and require one edge-to-edge visible path.
 overscanWorldTransform = true;
+staggerWorldTransforms = true;
+staggerStarted = 0;
 await page.evaluate(({ west, east, lat }) => {
 	const map = window.leafletPlan.map;
 	window._dwVexcelClipProbe = L.polyline([[lat, west - 0.001], [lat, east + 0.001]], {
@@ -748,9 +758,18 @@ await page.evaluate(({ west, east, lat }) => {
 	window.leafletPlan.lines.push([{ polyline: window._dwVexcelClipProbe }]);
 }, { west: WEST, east: EAST, lat: (NORTH + SOUTH) / 2 });
 await page.waitForFunction(() =>
+	document.querySelector(".dw-vex-route--progressive .dw-vex-route-visual"));
+const progressiveRouteEarly = staggerPending > 0 && await page.evaluate(() => {
+	const route = document.querySelector(".dw-vex-route--progressive");
+	return !!route && route.querySelectorAll(".dw-vex-route-visual").length > 0 &&
+		route.querySelectorAll(".dw-vex-route-casing").length > 0 &&
+		route.querySelectorAll(".dw-vex-route-hit,.dw-vex-route-handle").length === 0;
+});
+await page.waitForFunction(() =>
 	document.querySelectorAll(".dw-vex-route-visual").length === 3 &&
 	!!document.querySelector(".dw-vex-route--exact"),
 );
+staggerWorldTransforms = false;
 const clippedCrossingVisible = await page.evaluate((width) =>
 	[...document.querySelectorAll(".dw-vex-route-visual")].some((path) => {
 		const start = path.getPointAtLength(0);
@@ -947,6 +966,7 @@ result.angleResults = angleResults;
 result.compassState = compassState;
 result.flatState = flatState;
 result.clippedCrossingVisible = clippedCrossingVisible;
+result.progressiveRouteEarly = progressiveRouteEarly;
 result.repeatedCardinalStayed = repeatedCardinalStayed;
 result.nonlinearAlignment = nonlinearAlignment;
 result.unsupportedDemOverrides = demPriorities.filter((priority) => priority != null).length;
@@ -1000,6 +1020,7 @@ for (const angle of angleResults) {
 	}
 }
 if (!clippedCrossingVisible) failures.push("exact out-of-frame route pixels were dropped instead of clipped");
+if (!progressiveRouteEarly) failures.push("multi-chunk route did not render before all transforms completed");
 if (!repeatedCardinalStayed) failures.push("selected cardinal still duplicates the center 2D action");
 if (nonlinearAlignment.vertices < 3 || nonlinearAlignment.error > 1) {
 	failures.push(`sparse route did not follow nonlinear camera: ${JSON.stringify(nonlinearAlignment)}`);
