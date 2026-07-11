@@ -124,7 +124,7 @@ const routeSurface = await page.evaluate(() => {
 	const map = window._dwLayerCtrl._map;
 	const pane = map.getPane("dwVexcelObliquePane");
 	const routePane = map.getPane("dwVexcelRoutePane");
-	const route = document.querySelector('.dw-vex-route path[stroke="#ef2929"]');
+	const route = document.querySelector(".dw-vex-route-visual");
 	const routeRect = route ? route.getBoundingClientRect() : null;
 	const tiles = [...document.querySelectorAll(".dw-vex-warp-tile-loaded")];
 	const tileRects = tiles

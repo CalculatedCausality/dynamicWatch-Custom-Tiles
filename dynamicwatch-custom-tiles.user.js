@@ -4019,28 +4019,40 @@
         const rendered = [];
         for (const entry of paths) {
           const points = entry.points || entry;
+          const source = this._routeSources[entry.sourceIndex];
+          const options2 = source && source.polyline && source.polyline.options || {};
+          const weight = Number.isFinite(Number(options2.weight)) ? Number(options2.weight) : 8;
+          const opacity = Number.isFinite(Number(options2.opacity)) ? Number(options2.opacity) : 0.4;
           for (const segment of _vexcelClipPathToRect(points, this._frame.w, this._frame.h)) {
             rendered.push({
               d: segment.map((p, i) => (i ? "L" : "M") + p[0] + " " + p[1]).join(" "),
-              sourceIndex: entry.sourceIndex == null ? -1 : entry.sourceIndex
+              sourceIndex: entry.sourceIndex == null ? -1 : entry.sourceIndex,
+              color: String(options2.color || "#9400D3"),
+              weight,
+              opacity,
+              lineCap: String(options2.lineCap || "round"),
+              lineJoin: String(options2.lineJoin || "round"),
+              dashArray: options2.dashArray == null ? "" : String(options2.dashArray),
+              dashOffset: options2.dashOffset == null ? "" : String(options2.dashOffset)
             });
           }
         }
-        const addVisualPaths = (color, width) => {
-          for (const item of rendered) {
-            const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-            path.setAttribute("d", item.d);
-            path.setAttribute("fill", "none");
-            path.setAttribute("stroke", color);
-            path.setAttribute("stroke-width", String(width));
-            path.setAttribute("stroke-linecap", "round");
-            path.setAttribute("stroke-linejoin", "round");
-            path.setAttribute("vector-effect", "non-scaling-stroke");
-            this._routeSvg.appendChild(path);
-          }
-        };
-        addVisualPaths("#fff", 7);
-        addVisualPaths("#ef2929", 4);
+        for (const item of rendered) {
+          const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          path.classList.add("dw-vex-route-visual");
+          path.dataset.sourceIndex = String(item.sourceIndex);
+          path.setAttribute("d", item.d);
+          path.setAttribute("fill", "none");
+          path.setAttribute("stroke", item.color);
+          path.setAttribute("stroke-width", String(item.weight));
+          path.setAttribute("stroke-opacity", String(item.opacity));
+          path.setAttribute("stroke-linecap", item.lineCap);
+          path.setAttribute("stroke-linejoin", item.lineJoin);
+          if (item.dashArray) path.setAttribute("stroke-dasharray", item.dashArray);
+          if (item.dashOffset) path.setAttribute("stroke-dashoffset", item.dashOffset);
+          path.setAttribute("vector-effect", "non-scaling-stroke");
+          this._routeSvg.appendChild(path);
+        }
         for (const item of rendered) {
           const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
           hit.classList.add("dw-vex-route-hit");
@@ -4048,7 +4060,7 @@
           hit.setAttribute("d", item.d);
           hit.setAttribute("fill", "none");
           hit.setAttribute("stroke", "transparent");
-          hit.setAttribute("stroke-width", "20");
+          hit.setAttribute("stroke-width", String(Math.max(20, item.weight + 12)));
           hit.setAttribute("stroke-linecap", "round");
           hit.setAttribute("stroke-linejoin", "round");
           hit.setAttribute("vector-effect", "non-scaling-stroke");

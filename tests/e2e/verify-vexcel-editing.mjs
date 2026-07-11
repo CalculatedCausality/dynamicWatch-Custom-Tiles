@@ -199,7 +199,7 @@ await page.waitForFunction(() =>
 	!!document.querySelector(".dw-vex-route--exact .dw-vex-route-hit"),
 );
 
-const beforeInsert = await page.locator(".dw-vex-route path[stroke='#ef2929']").evaluateAll(
+const beforeInsert = await page.locator(".dw-vex-route-visual").evaluateAll(
 	(paths) => paths.map((path) => path.getAttribute("d")),
 );
 const hitPoint = await page.locator(".dw-vex-route-hit").first().evaluate((path) => {
@@ -214,7 +214,7 @@ await page.waitForFunction(() =>
 	document.querySelectorAll(".dw-vex-route-hit").length === 2,
 );
 await page.waitForFunction((before) => {
-	const after = [...document.querySelectorAll(".dw-vex-route path[stroke='#ef2929']")]
+	const after = [...document.querySelectorAll(".dw-vex-route-visual")]
 		.map((path) => path.getAttribute("d"));
 	return JSON.stringify(after) !== JSON.stringify(before) &&
 		!!document.querySelector(".dw-vex-route--exact");
@@ -233,8 +233,8 @@ const beforeDrag = await page.evaluate(() => {
 	const point = segment.marker_end.getLatLng();
 	return { lat: point.lat, lng: point.lng };
 });
-const beforeDragPath = await page.locator(".dw-vex-route path[stroke='#ef2929']").allTextContents()
-	.then(async () => page.locator(".dw-vex-route path[stroke='#ef2929']").evaluateAll(
+const beforeDragPath = await page.locator(".dw-vex-route-visual").allTextContents()
+	.then(async () => page.locator(".dw-vex-route-visual").evaluateAll(
 		(paths) => paths.map((path) => path.getAttribute("d")),
 	));
 const dragTarget = {
@@ -260,7 +260,7 @@ await page.waitForFunction(({ lat, lng }) => {
 	return point && (Math.abs(point.lat - lat) > 1e-7 || Math.abs(point.lng - lng) > 1e-7);
 }, beforeDrag);
 await page.waitForFunction((before) => {
-	const after = [...document.querySelectorAll(".dw-vex-route path[stroke='#ef2929']")]
+	const after = [...document.querySelectorAll(".dw-vex-route-visual")]
 		.map((path) => path.getAttribute("d"));
 	return JSON.stringify(after) !== JSON.stringify(before) &&
 		document.querySelector(".dw-vex-route--exact");
@@ -270,13 +270,11 @@ await page.waitForFunction(() => !window.leafletPlan.ignoringMapClicks);
 const inspectProjectedRoute = () => page.evaluate(() => {
 	const svg = document.querySelector(".dw-vex-route");
 	const children = [...svg.children];
-	const white = children.map((node, index) => node.getAttribute("stroke") === "#fff" ? index : -1)
-		.filter((index) => index >= 0);
-	const red = children.map((node, index) => node.getAttribute("stroke") === "#ef2929" ? index : -1)
+	const visuals = children.map((node, index) => node.classList.contains("dw-vex-route-visual") ? index : -1)
 		.filter((index) => index >= 0);
 	const hits = children.map((node, index) => node.classList.contains("dw-vex-route-hit") ? index : -1)
 		.filter((index) => index >= 0);
-	const endpoints = red.flatMap((index) => {
+	const endpoints = visuals.flatMap((index) => {
 		const path = children[index];
 		return [path.getPointAtLength(0), path.getPointAtLength(path.getTotalLength())];
 	});
@@ -289,8 +287,8 @@ const inspectProjectedRoute = () => page.evaluate(() => {
 		return Math.max(maximum, nearest);
 	}, 0);
 	let adjacencyError = Infinity;
-	if (red.length === handles.length - 1) {
-		adjacencyError = red.reduce((maximum, index, segmentIndex) => {
+	if (visuals.length === handles.length - 1) {
+		adjacencyError = visuals.reduce((maximum, index, segmentIndex) => {
 			const path = children[index];
 			const start = path.getPointAtLength(0);
 			const end = path.getPointAtLength(path.getTotalLength());
@@ -304,16 +302,29 @@ const inspectProjectedRoute = () => page.evaluate(() => {
 			return Math.max(maximum, Math.min(direct, reverse));
 		}, 0);
 	}
+	const sourcePolylines = window.leafletPlan.lines.flatMap((line) =>
+		line.map((segment) => segment.polyline).filter(Boolean));
+	const styleMatches = visuals.every((index) => {
+		const path = children[index];
+		const source = sourcePolylines[Number(path.dataset.sourceIndex)];
+		if (!source) return false;
+		const options = source.options || {};
+		return path.getAttribute("stroke").toLowerCase() === String(options.color || "#9400D3").toLowerCase() &&
+			Math.abs(Number(path.getAttribute("stroke-width")) - Number(options.weight || 8)) < 1e-9 &&
+			Math.abs(Number(path.getAttribute("stroke-opacity")) - Number(options.opacity ?? 0.4)) < 1e-9 &&
+			path.getAttribute("stroke-linecap") === String(options.lineCap || "round") &&
+			path.getAttribute("stroke-linejoin") === String(options.lineJoin || "round");
+	});
 	return {
-		white: white.length,
-		red: red.length,
+		visuals: visuals.length,
 		hits: hits.length,
-		paintOrder: white.length > 0 && red.length > 0 && hits.length > 0 &&
-			Math.max(...white) < Math.min(...red) && Math.max(...red) < Math.min(...hits),
+		paintOrder: visuals.length > 0 && hits.length > 0 &&
+			Math.max(...visuals) < Math.min(...hits),
 		finite: [...svg.querySelectorAll("path")].every((path) =>
 			!/NaN|Infinity|undefined/.test(path.getAttribute("d") || "")),
 		maxEndpointError,
 		adjacencyError,
+		styleMatches,
 	};
 });
 
@@ -392,11 +403,11 @@ await page.evaluate(({ west, east, lat }) => {
 	window.leafletPlan.lines.push([{ polyline: window._dwVexcelClipProbe }]);
 }, { west: WEST, east: EAST, lat: (NORTH + SOUTH) / 2 });
 await page.waitForFunction(() =>
-	document.querySelectorAll(".dw-vex-route path[stroke='#ef2929']").length === 3 &&
+	document.querySelectorAll(".dw-vex-route-visual").length === 3 &&
 	!!document.querySelector(".dw-vex-route--exact"),
 );
 const clippedCrossingVisible = await page.evaluate((width) =>
-	[...document.querySelectorAll(".dw-vex-route path[stroke='#ef2929']")].some((path) => {
+	[...document.querySelectorAll(".dw-vex-route-visual")].some((path) => {
 		const start = path.getPointAtLength(0);
 		const end = path.getPointAtLength(path.getTotalLength());
 		return Math.min(start.x, end.x) < 0.01 && Math.max(start.x, end.x) > width - 0.01;
@@ -407,7 +418,7 @@ await page.evaluate(() => {
 	window.leafletPlan.map.removeLayer(window._dwVexcelClipProbe);
 });
 await page.waitForFunction(() =>
-	document.querySelectorAll(".dw-vex-route path[stroke='#ef2929']").length === 2 &&
+	document.querySelectorAll(".dw-vex-route-visual").length === 2 &&
 	!!document.querySelector(".dw-vex-route--exact"),
 );
 
@@ -518,7 +529,24 @@ const result = await page.evaluate(({ first, second, dragTarget }) => {
 		lineLength: window.leafletPlan.lines?.[0]?.length,
 		waypoints: window.leafletPlan.waypoints?.length,
 		exact: !!document.querySelector(".dw-vex-route--exact"),
-		redPaths: document.querySelectorAll(".dw-vex-route path[stroke='#ef2929']").length,
+		visualPaths: document.querySelectorAll(".dw-vex-route-visual").length,
+		routeAppearance: (() => {
+			const projected = document.querySelector(".dw-vex-route-visual");
+			const native = window.leafletPlan.lines.flatMap((line) =>
+				line.map((segment) => segment.polyline).filter(Boolean))[0];
+			return projected && native ? {
+				projected: {
+					color: projected.getAttribute("stroke"),
+					weight: Number(projected.getAttribute("stroke-width")),
+					opacity: Number(projected.getAttribute("stroke-opacity")),
+				},
+				native: {
+					color: native.options.color,
+					weight: native.options.weight,
+					opacity: native.options.opacity,
+				},
+			} : null;
+		})(),
 		handles: centers.length,
 		startError: start ? distance(start, first) : Infinity,
 		endError: end ? distance(end, second) : Infinity,
@@ -550,7 +578,7 @@ await page.locator('.line-marker-popup button[id^="line-marker-delete-button-"]'
 await page.waitForFunction(() => window.leafletPlan.lines?.[0]?.length === 2);
 await page.waitForFunction(() =>
 	document.querySelectorAll(".dw-vex-route-handle--via").length === 0 &&
-	document.querySelectorAll(".dw-vex-route path[stroke='#ef2929']").length === 1 &&
+	document.querySelectorAll(".dw-vex-route-visual").length === 1 &&
 	!!document.querySelector(".dw-vex-route--exact"),
 );
 result.worldToPixel = worldToPixel;
@@ -573,7 +601,7 @@ console.log(JSON.stringify(result, null, 2));
 const failures = [];
 if (result.lineLength !== 3) failures.push(`expected 3 route points, got ${result.lineLength}`);
 if (result.waypoints !== 1) failures.push(`expected 1 standalone waypoint, got ${result.waypoints}`);
-if (!result.exact || result.redPaths !== 2) failures.push("final projected route is not exact/two-segment");
+if (!result.exact || result.visualPaths !== 2) failures.push("final projected route is not exact/two-segment");
 if (result.handles !== 4) failures.push(`expected 4 projected handles, got ${result.handles}`);
 if (result.startError > 3 || result.endError > 3) failures.push("added route handles do not match click positions");
 if (result.insertError > 3) failures.push(`inserted handle missed route click by ${result.insertError.toFixed(1)}px`);
@@ -589,7 +617,7 @@ if (result.deleteLineLength !== 2) failures.push("projected route-point delete d
 for (const angle of angleResults) {
 	if (angle.insertionError > 3) failures.push(`${angle.direction} insertion missed by ${angle.insertionError.toFixed(1)}px`);
 	for (const [state, quality] of [["inserted", angle.insertedQuality], ["restored", angle.restoredQuality]]) {
-		if (!quality.paintOrder || !quality.finite || quality.maxEndpointError > 0.5 ||
+		if (!quality.paintOrder || !quality.finite || !quality.styleMatches || quality.maxEndpointError > 0.5 ||
 			quality.adjacencyError > 0.5) {
 			failures.push(`${angle.direction} ${state} route rendered poorly: ${JSON.stringify(quality)}`);
 		}
