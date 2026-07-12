@@ -61,6 +61,8 @@ let shortenNextWorldTransform = false;
 let overscanWorldTransform = false;
 let staggerWorldTransforms = false;
 let staggerStarted = 0, staggerPending = 0;
+let tileDelayMs = 60;
+const initialTileDelayMs = 300;
 const demPriorities = [];
 const tileRequestsByImage = new Map();
 let frameQueryCount = 0;
@@ -165,7 +167,7 @@ await context.route(/https:\/\/api\.vexcelgroup\.com\/.*/, async (route) => {
 	if (url.includes("/v2/oriented/tile")) {
 		const image = new URL(url).searchParams.get("image-name") || "unknown";
 		tileRequestsByImage.set(image, (tileRequestsByImage.get(image) || 0) + 1);
-		await new Promise((done) => setTimeout(done, 60));
+		await new Promise((done) => setTimeout(done, tileDelayMs));
 		await route.fulfill({ status: 200, contentType: "image/png", body: PNG });
 		return;
 	}
@@ -227,6 +229,15 @@ await page.evaluate(() => {
 	if (!map.hasLayer(vexcel)) map.addLayer(vexcel);
 });
 await page.waitForSelector('.dw-vex-dir[data-dir="oblique-east"]');
+tileDelayMs = initialTileDelayMs;
+await page.evaluate(() => {
+	const map = window.leafletPlan.map;
+	window._dwInitialRouteLines = window.leafletPlan.lines;
+	window._dwInitialProjectionProbe = L.polyline([
+		[-26.608, 153.002], [-26.605, 153.005], [-26.602, 153.008],
+	], { className: "route-polyline", color: "#9400D3", weight: 4, opacity: 0.4 }).addTo(map);
+	window.leafletPlan.lines = [[{ polyline: window._dwInitialProjectionProbe }]];
+});
 const coldLoadStarted = Date.now();
 await page.locator('.dw-vex-dir[data-dir="oblique-east"]').click();
 const loadingBaseState = await page.evaluate(() => {
@@ -237,8 +248,20 @@ const loadingBaseState = await page.evaluate(() => {
 		suppressed: !!container?.classList.contains("dw-vex-flat-suppressed"),
 	};
 });
+await page.waitForFunction(() =>
+	document.querySelector(".dw-vex-route--exact .dw-vex-route-visual"),
+	undefined, { timeout: 20_000 });
+const routeBeforeFirstTile = await page.evaluate(() =>
+	document.querySelectorAll(".dw-vex-warp-tile-loaded").length === 0 &&
+	!!document.querySelector(".dw-vex-route--exact .dw-vex-route-visual"));
+await page.evaluate(() => {
+	window.leafletPlan.lines = window._dwInitialRouteLines;
+	window.leafletPlan.map.removeLayer(window._dwInitialProjectionProbe);
+});
+tileDelayMs = 60;
 await page.waitForSelector(".dw-vex-warp-tile-loaded", { timeout: 20_000 });
 const firstObliqueTileMs = Date.now() - coldLoadStarted;
+const adjustedFirstObliqueTileMs = firstObliqueTileMs - initialTileDelayMs;
 const activeBaseState = await page.evaluate(() => {
 	const entry = window._dwLayerCtrl._layers.find((item) => item.name === "Vexcel Aerial");
 	const layer = entry?.layer;
@@ -973,6 +996,8 @@ result.unsupportedDemOverrides = demPriorities.filter((priority) => priority != 
 result.transformRequests = demPriorities.length;
 result.transformsWithoutSession = transformsWithoutSession;
 result.firstObliqueTileMs = firstObliqueTileMs;
+result.adjustedFirstObliqueTileMs = adjustedFirstObliqueTileMs;
+result.routeBeforeFirstTile = routeBeforeFirstTile;
 result.loadingBaseState = loadingBaseState;
 result.activeBaseState = activeBaseState;
 result.initialEastTileRequests = initialEastTileRequests;
@@ -1045,7 +1070,10 @@ if (!activeBaseState.baseStillSelected || !activeBaseState.hidden || !activeBase
 	activeBaseState.suppressedContainers !== 1) {
 	failures.push(`oblique did not replace only the flat Vexcel base: ${JSON.stringify(activeBaseState)}`);
 }
-if (firstObliqueTileMs > 500) failures.push(`cold oblique first tile took ${firstObliqueTileMs}ms`);
+if (adjustedFirstObliqueTileMs > 500) {
+	failures.push(`cold oblique first tile took ${adjustedFirstObliqueTileMs}ms excluding test latency`);
+}
+if (!routeBeforeFirstTile) failures.push("route projection still waited for the first oblique tile");
 if (initialEastTileRequests > 24) {
 	failures.push(`initial oblique over-fetched ${initialEastTileRequests} tiles`);
 }

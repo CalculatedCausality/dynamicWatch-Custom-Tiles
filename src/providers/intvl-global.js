@@ -79,19 +79,18 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 				// lingers because `mouseout` doesn't fire on touch-end.
 				// `(hover: none)` is the standards-track "no hover capability"
 				// signal; we fall back to Leaflet's UA-based mobile flag.
+				const noHover = L.Browser.mobile ||
+					(window.matchMedia && window.matchMedia("(hover: none)").matches);
 				this._tooltip = L.tooltip({
 					sticky:    true,
 					opacity:   0.95,
 					className: "dw-intvl-tip",
-					direction: "right",
+					direction: noHover ? "auto" : "right",
 					offset:    [12, 0],
 				});
 				this._hoverDebounce = null;
 				this._lastFeatKey   = null;
 
-				const noHover = L.Browser.mobile ||
-					(window.matchMedia &&
-					 window.matchMedia("(hover: none)").matches);
 				if (!noHover) {
 					this._onMove = (e) => {
 						// Leaflet occasionally fires mousemove from layer
@@ -110,6 +109,79 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 					};
 					map.on("mousemove", this._onMove);
 					map.on("mouseout",  this._onLeave);
+				} else {
+					const container = map.getContainer();
+					this._press = null;
+					this._onPressDown = (event) => {
+						if (event.target && event.target.closest && event.target.closest(
+							".leaflet-control,.leaflet-popup,.leaflet-marker-icon,.leaflet-interactive")) return;
+						if (event.pointerType !== "touch" || event.isPrimary === false) {
+							this._cancelPress(); return;
+						}
+						this._cancelPress();
+						this._clearTooltip();
+						const press = this._press = {
+							pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+							latlng: map.mouseEventToLatLng(event), active: false, timer: null,
+						};
+						press.timer = setTimeout(() => {
+							if (this._press !== press || !this._map) return;
+							this._identifyHover(press.latlng);
+							press.active = !!(this._tooltip && this._tooltip._map);
+						}, 550);
+					};
+					this._onPressMove = (event) => {
+						const press = this._press;
+						if (!press || press.pointerId !== event.pointerId) return;
+						if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 10) {
+							this._cancelPress();
+						}
+					};
+					this._onPressEnd = (event) => {
+						const press = this._press;
+						if (!press || press.pointerId !== event.pointerId) return;
+						clearTimeout(press.timer);
+						if (press.active) {
+							this._suppressPressClick = {
+								x: event.clientX, y: event.clientY, until: Date.now() + 800,
+							};
+						}
+						this._press = null;
+					};
+					this._onPressCancel = () => this._cancelPress();
+					this._onPressClick = (event) => {
+						const suppress = this._suppressPressClick;
+						if (!suppress || Date.now() > suppress.until ||
+							Math.hypot(event.clientX - suppress.x, event.clientY - suppress.y) > 16) return;
+						this._suppressPressClick = null;
+						event.preventDefault();
+						event.stopImmediatePropagation();
+					};
+					this._onPressContext = (event) => {
+						const press = this._press;
+						if (press) clearTimeout(press.timer);
+						this._identifyHover(map.mouseEventToLatLng(event));
+						const identified = !!(this._tooltip && this._tooltip._map);
+						if (press) press.active = identified;
+						if (identified) {
+							this._suppressPressClick = {
+								x: event.clientX, y: event.clientY, until: Date.now() + 800,
+							};
+							event.preventDefault();
+							event.stopImmediatePropagation();
+						}
+					};
+					this._onPressDragStart = () => {
+						this._cancelPress();
+						this._clearTooltip();
+					};
+					container.addEventListener("pointerdown", this._onPressDown, true);
+					container.addEventListener("pointermove", this._onPressMove, true);
+					container.addEventListener("pointerup", this._onPressEnd, true);
+					container.addEventListener("pointercancel", this._onPressCancel, true);
+					container.addEventListener("click", this._onPressClick, true);
+					container.addEventListener("contextmenu", this._onPressContext, true);
+					map.on("dragstart zoomstart", this._onPressDragStart);
 				}
 
 				// Free a tile's prepared feature data when Leaflet
@@ -134,15 +206,31 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 
 			onRemove(map) {
 				clearTimeout(this._hoverDebounce);
+				this._cancelPress();
 				if (this._onMove) {
 					map.off("mousemove", this._onMove);
 					map.off("mouseout",  this._onLeave);
+				}
+				if (this._onPressDown) {
+					const container = map.getContainer();
+					container.removeEventListener("pointerdown", this._onPressDown, true);
+					container.removeEventListener("pointermove", this._onPressMove, true);
+					container.removeEventListener("pointerup", this._onPressEnd, true);
+					container.removeEventListener("pointercancel", this._onPressCancel, true);
+					container.removeEventListener("click", this._onPressClick, true);
+					container.removeEventListener("contextmenu", this._onPressContext, true);
+					map.off("dragstart zoomstart", this._onPressDragStart);
 				}
 				this.off("tileunload", this._onTileUnload);
 				this._clearTooltip();
 				this._tooltip = null;
 				this._tileFeatures && this._tileFeatures.clear();
 				L.GridLayer.prototype.onRemove.call(this, map);
+			},
+
+			_cancelPress() {
+				if (this._press) clearTimeout(this._press.timer);
+				this._press = null;
 			},
 
 			_clearTooltip() {
@@ -399,4 +487,3 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 		return layer;
 	}
 }
-

@@ -3328,7 +3328,7 @@
         this._routeExact = false;
         this._routeError = false;
         this._routeProgressive = false;
-        this._routeDeferred = false;
+        this._routeProgressFrame = null;
         this._routeSources = [];
         this._routeMarkers = [];
         this._interactionQueue = [];
@@ -3414,6 +3414,7 @@
         if (this._routeSvg) this._routeSvg.replaceChildren();
         clearTimeout(this._routeTimer);
         clearTimeout(this._routeRetryTimer);
+        this._cancelProgressiveRouteDraw();
         if (this._routeObserver) {
           this._routeObserver.disconnect();
           this._routeObserver = null;
@@ -3488,6 +3489,7 @@
         this._routeProgressive = false;
         this._routeRetryCount = 0;
         clearTimeout(this._routeRetryTimer);
+        this._cancelProgressiveRouteDraw();
         for (const hit of this._routeSvg.querySelectorAll(".dw-vex-route-hit")) {
           hit.classList.remove("dw-vex-route-hit");
         }
@@ -3507,6 +3509,7 @@
         this._cancelInteractionRequests();
         clearTimeout(this._routeTimer);
         clearTimeout(this._routeRetryTimer);
+        this._cancelProgressiveRouteDraw();
         this._cancelProjectionRequests();
         this._clearTiles();
         if (this._routeSvg) this._routeSvg.replaceChildren();
@@ -3536,6 +3539,7 @@
         this._cancelInteractionRequests();
         clearTimeout(this._routeTimer);
         clearTimeout(this._routeRetryTimer);
+        this._cancelProgressiveRouteDraw();
         this._frame = null;
         this._nativeScale = 0;
         this._centerPixel = null;
@@ -3547,12 +3551,17 @@
         if (this._routeSvg) this._routeSvg.replaceChildren();
         this._routeSources = [];
         this._routeMarkers = [];
-        this._routeDeferred = false;
         this._routeRetryCount = 0;
         this._routeProgressive = false;
       },
       getFrame() {
         return this._frame;
+      },
+      _cancelProgressiveRouteDraw() {
+        if (this._routeProgressFrame != null) {
+          L.Util.cancelAnimFrame(this._routeProgressFrame);
+          this._routeProgressFrame = null;
+        }
       },
       _beginFrameTransition() {
         this._clearFrameTransition();
@@ -4207,11 +4216,6 @@
       },
       _requestRoute() {
         if (!this._map || !this._frame || !this._routeSvg || !options.getRouteModel && !options.getRoutePaths) return;
-        if (this._tiles.size && this.getLoadedTileCount() === 0) {
-          this._routeDeferred = true;
-          return;
-        }
-        this._routeDeferred = false;
         clearTimeout(this._routeTimer);
         this._routeGeneration++;
         if (this._routeHandle && typeof this._routeHandle.abort === "function") {
@@ -4335,6 +4339,7 @@
             }
           }
           applyPixels(pixels, 0);
+          this._cancelProgressiveRouteDraw();
           this._routeProgressive = false;
           if (this._drag) {
             this._pendingRouteDraw = {
@@ -4357,8 +4362,14 @@
         }, (chunkPixels, start) => {
           if (generation !== this._generation || routeGeneration !== this._routeGeneration || frame !== this._frame || this._drag || !applyPixels(chunkPixels, start)) return;
           this._routeProgressive = true;
-          this._drawRoute(projected, [], false);
-          this._notify();
+          if (this._routeProgressFrame == null) {
+            this._routeProgressFrame = L.Util.requestAnimFrame(() => {
+              this._routeProgressFrame = null;
+              if (generation !== this._generation || routeGeneration !== this._routeGeneration || frame !== this._frame || this._drag) return;
+              this._drawRoute(projected, [], false);
+              this._notify();
+            }, this);
+          }
         });
         this._routeHandle = handle && !handle.completed ? handle : null;
       },
@@ -4526,10 +4537,6 @@
             this._clearFrameTransition(true);
             this._pruneStaleTiles();
             this._notify();
-            if (this._routeDeferred) {
-              this._routeDeferred = false;
-              this._requestRoute();
-            }
           };
           tile.img.onerror = () => {
             if (tile.removed) return;
@@ -7629,16 +7636,16 @@
             map.getPane("dwIntvlGlobalPane").style.pointerEvents = "none";
           }
           L.GridLayer.prototype.onAdd.call(this, map);
+          const noHover = L.Browser.mobile || window.matchMedia && window.matchMedia("(hover: none)").matches;
           this._tooltip = L.tooltip({
             sticky: true,
             opacity: 0.95,
             className: "dw-intvl-tip",
-            direction: "right",
+            direction: noHover ? "auto" : "right",
             offset: [12, 0]
           });
           this._hoverDebounce = null;
           this._lastFeatKey = null;
-          const noHover = L.Browser.mobile || window.matchMedia && window.matchMedia("(hover: none)").matches;
           if (!noHover) {
             this._onMove = (e) => {
               if (!e?.latlng) return;
@@ -7655,6 +7662,88 @@
             };
             map.on("mousemove", this._onMove);
             map.on("mouseout", this._onLeave);
+          } else {
+            const container = map.getContainer();
+            this._press = null;
+            this._onPressDown = (event) => {
+              if (event.target && event.target.closest && event.target.closest(
+                ".leaflet-control,.leaflet-popup,.leaflet-marker-icon,.leaflet-interactive"
+              )) return;
+              if (event.pointerType !== "touch" || event.isPrimary === false) {
+                this._cancelPress();
+                return;
+              }
+              this._cancelPress();
+              this._clearTooltip();
+              const press = this._press = {
+                pointerId: event.pointerId,
+                x: event.clientX,
+                y: event.clientY,
+                latlng: map.mouseEventToLatLng(event),
+                active: false,
+                timer: null
+              };
+              press.timer = setTimeout(() => {
+                if (this._press !== press || !this._map) return;
+                this._identifyHover(press.latlng);
+                press.active = !!(this._tooltip && this._tooltip._map);
+              }, 550);
+            };
+            this._onPressMove = (event) => {
+              const press = this._press;
+              if (!press || press.pointerId !== event.pointerId) return;
+              if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 10) {
+                this._cancelPress();
+              }
+            };
+            this._onPressEnd = (event) => {
+              const press = this._press;
+              if (!press || press.pointerId !== event.pointerId) return;
+              clearTimeout(press.timer);
+              if (press.active) {
+                this._suppressPressClick = {
+                  x: event.clientX,
+                  y: event.clientY,
+                  until: Date.now() + 800
+                };
+              }
+              this._press = null;
+            };
+            this._onPressCancel = () => this._cancelPress();
+            this._onPressClick = (event) => {
+              const suppress = this._suppressPressClick;
+              if (!suppress || Date.now() > suppress.until || Math.hypot(event.clientX - suppress.x, event.clientY - suppress.y) > 16) return;
+              this._suppressPressClick = null;
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            };
+            this._onPressContext = (event) => {
+              const press = this._press;
+              if (press) clearTimeout(press.timer);
+              this._identifyHover(map.mouseEventToLatLng(event));
+              const identified = !!(this._tooltip && this._tooltip._map);
+              if (press) press.active = identified;
+              if (identified) {
+                this._suppressPressClick = {
+                  x: event.clientX,
+                  y: event.clientY,
+                  until: Date.now() + 800
+                };
+                event.preventDefault();
+                event.stopImmediatePropagation();
+              }
+            };
+            this._onPressDragStart = () => {
+              this._cancelPress();
+              this._clearTooltip();
+            };
+            container.addEventListener("pointerdown", this._onPressDown, true);
+            container.addEventListener("pointermove", this._onPressMove, true);
+            container.addEventListener("pointerup", this._onPressEnd, true);
+            container.addEventListener("pointercancel", this._onPressCancel, true);
+            container.addEventListener("click", this._onPressClick, true);
+            container.addEventListener("contextmenu", this._onPressContext, true);
+            map.on("dragstart zoomstart", this._onPressDragStart);
           }
           this._onTileUnload = (e) => {
             if (e.tile && e.tile._dwHandle) {
@@ -7669,15 +7758,30 @@
         },
         onRemove(map) {
           clearTimeout(this._hoverDebounce);
+          this._cancelPress();
           if (this._onMove) {
             map.off("mousemove", this._onMove);
             map.off("mouseout", this._onLeave);
+          }
+          if (this._onPressDown) {
+            const container = map.getContainer();
+            container.removeEventListener("pointerdown", this._onPressDown, true);
+            container.removeEventListener("pointermove", this._onPressMove, true);
+            container.removeEventListener("pointerup", this._onPressEnd, true);
+            container.removeEventListener("pointercancel", this._onPressCancel, true);
+            container.removeEventListener("click", this._onPressClick, true);
+            container.removeEventListener("contextmenu", this._onPressContext, true);
+            map.off("dragstart zoomstart", this._onPressDragStart);
           }
           this.off("tileunload", this._onTileUnload);
           this._clearTooltip();
           this._tooltip = null;
           this._tileFeatures && this._tileFeatures.clear();
           L.GridLayer.prototype.onRemove.call(this, map);
+        },
+        _cancelPress() {
+          if (this._press) clearTimeout(this._press.timer);
+          this._press = null;
         },
         _clearTooltip() {
           if (this._tooltip && this._tooltip._map) this._tooltip.remove();

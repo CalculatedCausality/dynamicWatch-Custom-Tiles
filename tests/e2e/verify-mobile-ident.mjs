@@ -31,10 +31,18 @@ const page = await ctx.newPage();
 const logs = [];
 page.on("console", (m) => logs.push(`${m.type()}: ${m.text()}`));
 
-await page.goto("https://dynamic.watch/plan", { waitUntil: "domcontentloaded", timeout: 45000 });
+let loaded = false;
+for (let attempt = 0; attempt < 5 && !loaded; attempt++) {
+	if (attempt) await page.waitForTimeout(1000);
+	await page.goto("https://dynamic.watch/plan", {
+		waitUntil: "domcontentloaded", timeout: 45000,
+	}).catch(() => {});
+	loaded = await page.waitForFunction(() => !!(window._dwLayerCtrl && window._dwLayerCtrl._map),
+		undefined, { timeout: 20_000 }).then(() => true).catch(() => false);
+}
+if (!loaded) throw new Error("dynamic.watch planner failed to initialize after 5 attempts");
 await page.waitForSelector(".leaflet-planner-controls", { timeout: 30000 });
 await page.evaluate(() => { document.querySelectorAll(".modal,.modal-backdrop").forEach(e=>e.remove()); document.body.classList.remove("modal-open"); });
-await page.waitForFunction(() => !!(window._dwLayerCtrl && window._dwLayerCtrl._map), { timeout: 15000 });
 
 const hoverNone = await page.evaluate(() => window.matchMedia("(hover: none)").matches);
 console.log(`  touch emulation active (hover:none): ${hoverNone}`);
@@ -144,12 +152,128 @@ const tap = {
 };
 console.log(`  geocache tap: ${JSON.stringify(tap)}`);
 
+// --- Test 3: INTVL touch hold reproduces desktop hover ----------------
+await page.evaluate(() => {
+	const map = window._dwLayerCtrl._map, ctrl = window._dwLayerCtrl;
+	map.closePopup();
+	map.setView([-27.4698, 153.0251], 11);
+	const geo = ctrl._layers.find((l) => l.name === "Geocaches" && l.overlay);
+	if (geo && map.hasLayer(geo.layer)) map.removeLayer(geo.layer);
+	const intvl = ctrl._layers.find((l) => l.name === "INTVL Global Map" && l.overlay);
+	if (intvl && !map.hasLayer(intvl.layer)) map.addLayer(intvl.layer);
+});
+await page.waitForFunction(() => {
+	const entry = window._dwLayerCtrl._layers.find((l) => l.name === "INTVL Global Map" && l.overlay);
+	return entry?.layer?._tileFeatures?.size > 0;
+}, undefined, { timeout: 20_000 }).catch(() => {});
+
+const intvlPoint = await page.evaluate(() => {
+	const map = window._dwLayerCtrl._map;
+	const entry = window._dwLayerCtrl._layers.find((l) => l.name === "INTVL Global Map" && l.overlay);
+	const pointInRing = (x, y, ring) => {
+		let inside = false;
+		for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+			const a = ring[i], b = ring[j];
+			if ((a[1] > y) !== (b[1] > y) &&
+				x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) inside = !inside;
+		}
+		return inside;
+	};
+	for (const [key, layers] of entry?.layer?._tileFeatures || []) {
+		const [z, tileX, tileY] = key.split("/").map(Number);
+		for (const layer of layers) {
+			for (let fi = layer.features.length - 1; fi >= 0; fi--) {
+				const feature = layer.features[fi];
+				for (let gy = 1; gy < 10; gy++) for (let gx = 1; gx < 10; gx++) {
+					const x = feature.mnX + (feature.mxX - feature.mnX) * gx / 10;
+					const y = feature.mnY + (feature.mxY - feature.mnY) * gy / 10;
+					let inside = false;
+					for (const ring of feature.rings) if (pointInRing(x, y, ring)) inside = !inside;
+					if (!inside) continue;
+					const world = L.point((tileX + x / layer.extent) * 256,
+						(tileY + y / layer.extent) * 256);
+					const latlng = map.unproject(world, z);
+					const point = map.latLngToContainerPoint(latlng);
+					const rect = map.getContainer().getBoundingClientRect();
+					if (point.x < 20 || point.y < 20 || point.x > rect.width - 20 || point.y > rect.height - 20) continue;
+					const clientX = rect.left + point.x, clientY = rect.top + point.y;
+					const target = document.elementFromPoint(clientX, clientY);
+					if (target?.closest(".leaflet-control,.leaflet-popup,.leaflet-marker-icon,.leaflet-interactive")) continue;
+					entry.layer._identifyHover(latlng);
+					if (!document.querySelector(".dw-intvl-tip")) continue;
+					entry.layer._clearTooltip();
+					return { x: clientX, y: clientY };
+				}
+			}
+		}
+	}
+	return null;
+});
+
+let intvlHold = { error: "no populated INTVL polygon on screen" };
+if (intvlPoint) {
+	await page.evaluate((point) => {
+		const map = window._dwLayerCtrl._map;
+		window.__dwIntvlClicks = 0;
+		map.getContainer().addEventListener("click", () => window.__dwIntvlClicks++);
+		map.getContainer().dispatchEvent(new PointerEvent("pointerdown", {
+			bubbles: true, cancelable: true, pointerType: "touch", pointerId: 21,
+			isPrimary: true, clientX: point.x, clientY: point.y,
+		}));
+	}, intvlPoint);
+	await page.waitForTimeout(700);
+	intvlHold = await page.evaluate((point) => {
+		const target = window._dwLayerCtrl._map.getContainer();
+		target.dispatchEvent(new MouseEvent("contextmenu", {
+			bubbles: true, cancelable: true, clientX: point.x, clientY: point.y,
+		}));
+		target.dispatchEvent(new PointerEvent("pointerup", {
+			bubbles: true, cancelable: true, pointerType: "touch", pointerId: 21,
+			isPrimary: true, clientX: point.x, clientY: point.y,
+		}));
+		target.dispatchEvent(new MouseEvent("click", {
+			bubbles: true, cancelable: true, clientX: point.x, clientY: point.y,
+		}));
+		const tip = document.querySelector(".dw-intvl-tip");
+		return {
+			shown: !!tip,
+			text: tip?.textContent || "",
+			clickLeaks: window.__dwIntvlClicks,
+		};
+	}, intvlPoint);
+	const dragEventsUnblocked = await page.evaluate((point) => {
+		const target = window._dwLayerCtrl._map.getContainer();
+		const down = new PointerEvent("pointerdown", {
+			bubbles: true, cancelable: true, pointerType: "touch", pointerId: 22,
+			isPrimary: true, clientX: point.x, clientY: point.y,
+		});
+		const move = new PointerEvent("pointermove", {
+			bubbles: true, cancelable: true, pointerType: "touch", pointerId: 22,
+			isPrimary: true, clientX: point.x + 90, clientY: point.y,
+		});
+		target.dispatchEvent(down);
+		target.dispatchEvent(move);
+		target.dispatchEvent(new PointerEvent("pointerup", {
+			bubbles: true, cancelable: true, pointerType: "touch", pointerId: 22,
+			isPrimary: true, clientX: point.x + 90, clientY: point.y,
+		}));
+		return !down.defaultPrevented && !move.defaultPrevented;
+	}, intvlPoint);
+	await page.waitForTimeout(650);
+	intvlHold.dragEventsUnblocked = dragEventsUnblocked;
+	intvlHold.tipClearedByDrag = await page.evaluate(() =>
+		!document.querySelector(".dw-intvl-tip"));
+}
+console.log(`  INTVL long press: ${JSON.stringify(intvlHold)}`);
+
 const t1 = ident.present && ident.salesEmbedded && ident.noSalesLink;
 const t2 = !tap.error && tap.iconTapLeaks === 0 && tap.controlReached &&
 	tap.popupSeen && !tap.openedDuringTap &&
 	(tap.openedFromButton || "").includes("geocaching.com");
-const ok = t1 && t2;
-console.log(`\n  popup enrichment (cadastre + auto-sales, no link): ${t1 ? "✓" : "✗"}   geocache tap→popup→listing: ${t2 ? "✓" : "✗"}`);
+const t3 = !intvlHold.error && intvlHold.shown && /territory/i.test(intvlHold.text) &&
+	intvlHold.clickLeaks === 0 && intvlHold.dragEventsUnblocked && intvlHold.tipClearedByDrag;
+const ok = t1 && t2 && t3;
+console.log(`\n  popup enrichment (cadastre + auto-sales, no link): ${t1 ? "✓" : "✗"}   geocache tap→popup→listing: ${t2 ? "✓" : "✗"}   INTVL hold→tooltip: ${t3 ? "✓" : "✗"}`);
 console.log(`${ok ? "✓ PASS" : "✗ FAIL"} — mobile layer interactions`);
 await browser.close();
 process.exit(ok ? 0 : 1);

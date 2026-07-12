@@ -207,7 +207,7 @@ export function createVexcelObliqueLayer(options) {
 			this._routeExact = false;
 			this._routeError = false;
 			this._routeProgressive = false;
-			this._routeDeferred = false;
+			this._routeProgressFrame = null;
 			this._routeSources = [];
 			this._routeMarkers = [];
 			this._interactionQueue = [];
@@ -293,6 +293,7 @@ export function createVexcelObliqueLayer(options) {
 			if (this._routeSvg) this._routeSvg.replaceChildren();
 			clearTimeout(this._routeTimer);
 			clearTimeout(this._routeRetryTimer);
+			this._cancelProgressiveRouteDraw();
 			if (this._routeObserver) { this._routeObserver.disconnect(); this._routeObserver = null; }
 			if (this._map && this._onPlannerLayerChange) {
 				this._map.off("layeradd layerremove", this._onPlannerLayerChange);
@@ -371,6 +372,7 @@ export function createVexcelObliqueLayer(options) {
 			this._routeProgressive = false;
 			this._routeRetryCount = 0;
 			clearTimeout(this._routeRetryTimer);
+			this._cancelProgressiveRouteDraw();
 			for (const hit of this._routeSvg.querySelectorAll(".dw-vex-route-hit")) {
 				hit.classList.remove("dw-vex-route-hit");
 			}
@@ -393,6 +395,7 @@ export function createVexcelObliqueLayer(options) {
 			this._cancelInteractionRequests();
 			clearTimeout(this._routeTimer);
 			clearTimeout(this._routeRetryTimer);
+			this._cancelProgressiveRouteDraw();
 			this._cancelProjectionRequests();
 			this._clearTiles();
 			if (this._routeSvg) this._routeSvg.replaceChildren();
@@ -423,6 +426,7 @@ export function createVexcelObliqueLayer(options) {
 			this._cancelInteractionRequests();
 			clearTimeout(this._routeTimer);
 			clearTimeout(this._routeRetryTimer);
+			this._cancelProgressiveRouteDraw();
 			this._frame = null;
 			this._nativeScale = 0;
 			this._centerPixel = null;
@@ -434,12 +438,17 @@ export function createVexcelObliqueLayer(options) {
 			if (this._routeSvg) this._routeSvg.replaceChildren();
 			this._routeSources = [];
 			this._routeMarkers = [];
-			this._routeDeferred = false;
 			this._routeRetryCount = 0;
 			this._routeProgressive = false;
 		},
 
 		getFrame() { return this._frame; },
+		_cancelProgressiveRouteDraw() {
+			if (this._routeProgressFrame != null) {
+				L.Util.cancelAnimFrame(this._routeProgressFrame);
+				this._routeProgressFrame = null;
+			}
+		},
 		_beginFrameTransition() {
 			this._clearFrameTransition();
 			if (this._container && this.getLoadedTileCount() > 0 && this._container.parentNode) {
@@ -1097,11 +1106,6 @@ export function createVexcelObliqueLayer(options) {
 		_requestRoute() {
 			if (!this._map || !this._frame || !this._routeSvg ||
 				(!options.getRouteModel && !options.getRoutePaths)) return;
-			if (this._tiles.size && this.getLoadedTileCount() === 0) {
-				this._routeDeferred = true;
-				return;
-			}
-			this._routeDeferred = false;
 			clearTimeout(this._routeTimer);
 			this._routeGeneration++;
 			if (this._routeHandle && typeof this._routeHandle.abort === "function") {
@@ -1230,6 +1234,7 @@ export function createVexcelObliqueLayer(options) {
 					}
 				}
 				applyPixels(pixels, 0);
+				this._cancelProgressiveRouteDraw();
 				this._routeProgressive = false;
 				if (this._drag) {
 					this._pendingRouteDraw = {
@@ -1254,8 +1259,15 @@ export function createVexcelObliqueLayer(options) {
 				if (generation !== this._generation || routeGeneration !== this._routeGeneration ||
 					frame !== this._frame || this._drag || !applyPixels(chunkPixels, start)) return;
 				this._routeProgressive = true;
-				this._drawRoute(projected, [], false);
-				this._notify();
+				if (this._routeProgressFrame == null) {
+					this._routeProgressFrame = L.Util.requestAnimFrame(() => {
+						this._routeProgressFrame = null;
+						if (generation !== this._generation || routeGeneration !== this._routeGeneration ||
+							frame !== this._frame || this._drag) return;
+						this._drawRoute(projected, [], false);
+						this._notify();
+					}, this);
+				}
 			});
 			this._routeHandle = handle && !handle.completed ? handle : null;
 		},
@@ -1427,10 +1439,6 @@ export function createVexcelObliqueLayer(options) {
 					this._clearFrameTransition(true);
 					this._pruneStaleTiles();
 					this._notify();
-					if (this._routeDeferred) {
-						this._routeDeferred = false;
-						this._requestRoute();
-					}
 				};
 				tile.img.onerror = () => {
 					if (tile.removed) return;

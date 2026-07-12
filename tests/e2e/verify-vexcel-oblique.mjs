@@ -38,6 +38,23 @@ const browser = await chromium.launch({
 });
 const context = await browser.newContext({ storageState: STATE_PATH, viewport: { width: 1400, height: 900 } });
 
+// Vexcel's configuration/init only mints a viewer `session` when the request
+// carries the viewer Origin, and every imagery/metadata call needs that
+// session. Real Tampermonkey's GM_xmlhttpRequest sets Origin natively; the
+// harness's fetch-backed GM shim can't (Origin/Referer are forbidden fetch
+// headers). Re-inject them at the network layer — the same trick
+// verify-stamen-3d uses for Stadia — so the session mints and the account's
+// real entitlement is exercised instead of a doomed token-only 403.
+const VEX_ORIGIN = "https://anz-viewer.vexcelgroup.com";
+await context.route(/(?:admin|api)\.vexcelgroup\.com\//, async (route) => {
+	const headers = { ...route.request().headers(), origin: VEX_ORIGIN, referer: VEX_ORIGIN + "/" };
+	try {
+		await route.fulfill({ response: await route.fetch({ headers }) });
+	} catch (_) {
+		try { await route.continue(); } catch (_) { try { await route.abort(); } catch (_) {} }
+	}
+});
+
 let queryOk = false, transform200 = 0, tile200 = 0, tileOther = 0;
 const apiFailures = []; // status-only trail of non-200 API responses, printed on FAIL
 const authStatuses = [];
@@ -205,13 +222,26 @@ const dragLeft = async (dist) => {
 	for (let i = 1; i <= steps; i++) await page.mouse.move(cx - (dist * i) / steps, cy, { steps: 1 });
 	await page.mouse.up();
 };
+const mapCenter = () => page.evaluate(() => window._dwLayerCtrl._map.getCenter());
+const centerMoved = (a, b) => Math.abs(a.lng - b.lng) > 1e-5 || Math.abs(a.lat - b.lat) > 1e-5;
+// A stray dynamic.watch modal can reappear and swallow the drag, so re-nuke
+// and retry until the map actually pans (feature works; the drag is flaky).
+const dragUntilMoved = async (dist, tries = 3) => {
+	for (let t = 0; t < tries; t++) {
+		const before = await mapCenter();
+		await nukeModal();
+		await dragLeft(dist);
+		await page.waitForTimeout(1500);
+		if (centerMoved(before, await mapCenter())) return true;
+	}
+	return false;
+};
 const coordsBefore = new Set(tileCoords);
-const centerBefore = await page.evaluate(() => window._dwLayerCtrl._map.getCenter());
-await dragLeft(300);
-await page.waitForTimeout(4000);
-const centerAfter = await page.evaluate(() => window._dwLayerCtrl._map.getCenter());
-const mapMoved = Math.abs(centerAfter.lng - centerBefore.lng) > 1e-5 ||
-	Math.abs(centerAfter.lat - centerBefore.lat) > 1e-5;
+const tile200BeforePan = tile200;
+const centerBefore = await mapCenter();
+const firstDragMoved = await dragUntilMoved(300);
+await page.waitForTimeout(3000);
+const mapMoved = firstDragMoved && centerMoved(centerBefore, await mapCenter());
 const newCoords = new Set(tileCoords.filter((c) => !coordsBefore.has(c))).size;
 console.log(`  new tile coords loaded after pan: ${newCoords}`);
 
@@ -220,12 +250,18 @@ console.log(`  new tile coords loaded after pan: ${newCoords}`);
 // view crosses into the adjacent oblique instead of getting stuck.
 const framesBefore = new Set(tileImages);
 for (let d = 0; d < 6; d++) {
-	await dragLeft(500);
-	await page.waitForTimeout(2500);
+	await dragUntilMoved(500);
+	await page.waitForTimeout(2000);
 }
 await page.waitForTimeout(3000);
 const newFrames = [...new Set(tileImages)].filter((n) => !framesBefore.has(n));
 console.log(`  frame(s) switched-to while panning: ${newFrames.length} (${newFrames.map((n) => n.slice(-22)).join(", ")})`);
+// Tiles streamed by panning = successful oriented/tile loads during the whole
+// pan sequence. (Counting distinct downsample/x/y is wrong here: each frame's
+// tile grid restarts at the same coords, so a frame switch adds zero "new"
+// coords even though fresh imagery streamed.)
+const tilesStreamedByPan = tile200 - tile200BeforePan;
+console.log(`  oriented/tile loads during pan: ${tilesStreamedByPan}`);
 
 // The compass has one vertical-map action in its centre. It must remove the
 // perspective layer and restore the native route, then a cardinal must reopen
@@ -285,7 +321,7 @@ console.log("\n=== Vexcel imagery control verification ===");
 console.log(`  oriented/query 200:  ${queryOk}`);
 console.log(`  transform-points 200: ${transform200}`);
 console.log(`  oriented/tile 200: ${tile200}  (other: ${tileOther})`);
-	console.log(`  auth attempts: ${authStatuses.join(", ") || "none"}`);
+console.log(`  auth attempts: ${authStatuses.join(", ") || "none"}`);
 console.log(`  control directions: ${JSON.stringify(viewer.dirs)}`);
 console.log(`  capture slider steps: ${viewer.dates.length} (enabled: ${viewer.sliderEnabled}, year: ${viewer.year})`);
 console.log(`  tiles rendered: ${viewer.tilesLoaded}  msg: "${viewer.msg}"`);
@@ -295,7 +331,7 @@ console.log(`  screenshot: ${shot}`);
 // tiles, and the native route stayed connected above a non-interactive pane.
 const modelOk = viewer.present && viewer.dirs.length === 4 && viewer.dirs.every((d) => /oblique/.test(d)) && viewer.dates.length >= 2;
 const tilesOk = tile200 >= 2 && viewer.tilesLoaded >= 2;
-const panLoadsTiles = newCoords >= 2;
+const panLoadsTiles = tilesStreamedByPan >= 2;
 const barGating = barOnBasemap === true; // bar shown + populated on basemap
 const continuousPan = newFrames.length >= 1; // crossed into an adjacent frame
 const routeOk = routeSurface.warpOnMainMap && routeSurface.warpPointerEvents === "none" &&
