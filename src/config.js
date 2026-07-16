@@ -118,7 +118,7 @@ export const CFG = {
 	LAYER_INFRA: "Power Infrastructure",
 	LAYER_TELECOM: "Telecoms",
 	LAYER_LIGHTPOL: "Light Pollution",
-	LAYER_CADASTRE: "QLD Cadastre",
+	LAYER_CADASTRE: "Australia Cadastre",
 	LAYER_QPWS:    "QPWS Estate",
 	LAYER_RELIEF:  "QLD Relief",
 	LAYER_NATIONAL_PARKS: "National Parks",
@@ -230,7 +230,19 @@ export const CFG = {
 	// Identify against this specific sublayer (Base Parcels Only) — gives
 	// real lot/plan/tenure attributes rather than road-segment metadata.
 	QLD_CADASTRE_IDENTIFY_LAYER: 8,
-	QLD_CADASTRE_HOVER_MIN_ZOOM: 14,
+
+	// National fallback overlay (Geoscape-derived, via DCCEEW). Covers
+	// every jurisdiction but only renders parcels at ~1:5000 (zoom >=17)
+	// and carries no lot/plan or street address — so it's used to fill
+	// WA/ACT/NT tiles where the per-state /export services can't. Rich
+	// lot/plan+address come from each state's identify service instead
+	// (see src/providers/cadastre-au.js). CORS-open; attribute Geoscape.
+	NATIONAL_CADASTRE_SERVICE:
+		"https://gis.environment.gov.au/gispub/rest/services/" +
+		"national_basemap_v2/national_base_map_V2/MapServer",
+	NATIONAL_CADASTRE_LAYER: 12,
+	// Parcels are meaningless zoomed right out — don't draw/identify above this.
+	CADASTRE_MIN_ZOOM: 13,
 
 	// OnTheHouse (Cotality) base URL — used by fetchOthSales for the
 	// optional "Sales" lookup on the cadastre tooltip.

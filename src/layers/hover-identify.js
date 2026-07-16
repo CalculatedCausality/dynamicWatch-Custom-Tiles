@@ -24,6 +24,31 @@ export function arcgisIdentify(map, latlng, opts, cb) {
 	});
 }
 
+// Point-in-parcel identify via a tiny envelope intersect against an
+// ArcGIS layer's /query. An envelope (not a bare point) is used because
+// some services — notably Vicmap — return 0 features for a point geometry
+// but resolve correctly for a small box. `layerUrl` is the fully-qualified
+// `.../MapServer/{id}` or `.../FeatureServer/{id}`. cb(err, attributes|null).
+export function arcgisEnvelopeQuery(layerUrl, latlng, opts, cb) {
+	opts = opts || {};
+	const d = opts.halfDeg || 0.00002; // ~2 m box
+	const geometry = encodeURIComponent(JSON.stringify({
+		xmin: latlng.lng - d, ymin: latlng.lat - d,
+		xmax: latlng.lng + d, ymax: latlng.lat + d,
+		spatialReference: { wkid: 4326 },
+	}));
+	const url =
+		`${layerUrl}/query?geometry=${geometry}` +
+		`&geometryType=esriGeometryEnvelope&inSR=4326` +
+		`&spatialRel=esriSpatialRelIntersects` +
+		`&outFields=${encodeURIComponent(opts.outFields || "*")}` +
+		`&returnGeometry=false&outSR=4326&f=json`;
+	gmJsonGet(url, (err, data) => {
+		if (err) { cb(err, null); return; }
+		cb(null, (data.features || [])[0]?.attributes || null);
+	});
+}
+
 export function makeHoverIdentify(opts) {
 	const debounceMs = opts.debounceMs || 200;
 	return function install(layer, map) {

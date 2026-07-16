@@ -366,6 +366,49 @@ t("_othCanonicalUrlFromLocation builds a /property/qld/.../{id} URL", () => {
 	assert(url.includes("qld-4000"),      "missing postcode tail: " + url);
 });
 
+t("_othCanonicalUrlFromLocation honours a non-QLD state", () => {
+	const loc = {
+		streetNumber: "1", streetName: "Eddy", streetType: "AVENUE",
+		suburb: "Haymarket", postCode: "2000", propertyId: "999",
+	};
+	const url = dw._othCanonicalUrlFromLocation(loc, "NSW");
+	assert(url.includes("/property/nsw/"), "state not applied to path: " + url);
+	assert(url.includes("-nsw-2000"),      "state not applied to tail: " + url);
+});
+
+// ---- Multi-state cadastre: address parser + jurisdiction router ----
+
+t("_parseAuStreetAddress splits number/name/type/suburb variants", () => {
+	// NSW flat string, suburb trailing
+	deepEq(dw._parseAuStreetAddress("1 EDDY AVENUE HAYMARKET"),
+		{ streetNumber: "1", streetName: "EDDY", streetType: "AVENUE", locality: "HAYMARKET" });
+	// TAS packs STATE + POSTCODE — must be stripped
+	deepEq(dw._parseAuStreetAddress("2 CHURCHILL AV SANDY BAY TAS 7005"),
+		{ streetNumber: "2", streetName: "CHURCHILL", streetType: "AV", locality: "SANDY BAY" });
+	// ACT: address carries no suburb; known locality wins
+	deepEq(dw._parseAuStreetAddress("3 DOBELL CIRCUIT", "CONDER"),
+		{ streetNumber: "3", streetName: "DOBELL", streetType: "CIRCUIT", locality: "CONDER" });
+	// unit form 5/12 → street number is 12
+	eq(dw._parseAuStreetAddress("5/12 SMITH ST REDFERN").streetNumber, "12");
+	// no leading number → unresolvable
+	eq(dw._parseAuStreetAddress("LOT 5 SOMEWHERE RD"), null);
+	eq(dw._parseAuStreetAddress(""), null);
+});
+
+t("_pickJurisdiction maps coordinates to the right state/territory", () => {
+	eq(dw._pickJurisdiction(-26.52, 153.08), "QLD");   // Coolum Beach
+	eq(dw._pickJurisdiction(-33.87, 151.21), "NSW");   // Sydney
+	eq(dw._pickJurisdiction(-37.81, 144.96), "VIC");   // Melbourne
+	eq(dw._pickJurisdiction(-34.93, 138.60), "SA");    // Adelaide
+	eq(dw._pickJurisdiction(-31.95, 115.86), "WA");    // Perth
+	eq(dw._pickJurisdiction(-42.88, 147.33), "TAS");   // Hobart
+	eq(dw._pickJurisdiction(-12.46, 130.84), "NT");    // Darwin
+	// ACT is an enclave inside NSW's bbox — must resolve to ACT, not NSW
+	eq(dw._pickJurisdiction(-35.28, 149.13), "ACT");   // Canberra
+	// Middle of the ocean → no jurisdiction
+	eq(dw._pickJurisdiction(-40, 160), "");
+});
+
 // ---- Cadastre tooltip formatter ----
 
 t("_formatCadastreTooltip renders lotplan + locality + area", () => {
@@ -1279,6 +1322,13 @@ t("@connect covers every host the providers GM-fetch from", () => {
 		"geopublic.scc.qld.gov.au",         // SCC applications GeoJSON query
 		"developmenti.sunshinecoast.qld.gov.au", // Development.i detail/filter
 		"publicdocs.scc.qld.gov.au",        // SCC lodged-document repository
+		"maps.six.nsw.gov.au",              // NSW cadastre parcel identify
+		"portal.spatial.nsw.gov.au",        // NSW property address identify
+		"plan-gis.mapshare.vic.gov.au",     // VIC parcel + property identify
+		"services.thelist.tas.gov.au",      // TAS cadastre parcel identify
+		"lsa4.geohub.sa.gov.au",            // SA parcel + suburb identify
+		"services1.arcgis.com",             // ACT block identify
+		"gis.environment.gov.au",           // national cadastre (WA/NT identify)
 	];
 	for (const host of required) {
 		assert(declared.has(host), `@connect missing for GM-fetched host: ${host}`);

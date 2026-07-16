@@ -1,12 +1,12 @@
 import { CFG } from "../config.js";
-import { arcgisExportProvider } from "../layers/provider-factories.js";
 import { _CACHE_TTL, cachedFetch, gmJsonGet } from "../utils/http.js";
 import { _escHtml, esc, _fmtPrice, _fmtDate } from "../utils/html.js";
 
-/* -- QLD Cadastre + OnTheHouse Sales ----------------------------------
- * Cadastre hover-identify renders a tooltip with a "Sales ↗" link;
- * clicking it fires the OnTheHouse fetch pipeline + opens a popup.
- * `installCadastreHover` is the entry point that wires both.
+/* -- Cadastre address + OnTheHouse Sales ------------------------------
+ * QLD parcel address resolution (fetchCadastreAddress) plus the shared,
+ * jurisdiction-agnostic OnTheHouse sales pipeline and the cadastre
+ * tooltip formatter. The overlay + click-identify that select and read a
+ * parcel across every state live in src/providers/cadastre-au.js.
  */
 
 // Filters out QLD's "Null" sentinel strings and genuinely empty values.
@@ -304,9 +304,31 @@ export function fetchCadastreAddress(lotplan, cb) {
 				const primary = _formatAddressLine(primaryRec);
 				if (!primary) { done(null, null); return; }
 				const extraCount = Math.max(0, feats.length - 1);
+				// Every distinct street frontage for this parcel, primary
+				// first. A corner block carries several addresses (e.g.
+				// Killara Ave + Devon Ct) and OnTheHouse may index the
+				// property under any one of them, so the sales lookup must
+				// try them all — not just the primary.
+				const mkAddr = (a) => ({
+					streetNumber: (a.street_number || "").trim(),
+					streetName: (a.street_name || "").trim(),
+					streetType: (a.street_type || "").trim(),
+					locality: (a.locality || "").trim(),
+				});
+				const seenAddr = new Set();
+				const addresses = [];
+				for (const rec of [primaryRec, ...feats.filter((a) => a !== primaryRec)]) {
+					const addr = mkAddr(rec);
+					if (!addr.streetNumber && !addr.streetName) continue;
+					const key = `${addr.streetNumber}|${addr.streetName}|${addr.streetType}`.toUpperCase();
+					if (seenAddr.has(key)) continue;
+					seenAddr.add(key);
+					addresses.push(addr);
+				}
 				done(null, {
 					primary,
 					extra: extraCount ? `+${extraCount} more` : "",
+					state: "QLD",
 					// Structured bits the OnTheHouse lookup needs. Lat/lon
 					// also anchors the sales popup at the parcel point.
 					lat: parseFloat(primaryRec.latitude),
@@ -315,6 +337,7 @@ export function fetchCadastreAddress(lotplan, cb) {
 					streetName: (primaryRec.street_name || "").trim(),
 					streetType: (primaryRec.street_type || "").trim(),
 					locality: (primaryRec.locality || "").trim(),
+					addresses,
 				});
 			});
 		},
@@ -388,13 +411,14 @@ export function _othStreetTypeSlug(type) {
 // endpoints). Built from the locations API's authoritative fields so
 // it always lands on a valid focal-property page. Example:
 //   /property/qld/petrie-terrace-4000/256-petrie-tce-petrie-terrace-qld-4000-14995257
-export function _othCanonicalUrlFromLocation(loc) {
+export function _othCanonicalUrlFromLocation(loc, state) {
+	const st = String(state || loc.state || "qld").toLowerCase();
 	const suburbSlug = _slugify(loc.suburb);
 	const streetSlug = _slugify(
 		`${loc.streetNumber} ${loc.streetName} ${_othStreetTypeSlug(loc.streetType)}`,
 	);
-	const tail = `${streetSlug}-${suburbSlug}-qld-${loc.postCode}`;
-	return `${CFG.OTH_BASE}/property/qld/${suburbSlug}-${loc.postCode}/${tail}-${loc.propertyId}`;
+	const tail = `${streetSlug}-${suburbSlug}-${st}-${loc.postCode}`;
+	return `${CFG.OTH_BASE}/property/${st}/${suburbSlug}-${loc.postCode}/${tail}-${loc.propertyId}`;
 }
 
 // OTH's address autocomplete endpoint. Returns up to 10 candidates
@@ -432,44 +456,34 @@ function fetchOthLocations(query, cb) {
 // Calls cb(result) with:
 //   { ok: true,  property, sourceUrl }   — focal property data
 //   { ok: false, error }                 — couldn't resolve
-export function fetchOthSales(addrInfo, cb) {
-	if (!addrInfo.streetNumber) {
-		cb({
-			ok: false,
-			error: "This parcel has no street number in QLD's cadastre — OnTheHouse can't look it up.",
-		});
-		return;
-	}
-
-	// Build the autocomplete query. Suburb + state disambiguate same-
-	// named streets in other states; postcode is harmless if present.
+// Resolve ONE address to its best OnTheHouse candidate via the
+// autocomplete endpoint. Suburb + state disambiguate same-named streets
+// in other states; postcode is harmless if present. cb receives:
+//   { match }          — a strong (street-number) match, or null
+//   { fallback }       — the loose first candidate (used only if no
+//                        frontage strong-matches), or null
+//   { error, status }  — transient failure; caller stops and surfaces it
+function _othResolveMatch(addr, state, cb) {
 	const qParts = [];
-	if (addrInfo.streetNumber) qParts.push(addrInfo.streetNumber);
-	if (addrInfo.streetName)   qParts.push(addrInfo.streetName);
-	if (addrInfo.streetType)   qParts.push(addrInfo.streetType);
-	if (addrInfo.locality)     qParts.push(addrInfo.locality);
-	qParts.push("QLD");
+	if (addr.streetNumber) qParts.push(addr.streetNumber);
+	if (addr.streetName)   qParts.push(addr.streetName);
+	if (addr.streetType)   qParts.push(addr.streetType);
+	if (addr.locality)     qParts.push(addr.locality);
+	qParts.push(state || "QLD");
 	const query = qParts.join(" ").trim();
 
 	fetchOthLocations(query, (locResult) => {
 		if (locResult && locResult.error) {
-			cb({
-				ok: false,
-				error: locResult.status === 429
-					? "OnTheHouse is rate-limiting us — try again in a minute."
-					: `Couldn't reach OnTheHouse (${locResult.error}).`,
-			});
+			cb({ error: locResult.error, status: locResult.status });
 			return;
 		}
-
-		// Filter to candidates with a numeric propertyId (real
-		// property, not the street-level "ERBACHER+RD+NAMBOUR"
-		// placeholder rows). Prefer exact street-number + name match.
+		// Filter to candidates with a numeric propertyId (real property,
+		// not the street-level "ERBACHER+RD+NAMBOUR" placeholder rows).
 		const candidates = (locResult.content || []).filter(
 			(p) => p && /^\d+$/.test(String(p.propertyId || "")),
 		);
-		const wantNum  = String(addrInfo.streetNumber || "").toUpperCase();
-		const wantName = String(addrInfo.streetName   || "").toUpperCase();
+		const wantNum  = String(addr.streetNumber || "").toUpperCase();
+		const wantName = String(addr.streetName   || "").toUpperCase();
 		const match =
 			candidates.find(
 				(p) =>
@@ -479,18 +493,73 @@ export function fetchOthSales(addrInfo, cb) {
 			candidates.find(
 				(p) => String(p.streetNumber || "").toUpperCase() === wantNum,
 			) ||
-			candidates[0];
+			null;
+		cb({ match, fallback: candidates[0] || null });
+	});
+}
 
-		if (!match) {
+export function fetchOthSales(addrInfo, cb) {
+	// All the parcel's street frontages, primary first. Older cached
+	// addrInfo (and callers) predate the `addresses` array, so fall back
+	// to the single top-level fields.
+	const addresses =
+		(Array.isArray(addrInfo.addresses) && addrInfo.addresses.length)
+			? addrInfo.addresses
+			: [{
+				streetNumber: addrInfo.streetNumber,
+				streetName: addrInfo.streetName,
+				streetType: addrInfo.streetType,
+				locality: addrInfo.locality,
+			}];
+	const state = String(addrInfo.state || "QLD").toUpperCase();
+	const withNumber = addresses.filter(
+		(a) => a && String(a.streetNumber || "").trim(),
+	);
+	if (!withNumber.length) {
+		cb({
+			ok: false,
+			error: "This parcel has no street number in the cadastre — OnTheHouse can't look it up.",
+		});
+		return;
+	}
+
+	// Walk the frontages until one resolves. A strong (street-number)
+	// match on ANY frontage wins immediately — this is what lets a corner
+	// block indexed under its side street (Devon Ct) be found even when
+	// the primary frontage (Killara Ave) has no OnTheHouse record. If none
+	// strong-matches, fall back to the first frontage's loose candidate
+	// (the prior single-address behaviour). A transient error stops the
+	// walk so a rate-limit isn't masked as "not indexed".
+	let idx = 0;
+	let fallback = null;
+	const tryNext = () => {
+		if (idx >= withNumber.length) {
+			if (fallback) { proceed(fallback); return; }
 			cb({
 				ok: false,
 				error: "OnTheHouse doesn't have a record for this address.",
 			});
 			return;
 		}
+		_othResolveMatch(withNumber[idx++], state, (res) => {
+			if (res.error) {
+				cb({
+					ok: false,
+					error: res.status === 429
+						? "OnTheHouse is rate-limiting us — try again in a minute."
+						: `Couldn't reach OnTheHouse (${res.error}).`,
+				});
+				return;
+			}
+			if (res.match) { proceed(res.match); return; }
+			if (!fallback && res.fallback) fallback = res.fallback;
+			tryNext();
+		});
+	};
 
+	function proceed(match) {
 		const pid = match.propertyId;
-		const sourceUrl = _othCanonicalUrlFromLocation(match);
+		const sourceUrl = _othCanonicalUrlFromLocation(match, state);
 
 		// Stage 2: fetch property core + events in parallel.
 		let coreRes = null, eventsRes = null, done = false;
@@ -542,33 +611,15 @@ export function fetchOthSales(addrInfo, cb) {
 				finish();
 			},
 		);
-	});
+	}
+
+	tryNext();
 }
 
-// (Cadastre hover-identify removed — parcel info is delivered through
-// the location popup now; see _injectIdentifyIntoPopup. The shared
-// makeHoverIdentify factory is still used by QPWS.)
-
-function installCadastreHover(layer, map) {
-	// Cadastre identify is delivered through the location popup on
-	// click / right-click (see _injectIdentifyIntoPopup), NOT a hover
-	// tooltip. The hover fought the right-click menu and kept
-	// re-popping over it; the popup is now the single surface, with
-	// sales auto-loaded inline. We only ensure the delegated
-	// sales-link handler exists (harmless belt-and-braces).
-	_ensureSalesHook(map);
-}
-
-export const QldCadastreLayerProvider = arcgisExportProvider({
-	baseUrl: CFG.QLD_CADASTRE_SERVICE,
-	showLayers: String(CFG.QLD_CADASTRE_LAYER_ID),
-	pane: "dwCadastrePane", paneZIndex: 385,
-	opacity: 0.75, minZoom: 11, maxZoom: 25,
-	attribution: 'Cadastre &copy; <a href="https://www.qld.gov.au/dnrme" target="_blank" rel="noreferrer">State of Queensland (DCDB)</a>',
-	onAdd: (layer, map) => installCadastreHover(layer, map),
-	onRemove: (layer) => {
-		if (layer._dwHoverOff) { layer._dwHoverOff(); layer._dwHoverOff = null; }
-	},
-});
-
+// The cadastre OVERLAY and click-identify now span every Australian
+// jurisdiction — see src/providers/cadastre-au.js
+// (AustraliaCadastreLayerProvider + fetchCadastreParcel). This module
+// retains the QLD address resolver (fetchCadastreAddress, used by the QLD
+// adapter), the shared OnTheHouse sales pipeline, and the tooltip
+// formatter that every jurisdiction renders through.
 

@@ -37,7 +37,7 @@ console.log(`  desktop hover-capable: ${hoverCapable}`);
 await page.evaluate(() => {
 	const ctrl = window._dwLayerCtrl, map = ctrl._map;
 	map.setView([-27.4679, 153.0281], 17);
-	const cad = ctrl._layers.find((l) => l.name === "QLD Cadastre" && l.overlay);
+	const cad = ctrl._layers.find((l) => l.name === "Australia Cadastre" && l.overlay);
 	if (cad && !map.hasLayer(cad.layer)) map.addLayer(cad.layer);
 });
 await page.waitForTimeout(1500);

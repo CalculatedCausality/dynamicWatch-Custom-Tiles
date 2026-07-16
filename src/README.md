@@ -27,7 +27,8 @@ Current modules:
 - `src/providers/live-data.js` — polling live overlays for OpenSky flights, MarineTraffic vessels, and Waze traffic (alerts, jams, wazers).
 - `src/providers/raster-providers.js` — low-coupling raster/base/overlay providers such as Google, Apple, QLD Globe/Topo/Relief, Mobile Coverage, OpenSeaMap, and QLD Labels.
 - `src/providers/openinframap.js` — OpenInfraMap Power, Telecoms, and Water vector-tile providers.
-- `src/providers/qld-cadastre.js` — QLD Cadastre provider plus OnTheHouse sales/address helpers.
+- `src/providers/cadastre-au.js` — unified Australia Cadastre: per-tile overlay routing across every state/territory service (national fallback for WA/ACT/NT) and click-identify with per-jurisdiction field adapters.
+- `src/providers/qld-cadastre.js` — QLD parcel address resolver, the shared OnTheHouse sales pipeline, and the cadastre tooltip formatter used by all jurisdictions.
 - `src/providers/qld-environment.js` — QPWS Estate, National Parks, and their ArcGIS query layer helper.
 - `src/providers/qld-imagery.js` — QLD Roads and QLD Historical imagery providers.
 - `src/providers/scc-applications.js` — Sunshine Coast Council development-application overlay (Development.i APIs).

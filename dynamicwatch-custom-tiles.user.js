@@ -2,7 +2,7 @@
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
 // @version      7.9.136
-// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, QLD Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
+// @description  Multi-source basemaps (QLD Globe/Historical/Topo, Google Hybrid, Apple Maps, Stamen Terrain, Esri Wayback, Vexcel Aerial) plus overlays: QPWS Estate, Australia Cadastre, SCC Applications (Development.i), Mobile Coverage, Marine Vessels (with grid-clustering), Live Flights, Waze Traffic (alerts + jams), Geocaches, Strava/Garmin heatmaps, Light Pollution, Power Infrastructure, Telecoms, Water Infrastructure, National Parks, OpenSeaMap, QLD Relief, INTVL Global Map. Includes overlay persistence, QPWS hover-identify, cadastre Sales lookup via OnTheHouse, coordinate click-to-copy, and auto-refreshing access tokens for QLD and Apple MapKit.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
 // @match        https://embed.waze.com/*
@@ -13,6 +13,13 @@
 // @connect      qldglobe.information.qld.gov.au
 // @connect      spatial-img.information.qld.gov.au
 // @connect      spatial-gis.information.qld.gov.au
+// @connect      maps.six.nsw.gov.au
+// @connect      portal.spatial.nsw.gov.au
+// @connect      plan-gis.mapshare.vic.gov.au
+// @connect      services.thelist.tas.gov.au
+// @connect      lsa4.geohub.sa.gov.au
+// @connect      services1.arcgis.com
+// @connect      gis.environment.gov.au
 // @connect      geopublic.scc.qld.gov.au
 // @connect      developmenti.sunshinecoast.qld.gov.au
 // @connect      publicdocs.scc.qld.gov.au
@@ -135,7 +142,7 @@
     LAYER_INFRA: "Power Infrastructure",
     LAYER_TELECOM: "Telecoms",
     LAYER_LIGHTPOL: "Light Pollution",
-    LAYER_CADASTRE: "QLD Cadastre",
+    LAYER_CADASTRE: "Australia Cadastre",
     LAYER_QPWS: "QPWS Estate",
     LAYER_RELIEF: "QLD Relief",
     LAYER_NATIONAL_PARKS: "National Parks",
@@ -229,7 +236,16 @@
     // Identify against this specific sublayer (Base Parcels Only) — gives
     // real lot/plan/tenure attributes rather than road-segment metadata.
     QLD_CADASTRE_IDENTIFY_LAYER: 8,
-    QLD_CADASTRE_HOVER_MIN_ZOOM: 14,
+    // National fallback overlay (Geoscape-derived, via DCCEEW). Covers
+    // every jurisdiction but only renders parcels at ~1:5000 (zoom >=17)
+    // and carries no lot/plan or street address — so it's used to fill
+    // WA/ACT/NT tiles where the per-state /export services can't. Rich
+    // lot/plan+address come from each state's identify service instead
+    // (see src/providers/cadastre-au.js). CORS-open; attribute Geoscape.
+    NATIONAL_CADASTRE_SERVICE: "https://gis.environment.gov.au/gispub/rest/services/national_basemap_v2/national_base_map_V2/MapServer",
+    NATIONAL_CADASTRE_LAYER: 12,
+    // Parcels are meaningless zoomed right out — don't draw/identify above this.
+    CADASTRE_MIN_ZOOM: 13,
     // OnTheHouse (Cotality) base URL — used by fetchOthSales for the
     // optional "Sales" lookup on the cadastre tooltip.
     OTH_BASE: "https://www.onthehouse.com.au",
@@ -484,6 +500,25 @@
         return;
       }
       cb(null, (data.results || [])[0] || null);
+    });
+  }
+  function arcgisEnvelopeQuery(layerUrl, latlng, opts, cb) {
+    opts = opts || {};
+    const d = opts.halfDeg || 2e-5;
+    const geometry = encodeURIComponent(JSON.stringify({
+      xmin: latlng.lng - d,
+      ymin: latlng.lat - d,
+      xmax: latlng.lng + d,
+      ymax: latlng.lat + d,
+      spatialReference: { wkid: 4326 }
+    }));
+    const url = `${layerUrl}/query?geometry=${geometry}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=${encodeURIComponent(opts.outFields || "*")}&returnGeometry=false&outSR=4326&f=json`;
+    gmJsonGet(url, (err, data) => {
+      if (err) {
+        cb(err, null);
+        return;
+      }
+      cb(null, (data.features || [])[0]?.attributes || null);
     });
   }
   function makeHoverIdentify(opts) {
@@ -7180,9 +7215,26 @@
             return;
           }
           const extraCount = Math.max(0, feats.length - 1);
+          const mkAddr = (a) => ({
+            streetNumber: (a.street_number || "").trim(),
+            streetName: (a.street_name || "").trim(),
+            streetType: (a.street_type || "").trim(),
+            locality: (a.locality || "").trim()
+          });
+          const seenAddr = /* @__PURE__ */ new Set();
+          const addresses = [];
+          for (const rec of [primaryRec, ...feats.filter((a) => a !== primaryRec)]) {
+            const addr = mkAddr(rec);
+            if (!addr.streetNumber && !addr.streetName) continue;
+            const key = `${addr.streetNumber}|${addr.streetName}|${addr.streetType}`.toUpperCase();
+            if (seenAddr.has(key)) continue;
+            seenAddr.add(key);
+            addresses.push(addr);
+          }
           done(null, {
             primary,
             extra: extraCount ? `+${extraCount} more` : "",
+            state: "QLD",
             // Structured bits the OnTheHouse lookup needs. Lat/lon
             // also anchors the sales popup at the parcel point.
             lat: parseFloat(primaryRec.latitude),
@@ -7190,7 +7242,8 @@
             streetNumber: (primaryRec.street_number || "").trim(),
             streetName: (primaryRec.street_name || "").trim(),
             streetType: (primaryRec.street_type || "").trim(),
-            locality: (primaryRec.locality || "").trim()
+            locality: (primaryRec.locality || "").trim(),
+            addresses
           });
         });
       },
@@ -7251,13 +7304,14 @@
     const up = String(type || "").trim().toUpperCase();
     return _OTH_STREET_TYPE[up] || _slugify(type);
   }
-  function _othCanonicalUrlFromLocation(loc) {
+  function _othCanonicalUrlFromLocation(loc, state) {
+    const st = String(state || loc.state || "qld").toLowerCase();
     const suburbSlug = _slugify(loc.suburb);
     const streetSlug = _slugify(
       `${loc.streetNumber} ${loc.streetName} ${_othStreetTypeSlug(loc.streetType)}`
     );
-    const tail = `${streetSlug}-${suburbSlug}-qld-${loc.postCode}`;
-    return `${CFG.OTH_BASE}/property/qld/${suburbSlug}-${loc.postCode}/${tail}-${loc.propertyId}`;
+    const tail = `${streetSlug}-${suburbSlug}-${st}-${loc.postCode}`;
+    return `${CFG.OTH_BASE}/property/${st}/${suburbSlug}-${loc.postCode}/${tail}-${loc.propertyId}`;
   }
   function fetchOthLocations(query, cb) {
     cachedFetch(
@@ -7276,48 +7330,83 @@
       (_err, result) => cb(result || { error: "cache miss" })
     );
   }
-  function fetchOthSales(addrInfo, cb) {
-    if (!addrInfo.streetNumber) {
-      cb({
-        ok: false,
-        error: "This parcel has no street number in QLD's cadastre — OnTheHouse can't look it up."
-      });
-      return;
-    }
+  function _othResolveMatch(addr, state, cb) {
     const qParts = [];
-    if (addrInfo.streetNumber) qParts.push(addrInfo.streetNumber);
-    if (addrInfo.streetName) qParts.push(addrInfo.streetName);
-    if (addrInfo.streetType) qParts.push(addrInfo.streetType);
-    if (addrInfo.locality) qParts.push(addrInfo.locality);
-    qParts.push("QLD");
+    if (addr.streetNumber) qParts.push(addr.streetNumber);
+    if (addr.streetName) qParts.push(addr.streetName);
+    if (addr.streetType) qParts.push(addr.streetType);
+    if (addr.locality) qParts.push(addr.locality);
+    qParts.push(state || "QLD");
     const query = qParts.join(" ").trim();
     fetchOthLocations(query, (locResult) => {
       if (locResult && locResult.error) {
-        cb({
-          ok: false,
-          error: locResult.status === 429 ? "OnTheHouse is rate-limiting us — try again in a minute." : `Couldn't reach OnTheHouse (${locResult.error}).`
-        });
+        cb({ error: locResult.error, status: locResult.status });
         return;
       }
       const candidates = (locResult.content || []).filter(
         (p) => p && /^\d+$/.test(String(p.propertyId || ""))
       );
-      const wantNum = String(addrInfo.streetNumber || "").toUpperCase();
-      const wantName = String(addrInfo.streetName || "").toUpperCase();
+      const wantNum = String(addr.streetNumber || "").toUpperCase();
+      const wantName = String(addr.streetName || "").toUpperCase();
       const match = candidates.find(
         (p) => String(p.streetNumber || "").toUpperCase() === wantNum && String(p.streetName || "").toUpperCase() === wantName
       ) || candidates.find(
         (p) => String(p.streetNumber || "").toUpperCase() === wantNum
-      ) || candidates[0];
-      if (!match) {
+      ) || null;
+      cb({ match, fallback: candidates[0] || null });
+    });
+  }
+  function fetchOthSales(addrInfo, cb) {
+    const addresses = Array.isArray(addrInfo.addresses) && addrInfo.addresses.length ? addrInfo.addresses : [{
+      streetNumber: addrInfo.streetNumber,
+      streetName: addrInfo.streetName,
+      streetType: addrInfo.streetType,
+      locality: addrInfo.locality
+    }];
+    const state = String(addrInfo.state || "QLD").toUpperCase();
+    const withNumber = addresses.filter(
+      (a) => a && String(a.streetNumber || "").trim()
+    );
+    if (!withNumber.length) {
+      cb({
+        ok: false,
+        error: "This parcel has no street number in the cadastre — OnTheHouse can't look it up."
+      });
+      return;
+    }
+    let idx = 0;
+    let fallback = null;
+    const tryNext = () => {
+      if (idx >= withNumber.length) {
+        if (fallback) {
+          proceed(fallback);
+          return;
+        }
         cb({
           ok: false,
           error: "OnTheHouse doesn't have a record for this address."
         });
         return;
       }
+      _othResolveMatch(withNumber[idx++], state, (res) => {
+        if (res.error) {
+          cb({
+            ok: false,
+            error: res.status === 429 ? "OnTheHouse is rate-limiting us — try again in a minute." : `Couldn't reach OnTheHouse (${res.error}).`
+          });
+          return;
+        }
+        if (res.match) {
+          proceed(res.match);
+          return;
+        }
+        if (!fallback && res.fallback) fallback = res.fallback;
+        tryNext();
+      });
+    };
+    function proceed(match) {
       const pid = match.propertyId;
-      const sourceUrl = _othCanonicalUrlFromLocation(match);
+      const sourceUrl = _othCanonicalUrlFromLocation(match, state);
       let coreRes = null, eventsRes = null, done = false;
       const finish = () => {
         if (done) return;
@@ -7360,28 +7449,418 @@
           finish();
         }
       );
-    });
+    }
+    tryNext();
   }
-  function installCadastreHover(layer, map) {
-    _ensureSalesHook(map);
+
+  // src/providers/cadastre-au.js
+  var SVC = {
+    NSW_PARCEL: "https://maps.six.nsw.gov.au/arcgis/rest/services/public/NSW_Cadastre/MapServer",
+    NSW_ADDR: "https://portal.spatial.nsw.gov.au/server/rest/services/NSW_Land_Parcel_Property_Theme/FeatureServer/12",
+    VIC: "https://plan-gis.mapshare.vic.gov.au/arcgis/rest/services/Planning/VicPlan_PropertyAndParcel/MapServer",
+    SA: "https://lsa4.geohub.sa.gov.au/server/rest/services/LSA/LocationSAViewerV34/MapServer",
+    TAS: "https://services.thelist.tas.gov.au/arcgis/rest/services/Public/CadastreParcels/MapServer",
+    ACT: "https://services1.arcgis.com/E5n4f1VY84i0xSjy/arcgis/rest/services/ACTGOV_BLOCKS/FeatureServer/0",
+    WA_SLIP: "https://public-services.slip.wa.gov.au/public/rest/services/SLIP_Public_Services/Property_and_Planning/MapServer"
+  };
+  var NAT_LAYER = CFG.NATIONAL_CADASTRE_SERVICE + "/" + CFG.NATIONAL_CADASTRE_LAYER;
+  function _titleCase(s) {
+    const v = _cadVal(s);
+    return v ? v.toLowerCase().replace(/\b([a-z])/g, (_, c) => c.toUpperCase()) : "";
   }
-  var QldCadastreLayerProvider = arcgisExportProvider({
-    baseUrl: CFG.QLD_CADASTRE_SERVICE,
-    showLayers: String(CFG.QLD_CADASTRE_LAYER_ID),
-    pane: "dwCadastrePane",
-    paneZIndex: 385,
-    opacity: 0.75,
-    minZoom: 11,
-    maxZoom: 25,
-    attribution: 'Cadastre &copy; <a href="https://www.qld.gov.au/dnrme" target="_blank" rel="noreferrer">State of Queensland (DCDB)</a>',
-    onAdd: (layer, map) => installCadastreHover(layer, map),
-    onRemove: (layer) => {
-      if (layer._dwHoverOff) {
-        layer._dwHoverOff();
-        layer._dwHoverOff = null;
+  function _num(v) {
+    const n = parseFloat(v);
+    return isFinite(n) ? n : NaN;
+  }
+  var _ST_TYPES = /* @__PURE__ */ new Set([
+    "STREET",
+    "ST",
+    "ROAD",
+    "RD",
+    "AVENUE",
+    "AVE",
+    "AV",
+    "DRIVE",
+    "DR",
+    "DRV",
+    "LANE",
+    "LA",
+    "LN",
+    "CRESCENT",
+    "CRES",
+    "CR",
+    "PLACE",
+    "PL",
+    "TERRACE",
+    "TCE",
+    "COURT",
+    "CT",
+    "CRT",
+    "BOULEVARD",
+    "BOULEVARDE",
+    "BVD",
+    "BLVD",
+    "CIRCUIT",
+    "CCT",
+    "HIGHWAY",
+    "HWY",
+    "PARADE",
+    "PDE",
+    "CLOSE",
+    "CL",
+    "WAY",
+    "ESPLANADE",
+    "ESP",
+    "QUAY",
+    "QY",
+    "CIRCLE",
+    "CIR",
+    "CIRCUS",
+    "LINK",
+    "LNK",
+    "MEWS",
+    "SQUARE",
+    "SQ",
+    "WALK",
+    "WLK",
+    "ARCADE",
+    "ARC",
+    "ALLEY",
+    "ROW",
+    "VIEW",
+    "VW",
+    "RIDGE",
+    "RDGE",
+    "RISE",
+    "BEND",
+    "LOOP",
+    "TRACK",
+    "TRK",
+    "TRAIL",
+    "TRL",
+    "GROVE",
+    "GR",
+    "GRV",
+    "GARDENS",
+    "GDNS",
+    "PARKWAY",
+    "PKWY",
+    "PROMENADE",
+    "PROM",
+    "CROSS",
+    "GATE",
+    "GLEN",
+    "GREEN",
+    "GRANGE",
+    "HEIGHTS",
+    "HTS",
+    "PARK",
+    "PLAZA",
+    "POCKET",
+    "RESERVE"
+  ]);
+  function _parseAuStreetAddress(full, knownLocality) {
+    let s = String(full || "").toUpperCase().replace(/,/g, " ").trim();
+    if (!s) return null;
+    s = s.replace(/\s+(NSW|QLD|VIC|SA|WA|TAS|NT|ACT)\b/g, " ").replace(/\s+\d{4}\b/g, " ").replace(/\s+/g, " ").trim();
+    const tokens = s.split(" ").filter(Boolean);
+    if (!tokens.length) return null;
+    let num = tokens.shift();
+    if (num.includes("/")) num = num.split("/").pop();
+    if (!/^\d+[A-Z]?$/.test(num)) return null;
+    let typeIdx = -1;
+    for (let i = 0; i < tokens.length; i++) {
+      if (_ST_TYPES.has(tokens[i])) {
+        typeIdx = i;
+        break;
       }
     }
-  });
+    const known = _cadVal(knownLocality).toUpperCase();
+    let streetName, streetType, locality;
+    if (typeIdx >= 0) {
+      streetName = tokens.slice(0, typeIdx).join(" ");
+      streetType = tokens[typeIdx];
+      locality = known || tokens.slice(typeIdx + 1).join(" ");
+    } else {
+      streetName = tokens.join(" ");
+      streetType = "";
+      locality = known;
+    }
+    if (!streetName) return null;
+    return { streetNumber: num, streetName, streetType, locality };
+  }
+  function _mkAttrs(o) {
+    const a = {};
+    const lotplan = _cadVal(o.lotplan);
+    if (lotplan) a["Lot/plan"] = lotplan;
+    const name = _cadVal(o.name);
+    if (name) a.Name = name;
+    const tenure = _cadVal(o.tenure);
+    if (tenure) a.Tenure = tenure;
+    const parcelType = _cadVal(o.parcelType);
+    if (parcelType) a["Parcel type"] = parcelType;
+    if (isFinite(o.areaM2) && o.areaM2 > 0) a["Lot area (m²)"] = o.areaM2;
+    const locality = _cadVal(o.locality);
+    if (locality) a.Locality = locality;
+    const lga = _cadVal(o.lga);
+    if (lga) a["Local authority"] = lga;
+    return a;
+  }
+  function _mkAddressInfo(parsed, latlng, state, primary) {
+    return {
+      primary: _cadVal(primary) || [parsed.streetNumber, _titleCase(parsed.streetName), _titleCase(parsed.streetType)].filter(Boolean).join(" "),
+      extra: "",
+      state,
+      lat: latlng.lat,
+      lon: latlng.lng,
+      streetNumber: parsed.streetNumber || "",
+      streetName: parsed.streetName || "",
+      streetType: parsed.streetType || "",
+      locality: parsed.locality || ""
+    };
+  }
+  var _BBOX = {
+    ACT: [148.75, -35.95, 149.42, -35.1],
+    TAS: [143.75, -43.75, 148.55, -39.15],
+    NT: [128.95, -26.01, 138.05, -10.9],
+    WA: [112.9, -35.2, 129.01, -13.5],
+    SA: [128.95, -38.1, 141.03, -25.95],
+    QLD: [137.95, -29.2, 153.6, -9.1],
+    VIC: [140.95, -39.25, 150.05, -33.95],
+    NSW: [140.95, -37.55, 153.7, -28.1]
+  };
+  var _ORDER = ["ACT", "TAS", "NT", "WA", "SA", "QLD", "VIC", "NSW"];
+  function _pickJurisdiction(lat, lng) {
+    for (const code of _ORDER) {
+      const b = _BBOX[code];
+      if (lng >= b[0] && lng <= b[2] && lat >= b[1] && lat <= b[3]) return code;
+    }
+    return "";
+  }
+  var _NAT_OVL = { url: CFG.NATIONAL_CADASTRE_SERVICE, layers: "show:" + CFG.NATIONAL_CADASTRE_LAYER };
+  var _OVL = {
+    QLD: { url: CFG.QLD_CADASTRE_SERVICE, layers: "show:" + CFG.QLD_CADASTRE_LAYER_ID },
+    NSW: { url: SVC.NSW_PARCEL, layers: "show:9" },
+    VIC: { url: SVC.VIC, layers: "show:4" },
+    SA: { url: SVC.SA, layers: "show:124" },
+    TAS: { url: SVC.TAS, layers: "show:0" },
+    WA: { url: SVC.WA_SLIP, layers: "show:2" },
+    // geometry-only, renders from ~z6
+    ACT: _NAT_OVL,
+    // no free /export → national (z17)
+    NT: _NAT_OVL
+    // WMS-only → national (z17)
+  };
+  var AustraliaCadastreLayerProvider = class extends LayerProvider {
+    create() {
+      return _makeUnifiedCadastreLayer();
+    }
+  };
+  function _makeUnifiedCadastreLayer() {
+    const pane = "dwCadastrePane", paneZ = 385;
+    const Layer = L.TileLayer.extend({
+      onAdd(map) {
+        if (!map.getPane(pane)) {
+          map.createPane(pane);
+          const el = map.getPane(pane);
+          el.style.zIndex = String(paneZ);
+          el.style.pointerEvents = "none";
+        }
+        L.TileLayer.prototype.onAdd.call(this, map);
+        _ensureSalesHook(map);
+      },
+      getTileUrl(coords) {
+        const bb = tileToBBox4326(coords.z, coords.x, coords.y);
+        const cfg = _OVL[_pickJurisdiction(
+          (bb.minLat + bb.maxLat) / 2,
+          (bb.minLon + bb.maxLon) / 2
+        )] || _NAT_OVL;
+        return `${cfg.url}/export?bbox=${bb.minLon},${bb.minLat},${bb.maxLon},${bb.maxLat}&bboxSR=4326&imageSR=4326&layers=${cfg.layers}&size=256,256&format=png32&transparent=true&f=image`;
+      }
+    });
+    return new Layer("", {
+      opacity: 0.75,
+      minZoom: CFG.CADASTRE_MIN_ZOOM,
+      maxZoom: 25,
+      maxNativeZoom: 21,
+      tileSize: 256,
+      pane,
+      attribution: 'Cadastre &copy; State/Territory land agencies &amp; <a href="https://geoscape.com.au/legal/data-copyright-and-disclaimer/" target="_blank" rel="noreferrer">Geoscape Australia</a>'
+    });
+  }
+  function _adaptQLD(map, latlng, state, cb) {
+    arcgisIdentify(map, latlng, {
+      baseUrl: CFG.QLD_CADASTRE_SERVICE,
+      layers: "all:" + CFG.QLD_CADASTRE_IDENTIFY_LAYER,
+      tolerance: 3
+    }, (err, feat) => {
+      if (err || !feat) {
+        cb(null);
+        return;
+      }
+      const attrs = feat.attributes || {};
+      cb({ attrs, state: "QLD" });
+      const lotplan = _cadVal(attrs["Lot/plan"]);
+      if (!lotplan) return;
+      fetchCadastreAddress(lotplan, (info) => {
+        if (info) cb({ attrs, addressInfo: info, state: "QLD" });
+      });
+    });
+  }
+  function _adaptNSW(map, latlng, state, cb) {
+    arcgisEnvelopeQuery(SVC.NSW_PARCEL + "/9", latlng, {
+      outFields: "lotidstring,planlotarea,planlotareaunits"
+    }, (err, a) => {
+      if (err || !a) {
+        cb(null);
+        return;
+      }
+      const areaM2 = /meter/i.test(a.planlotareaunits || "") ? _num(a.planlotarea) : NaN;
+      const attrs = _mkAttrs({ lotplan: a.lotidstring, areaM2 });
+      cb({ attrs, state: "NSW" });
+      arcgisEnvelopeQuery(SVC.NSW_ADDR, latlng, { outFields: "address,housenumber" }, (e2, ad) => {
+        if (e2 || !ad || !ad.address) return;
+        const parsed = _parseAuStreetAddress(ad.address);
+        if (!parsed) return;
+        cb({
+          attrs: Object.assign(
+            {},
+            attrs,
+            parsed.locality ? { Locality: _titleCase(parsed.locality) } : {}
+          ),
+          addressInfo: _mkAddressInfo(parsed, latlng, "NSW", ad.address),
+          state: "NSW"
+        });
+      });
+    });
+  }
+  function _adaptVIC(map, latlng, state, cb) {
+    arcgisEnvelopeQuery(SVC.VIC + "/4", latlng, {
+      outFields: "PARCEL_SPI,PARCEL_LOT_NUMBER,PARCEL_PLAN_NUMBER"
+    }, (err, a) => {
+      if (err || !a) {
+        cb(null);
+        return;
+      }
+      const attrs = _mkAttrs({ lotplan: _cadVal(a.PARCEL_SPI) });
+      cb({ attrs, state: "VIC" });
+      arcgisEnvelopeQuery(SVC.VIC + "/3", latlng, {
+        outFields: "ADD_HOUSE_NUMBER_1,ADD_ROAD_NAME,ADD_ROAD_TYPE,ADD_LOCALITY_NAME,ADD_EZI_ADDRESS"
+      }, (e2, p) => {
+        if (e2 || !p) return;
+        const parsed = {
+          streetNumber: _cadVal(p.ADD_HOUSE_NUMBER_1),
+          streetName: _cadVal(p.ADD_ROAD_NAME),
+          streetType: _cadVal(p.ADD_ROAD_TYPE),
+          locality: _cadVal(p.ADD_LOCALITY_NAME)
+        };
+        if (!parsed.streetNumber || !parsed.streetName) return;
+        cb({
+          attrs: Object.assign(
+            {},
+            attrs,
+            parsed.locality ? { Locality: _titleCase(parsed.locality) } : {}
+          ),
+          addressInfo: _mkAddressInfo(parsed, latlng, "VIC", p.ADD_EZI_ADDRESS),
+          state: "VIC"
+        });
+      });
+    });
+  }
+  function _adaptSA(map, latlng, state, cb) {
+    arcgisEnvelopeQuery(SVC.SA + "/124", latlng, {
+      outFields: "planparcel,st_area(shape)"
+    }, (err, a) => {
+      if (err || !a) {
+        cb(null);
+        return;
+      }
+      const attrs = _mkAttrs({ lotplan: a.planparcel, areaM2: _num(a["st_area(shape)"]) });
+      cb({ attrs, state: "SA" });
+      arcgisEnvelopeQuery(SVC.SA + "/19", latlng, { outFields: "suburb,postcode" }, (e2, s) => {
+        if (e2 || !s || !s.suburb) return;
+        cb({ attrs: Object.assign({}, attrs, { Locality: _titleCase(s.suburb) }), state: "SA" });
+      });
+    });
+  }
+  function _adaptTAS(map, latlng, state, cb) {
+    arcgisEnvelopeQuery(SVC.TAS + "/0", latlng, {
+      outFields: "LPI,VOLUME,FOLIO,COMP_AREA,PROP_ADD"
+    }, (err, a) => {
+      if (err || !a) {
+        cb(null);
+        return;
+      }
+      const lotplan = _cadVal(a.LPI) || (_cadVal(a.VOLUME) ? `Vol ${_cadVal(a.VOLUME)}/${_cadVal(a.FOLIO)}` : "");
+      const parsed = a.PROP_ADD ? _parseAuStreetAddress(a.PROP_ADD) : null;
+      const attrs = _mkAttrs({
+        lotplan,
+        areaM2: _num(a.COMP_AREA),
+        locality: parsed ? _titleCase(parsed.locality) : ""
+      });
+      cb({
+        attrs,
+        addressInfo: parsed ? _mkAddressInfo(parsed, latlng, "TAS", a.PROP_ADD) : void 0,
+        state: "TAS"
+      });
+    });
+  }
+  function _adaptACT(map, latlng, state, cb) {
+    arcgisEnvelopeQuery(SVC.ACT, latlng, {
+      outFields: "BLOCK_NUMBER,SECTION_NUMBER,BLOCK_DERIVED_AREA,Shape__Area,ADDRESSES,DIVISION_NAME,TYPE"
+    }, (err, a) => {
+      if (err || !a) {
+        cb(null);
+        return;
+      }
+      const lotplan = a.BLOCK_NUMBER != null && a.SECTION_NUMBER != null ? `Block ${a.BLOCK_NUMBER} Section ${a.SECTION_NUMBER}` : "";
+      const parsed = a.ADDRESSES ? _parseAuStreetAddress(a.ADDRESSES, _cadVal(a.DIVISION_NAME)) : null;
+      const attrs = _mkAttrs({
+        lotplan,
+        areaM2: _num(a.BLOCK_DERIVED_AREA) || _num(a.Shape__Area),
+        locality: _titleCase(a.DIVISION_NAME),
+        parcelType: _titleCase(a.TYPE)
+      });
+      cb({
+        attrs,
+        addressInfo: parsed ? _mkAddressInfo(parsed, latlng, "ACT", a.ADDRESSES) : void 0,
+        state: "ACT"
+      });
+    });
+  }
+  function _adaptNational(map, latlng, state, cb) {
+    arcgisEnvelopeQuery(NAT_LAYER, latlng, {
+      outFields: "STATE_ABBREVIATION,JURISDICTION_ID,LOCALITY_NAME,LGA_NAME,PARCEL_TYPE_NAME",
+      halfDeg: 3e-5
+    }, (err, a) => {
+      if (err || !a) {
+        cb(null);
+        return;
+      }
+      const attrs = _mkAttrs({
+        lotplan: String(a.JURISDICTION_ID || "").replace(/~.*$/, "").replace(/\s+/g, " ").trim(),
+        locality: _titleCase(a.LOCALITY_NAME),
+        lga: _titleCase(a.LGA_NAME),
+        parcelType: _titleCase(a.PARCEL_TYPE_NAME)
+      });
+      cb({ attrs, state: _cadVal(a.STATE_ABBREVIATION) || state });
+    });
+  }
+  var _ADAPTERS = {
+    QLD: _adaptQLD,
+    NSW: _adaptNSW,
+    VIC: _adaptVIC,
+    SA: _adaptSA,
+    TAS: _adaptTAS,
+    ACT: _adaptACT,
+    WA: _adaptNational,
+    NT: _adaptNational
+  };
+  function fetchCadastreParcel(map, latlng, cb) {
+    const state = _pickJurisdiction(latlng.lat, latlng.lng);
+    const adapter = _ADAPTERS[state] || _adaptNational;
+    adapter(map, latlng, state, cb);
+  }
 
   // src/utils/mvt.js
   function mvtDecode(buf) {
@@ -10443,7 +10922,7 @@
         addOverlay(CFG.LAYER_INFRA, new PowerInfraLayerProvider());
         addOverlay(CFG.LAYER_TELECOM, new TelecomsLayerProvider());
         addOverlay(CFG.LAYER_LIGHTPOL, new LightPollutionLayerProvider());
-        addOverlay(CFG.LAYER_CADASTRE, new QldCadastreLayerProvider());
+        addOverlay(CFG.LAYER_CADASTRE, new AustraliaCadastreLayerProvider());
         addOverlay(CFG.LAYER_SCC_APPS, new SccApplicationsLayerProvider());
         addOverlay(CFG.LAYER_QPWS, new QpwsLayerProvider());
         addOverlay(CFG.LAYER_RELIEF, new QldReliefLayerProvider());
@@ -10775,36 +11254,26 @@
         if (div && div.isConnected && isCurrent()) div.innerHTML = html;
       };
       const cad = this.layers[CFG.LAYER_CADASTRE];
-      if (cad && map.hasLayer(cad) && map.getZoom() >= CFG.QLD_CADASTRE_HOVER_MIN_ZOOM) {
+      if (cad && map.hasLayer(cad) && map.getZoom() >= CFG.CADASTRE_MIN_ZOOM) {
         _ensureSalesHook(map);
-        arcgisIdentify(map, latlng, {
-          baseUrl: CFG.QLD_CADASTRE_SERVICE,
-          layers: "all:" + CFG.QLD_CADASTRE_IDENTIFY_LAYER,
-          tolerance: 3
-        }, (err, feat) => {
-          if (!isCurrent()) return;
-          if (err || !feat) return;
-          const attrs = feat.attributes || {};
-          const lotplan = _cadVal(attrs["Lot/plan"]);
-          const cadSec = section(
-            "dw-popup-ident-cad",
-            _formatCadastreTooltip(attrs, null, true)
-          );
-          if (!lotplan) return;
-          fetchCadastreAddress(lotplan, (info) => {
-            if (!isCurrent()) return;
-            setSection(cadSec, _formatCadastreTooltip(attrs, info, true));
-            if (info && isFinite(info.lat) && isFinite(info.lon) && info.streetName && info.streetNumber) {
-              const salesSec = section(
-                "dw-popup-ident-sales",
-                `<div class="dw-sales-pop"><div class="dw-sales-loading">Loading sales…</div></div>`
-              );
-              fetchOthSales(info, (result) => {
-                if (!isCurrent()) return;
-                setSection(salesSec, _renderSalesContent(result));
-              });
-            }
-          });
+        let cadSec = null, salesStarted = false;
+        fetchCadastreParcel(map, latlng, (res) => {
+          if (!isCurrent() || !res || !res.attrs) return;
+          const html = _formatCadastreTooltip(res.attrs, res.addressInfo || null, true);
+          if (!cadSec) cadSec = section("dw-popup-ident-cad", html);
+          else setSection(cadSec, html);
+          const info = res.addressInfo;
+          if (!salesStarted && info && isFinite(info.lat) && isFinite(info.lon) && info.streetName && info.streetNumber) {
+            salesStarted = true;
+            const salesSec = section(
+              "dw-popup-ident-sales",
+              `<div class="dw-sales-pop"><div class="dw-sales-loading">Loading sales…</div></div>`
+            );
+            fetchOthSales(info, (result) => {
+              if (!isCurrent()) return;
+              setSection(salesSec, _renderSalesContent(result));
+            });
+          }
         });
       }
       const scc = this.layers[CFG.LAYER_SCC_APPS];
@@ -11314,6 +11783,8 @@
         _othCanonicalUrlFromLocation,
         _formatCadastreTooltip,
         _formatAddressLine,
+        _parseAuStreetAddress,
+        _pickJurisdiction,
         _deviAppUrl,
         _fmtSccDate,
         _formatSccTooltip,

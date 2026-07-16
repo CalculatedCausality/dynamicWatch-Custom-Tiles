@@ -32,14 +32,15 @@ import {
 } from "../providers/heatmaps.js";
 import { LightPollutionLayerProvider } from "../providers/light-pollution.js";
 import {
-	QldCadastreLayerProvider,
-	_cadVal,
 	_ensureSalesHook,
 	_formatCadastreTooltip,
 	_renderSalesContent,
-	fetchCadastreAddress,
 	fetchOthSales,
 } from "../providers/qld-cadastre.js";
+import {
+	AustraliaCadastreLayerProvider,
+	fetchCadastreParcel,
+} from "../providers/cadastre-au.js";
 import { IntvlGlobalTilesLayerProvider } from "../providers/intvl-global.js";
 import {
 	SccApplicationsLayerProvider,
@@ -286,7 +287,7 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_INFRA,      new PowerInfraLayerProvider());
 			addOverlay(CFG.LAYER_TELECOM,    new TelecomsLayerProvider());
 			addOverlay(CFG.LAYER_LIGHTPOL,   new LightPollutionLayerProvider());
-			addOverlay(CFG.LAYER_CADASTRE,   new QldCadastreLayerProvider());
+			addOverlay(CFG.LAYER_CADASTRE,   new AustraliaCadastreLayerProvider());
 			addOverlay(CFG.LAYER_SCC_APPS,   new SccApplicationsLayerProvider());
 			addOverlay(CFG.LAYER_QPWS,       new QpwsLayerProvider());
 			addOverlay(CFG.LAYER_RELIEF,     new QldReliefLayerProvider());
@@ -708,41 +709,35 @@ export class CustomTilesApp {
 			if (div && div.isConnected && isCurrent()) div.innerHTML = html;
 		};
 
-		// CADASTRE — always (desktop + touch). The hover tooltip is
-		// disabled, so this popup is the sole surface; sales auto-load
-		// + embed inline (no separate "Sales ↗" click).
+		// CADASTRE — always (desktop + touch), across every Australian
+		// jurisdiction. The hover tooltip is disabled, so this popup is the
+		// sole surface; sales auto-load + embed inline where a street
+		// address resolves (no separate "Sales ↗" click).
 		const cad = this.layers[CFG.LAYER_CADASTRE];
 		if (cad && map.hasLayer(cad) &&
-			map.getZoom() >= CFG.QLD_CADASTRE_HOVER_MIN_ZOOM) {
+			map.getZoom() >= CFG.CADASTRE_MIN_ZOOM) {
 			_ensureSalesHook(map);
-			arcgisIdentify(map, latlng, {
-				baseUrl: CFG.QLD_CADASTRE_SERVICE,
-				layers:  "all:" + CFG.QLD_CADASTRE_IDENTIFY_LAYER,
-				tolerance: 3,
-			}, (err, feat) => {
-				if (!isCurrent()) return;
-				if (err || !feat) return;
-				const attrs = feat.attributes || {};
-				const lotplan = _cadVal(attrs["Lot/plan"]);
+			let cadSec = null, salesStarted = false;
+			// fetchCadastreParcel routes to the jurisdiction under the click
+			// and may call back twice — parcel attrs first, then again with
+			// an addressInfo once its (often separate) address query lands.
+			fetchCadastreParcel(map, latlng, (res) => {
+				if (!isCurrent() || !res || !res.attrs) return;
 				// omitSalesLink=true — we embed sales below instead.
-				const cadSec = section("dw-popup-ident-cad",
-					_formatCadastreTooltip(attrs, null, true));
-				if (!lotplan) return;
-				fetchCadastreAddress(lotplan, (info) => {
-					if (!isCurrent()) return;
-					setSection(cadSec, _formatCadastreTooltip(attrs, info, true));
-					// Auto-load sales once we have a numbered street
-					// address (OTH needs street number + name).
-					if (info && isFinite(info.lat) && isFinite(info.lon) &&
-						info.streetName && info.streetNumber) {
-						const salesSec = section("dw-popup-ident-sales",
-							`<div class="dw-sales-pop"><div class="dw-sales-loading">Loading sales…</div></div>`);
-						fetchOthSales(info, (result) => {
-							if (!isCurrent()) return;
-							setSection(salesSec, _renderSalesContent(result));
-						});
-					}
-				});
+				const html = _formatCadastreTooltip(res.attrs, res.addressInfo || null, true);
+				if (!cadSec) cadSec = section("dw-popup-ident-cad", html);
+				else setSection(cadSec, html);
+				const info = res.addressInfo;
+				if (!salesStarted && info && isFinite(info.lat) && isFinite(info.lon) &&
+					info.streetName && info.streetNumber) {
+					salesStarted = true;
+					const salesSec = section("dw-popup-ident-sales",
+						`<div class="dw-sales-pop"><div class="dw-sales-loading">Loading sales…</div></div>`);
+					fetchOthSales(info, (result) => {
+						if (!isCurrent()) return;
+						setSection(salesSec, _renderSalesContent(result));
+					});
+				}
 			});
 		}
 
