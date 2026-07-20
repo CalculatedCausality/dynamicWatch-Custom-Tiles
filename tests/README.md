@@ -76,8 +76,9 @@ What gets validated per type:
 
 - **Image tiles** — magic-byte sniff (`89 50 4E 47` for PNG, `FF D8 FF`
   for JPEG); catches error pages masquerading as `image/png`
-- **Strava** — PNG IHDR dimensions ≥ 512 (confirms HiDPI `@2x` raster,
-  not the basic 256px fallback)
+- **Strava** — PNG IHDR dimensions = 512 at anonymous z11 (confirms the
+  highest-resolution logged-out tile, not a basic 256px fallback); a z12
+  ceiling sentinel fails if Strava opens a higher anonymous level
 - **INTVL PBF** — decodes via `mvtDecode`, expects layer named
   `"territories"` with extent 4096, ≥1 polygon feature, and properties
   `colour` + `currentArea` + `startTime` + (`runId` or `activityId`)

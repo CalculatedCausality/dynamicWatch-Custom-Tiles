@@ -125,7 +125,7 @@ probe "OpenSeaMap seamarks"  "image/png"   60  \
 	"https://tiles.openseamap.org/seamark/10/947/593.png"
 
 probe "Strava heatmap (anon)" "image/png"  60  \
-	"https://content-a.strava.com/anon/globalheat/all/blue/10/947/593@2x.png?v=19"
+	"https://content-a.strava.com/anon/globalheat/all/blue/11/1894/1186.png?v=19"
 
 # Garmin fans 5 requests per tile (one per activity). All must work
 # or the heatmap composite is wrong. Test each activity.

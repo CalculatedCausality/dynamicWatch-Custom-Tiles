@@ -6,7 +6,9 @@ import { gmGet, wireTileAbort } from "../utils/http.js";
 export class StravaHeatmapLayerProvider extends LayerProvider {
 	create() {
 		const layer = L.tileLayer(CFG.STRAVA_HEATMAP_TILE, {
-			tileSize: 256, maxNativeZoom: 10, maxZoom: 25,
+			tileSize: 256,
+			maxNativeZoom: CFG.STRAVA_HEATMAP_MAX_NATIVE_Z,
+			maxZoom: 25,
 			opacity: 0.8, crossOrigin: false,
 			attribution: "© Strava",
 		});

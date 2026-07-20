@@ -82,7 +82,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 
 | Layer | Native zoom | Notes |
 |---|---|---|
-| **Strava Heatmap** | 10 | Anonymous global aggregate heatmap |
+| **Strava Heatmap** | 11 | Anonymous global aggregate heatmap; 512 px native tiles |
 | **Garmin Heatmap** | 17 | Composited from 5 activity feeds (running, hiking, trail running, road cycling, mountain biking) with additive canvas blending |
 
 | QLD Globe + Strava Heatmap | QLD Historical (1972) | INTVL Territories + Geocaches |
@@ -158,7 +158,7 @@ Quick-reference table — what you need to log in to for each layer to render.
 | Vexcel Aerial | Yes | Vexcel viewer account | Paste `email:password` once (stored on-device, daily JWT auto-refreshed) or a one-off token/URL from the Vexcel viewer |
 | SCC Applications | No | None | Public ArcGIS Feature Layers + Development.i endpoints |
 | OpenSeaMap | No | None | Public tiles |
-| Strava Heatmap | No | Anonymous Strava endpoint | Capped at zoom 10 (higher zoom requires signed cookies) |
+| Strava Heatmap | No | Anonymous Strava endpoint | Capped at URL zoom 11 (512 px tiles; higher zoom requires signed cookies) |
 | Garmin Heatmap | No | Anonymous Garmin Connect tile feeds | 5 sub-feeds blended additively on canvas |
 | Power / Telecoms / Water | No | OpenInfraMap MVT CDN | Public vector tiles |
 | Mobile Coverage | No | ACCC public endpoint | |
@@ -180,7 +180,7 @@ Quick-reference table — what you need to log in to for each layer to render.
 
 ## Known limitations
 
-- **Strava Heatmap is zoom ≤ 10 only.** Higher-zoom tiles require CloudFront signed cookies that Strava only issues via a browser session on their own site, so the layer uses the anonymous endpoint and caps at zoom 10.
+- **Strava Heatmap is capped at URL zoom 11.** The anonymous endpoint supplies 512 px tiles at that level (roughly the sampling of a conventional 256 px z12 tile), which the layer overzooms when the map is closer. Actual higher-detail tiles require short-lived CloudFront signed cookies from a logged-in Strava session, so the script does not request or proxy them.
 - **Garmin Heatmap fires 5 requests per tile** (running, hiking, trail running, road cycling, mountain biking) and blends them additively on canvas. Other Garmin activity types don't have public tile endpoints. Each visible tile is therefore 5× the bandwidth — fast networks won't notice, mobile/cellular might.
 - **QLD Historical coverage is location-dependent.** Some areas have many captures going back decades; others have few or none. The scrubber shows "Loading…" while querying the catalog.
 - **QImagery (1930s–1990s aerial photos)** is part of QLD Historical but is restricted; many accounts get HTTP 403 from that scope. When that happens the layer silently falls back to the AerialOrtho program (1990s onward), with a console hint explaining why.

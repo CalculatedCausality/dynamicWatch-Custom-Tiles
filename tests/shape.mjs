@@ -92,6 +92,7 @@ const MAPBOX_TOKEN = process.env.MAPBOX_TOKEN || "";
 const TILE = {
 	z08: { x: 236,  y: 148  },
 	z10: { x: 947,  y: 593  },
+	z11: { x: 1894, y: 1186 },
 	z12: { x: 3789, y: 2373 },
 };
 const CENTER = { lon: 153.0251, lat: -27.4698 };
@@ -114,18 +115,26 @@ await test("OpenSeaMap → PNG (transparent overlay)", async () => {
 	assertEq(sniffImage(r.body), "png");
 });
 
-await test("Strava heatmap → HiDPI PNG (@2x suffix)", async () => {
-	const r = await fetchBuffer(`https://content-a.strava.com/anon/globalheat/all/blue/10/${TILE.z10.x}/${TILE.z10.y}@2x.png?v=19`);
+await test("Strava heatmap → highest anonymous native tile", async () => {
+	const r = await fetchBuffer(`https://content-a.strava.com/anon/globalheat/all/blue/11/${TILE.z11.x}/${TILE.z11.y}.png?v=19`);
 	assertEq(r.status, 200);
 	assertEq(sniffImage(r.body), "png");
 	// PNG IHDR width/height are at bytes 16-23 (big-endian uint32). Strava's
-	// @2x currently ships 1024×1024 (4× the logical tile size) — Leaflet
-	// downscales to fit the 256px display tile. Anything wider than 256
-	// confirms we got the higher-res raster, not the basic 256px tile.
+	// logged-out renderer currently uses 512px tiles through URL zoom 11.
+	// This has the same effective sampling ceiling as the former z10 @2x
+	// URL, but avoids stretching a z10 parent while viewing z11.
 	const w = (r.body[16] << 24) | (r.body[17] << 16) | (r.body[18] << 8) | r.body[19];
 	const h = (r.body[20] << 24) | (r.body[21] << 16) | (r.body[22] << 8) | r.body[23];
-	assert(w === h && w >= 512,
-		`dimensions: ${w}×${h} (want square ≥512 for HiDPI @2x suffix)`);
+	assert(w === 512 && h === 512,
+		`dimensions: ${w}×${h} (want 512×512 at anonymous z11)`);
+});
+
+await test("Strava heatmap → anonymous resolution ceiling", async () => {
+	const r = await fetchBuffer(`https://content-a.strava.com/anon/globalheat/all/blue/12/${TILE.z12.x}/${TILE.z12.y}.png?v=19`);
+	assertEq(r.status, 403,
+		"anonymous z12 status (if this becomes 200, raise STRAVA_HEATMAP_MAX_NATIVE_Z)");
+	assert(sniffImage(r.body) === "unknown",
+		"anonymous z12 unexpectedly returned an image; raise the native zoom ceiling");
 });
 
 await test("Strava heatmap → NO CORS for arbitrary origin (why we bridge it)", async () => {
@@ -136,7 +145,7 @@ await test("Strava heatmap → NO CORS for arbitrary origin (why we bridge it)",
 	// CORS-exempt). If this assertion ever FAILS (ACAO present), Strava
 	// re-opened CORS and we could drop the bridge + restore a plain raster.
 	const r = await fetch(
-		`https://content-a.strava.com/anon/globalheat/all/blue/10/${TILE.z10.x}/${TILE.z10.y}@2x.png?v=19`,
+		`https://content-a.strava.com/anon/globalheat/all/blue/11/${TILE.z11.x}/${TILE.z11.y}.png?v=19`,
 		{ headers: { Origin: "https://dynamic.watch" } });
 	assertEq(r.status, 200);
 	const acao = r.headers.get("access-control-allow-origin");

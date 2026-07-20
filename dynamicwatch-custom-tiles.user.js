@@ -287,7 +287,9 @@
     // External basemap / overlay tile URLs centralised so endpoint
     // changes happen in one place.
     GOOGLE_HYBRID_TILE: "https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
-    STRAVA_HEATMAP_TILE: "https://content-a.strava.com/anon/globalheat/all/blue/{z}/{x}/{y}@2x.png?v=19",
+    // Strava's logged-out map currently serves 512px tiles through URL z11.
+    STRAVA_HEATMAP_TILE: "https://content-a.strava.com/anon/globalheat/all/blue/{z}/{x}/{y}.png?v=19",
+    STRAVA_HEATMAP_MAX_NATIVE_Z: 11,
     OPENSEAMAP_TILE: "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
     ACCC_MOBILE_COVERAGE_SERVICE: "https://spatial.infrastructure.gov.au/server/rest/services/ACCC_Mobile_Sites_and_Coverages/MapServer",
     // lightpollutionmap.info GeoServer (WMS via GWC tile cache).
@@ -6868,7 +6870,7 @@
     create() {
       const layer = L.tileLayer(CFG.STRAVA_HEATMAP_TILE, {
         tileSize: 256,
-        maxNativeZoom: 10,
+        maxNativeZoom: CFG.STRAVA_HEATMAP_MAX_NATIVE_Z,
         maxZoom: 25,
         opacity: 0.8,
         crossOrigin: false,

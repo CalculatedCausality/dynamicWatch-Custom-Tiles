@@ -295,8 +295,10 @@ export const CFG = {
 	// changes happen in one place.
 	GOOGLE_HYBRID_TILE:
 		"https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+	// Strava's logged-out map currently serves 512px tiles through URL z11.
 	STRAVA_HEATMAP_TILE:
-		"https://content-a.strava.com/anon/globalheat/all/blue/{z}/{x}/{y}@2x.png?v=19",
+		"https://content-a.strava.com/anon/globalheat/all/blue/{z}/{x}/{y}.png?v=19",
+	STRAVA_HEATMAP_MAX_NATIVE_Z: 11,
 	OPENSEAMAP_TILE:
 		"https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
 	ACCC_MOBILE_COVERAGE_SERVICE:
