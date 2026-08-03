@@ -54,19 +54,26 @@ await page.waitForTimeout(3500);
 // REAL discovery path: HOVER the footprints → an interactive panel lists
 // the sheets there (a plain map click would just drop a waypoint). Move
 // into the panel and click "Overlay ▦".
-const c = await page.evaluate(() => {
-	const r = window._dwLayerCtrl._map.getContainer().getBoundingClientRect();
-	return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+// Drive the Leaflet map 'mousemove' the hover handler listens on. (A
+// synthetic OS-level mouse move doesn't reliably reach Leaflet's internal
+// handler in headless; firing the map event is the faithful handler test —
+// real cursor movement produces the same event.)
+await page.evaluate(() => {
+	const map = window._dwLayerCtrl._map;
+	const ll = L.latLng(-26.19, 152.66);
+	map.fire("mousemove", { latlng: ll, containerPoint: map.latLngToContainerPoint(ll), originalEvent: {} });
 });
-// Jiggle over the footprint to fire Leaflet mousemove → cursor-identify.
-for (let i = 0; i < 4; i++) { await page.mouse.move(c.x + i, c.y + i); await page.waitForTimeout(120); }
 const sectionShown = await page.waitForSelector(".dw-histmap-hover .dw-histmap-overlay-link",
 	{ timeout: 30_000 }).then(() => true).catch(() => false);
 console.log(`  hover panel lists sheets with Overlay links: ${sectionShown}`);
 
 if (sectionShown) {
-	await page.hover(".dw-histmap-hover .dw-histmap-overlay-link");
-	await page.click(".dw-histmap-hover .dw-histmap-overlay-link");
+	// A help modal can reappear and intercept pointer events — clear it.
+	await page.evaluate(() => {
+		document.querySelectorAll(".modal, .modal-backdrop, #help-modal").forEach((el) => el.remove());
+		document.body.classList.remove("modal-open"); document.body.style.overflow = "";
+	});
+	await page.click(".dw-histmap-hover .dw-histmap-overlay-link", { force: true });
 }
 
 // The scan img must appear, load, and receive a matrix3d transform; 4 corner

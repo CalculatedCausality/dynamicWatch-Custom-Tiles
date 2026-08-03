@@ -10809,6 +10809,7 @@
     });
     return `<div class="dw-histmap-list"><div class="dw-histmap-hd">Historical map sheets here (${usable.length})</div>${rows.join("")}</div>`;
   }
+  var _HIST_MAX_SCALE = 3e5;
   function fetchHistMapSheets(map, latlng, cb) {
     arcgisIdentify(map, latlng, {
       baseUrl: CFG.QLD_HIST_MAPS_SERVICE,
@@ -10816,8 +10817,14 @@
       tolerance: 1
     }, (err, _feat, raw) => {
       const results = raw && raw.results || [];
-      const sheets = results.map((r) => _histMapSheet(r.attributes || {})).filter((m) => m.link);
-      sheets.sort((a, b) => Number(b.year || 0) - Number(a.year || 0));
+      const seen = /* @__PURE__ */ new Set();
+      const sheets = results.map((r) => _histMapSheet(r.attributes || {})).filter((m) => {
+        if (!m.link || seen.has(m.link)) return false;
+        seen.add(m.link);
+        const s = parseFloat(m.scale);
+        return !Number.isFinite(s) || s <= _HIST_MAX_SCALE;
+      });
+      sheets.sort((a, b) => (parseFloat(a.scale) || 9e9) - (parseFloat(b.scale) || 9e9) || Number(b.year || 0) - Number(a.year || 0));
       cb(sheets);
     });
   }
@@ -10846,10 +10853,15 @@
   function installHistMapHover(layer, map) {
     const container = map.getContainer();
     let panel = null, hideTimer = null, debounce = null, gen = 0;
+    let lastKey = "";
+    let overPanel = false;
     const scheduleHide = () => {
       clearTimeout(hideTimer);
       hideTimer = setTimeout(() => {
-        if (panel) panel.style.display = "none";
+        if (panel) {
+          panel.style.display = "none";
+          lastKey = "";
+        }
       }, 500);
     };
     const ensurePanel = () => {
@@ -10858,11 +10870,19 @@
       panel.style.display = "none";
       L.DomEvent.disableClickPropagation(panel);
       L.DomEvent.disableScrollPropagation(panel);
-      panel.addEventListener("mouseenter", () => clearTimeout(hideTimer));
-      panel.addEventListener("mouseleave", scheduleHide);
+      L.DomEvent.on(panel, "mousemove", L.DomEvent.stopPropagation);
+      panel.addEventListener("mouseenter", () => {
+        overPanel = true;
+        clearTimeout(hideTimer);
+      });
+      panel.addEventListener("mouseleave", () => {
+        overPanel = false;
+        scheduleHide();
+      });
       return panel;
     };
     const onMove = (e) => {
+      if (overPanel) return;
       if (map.getZoom() < CFG.QLD_HIST_MAPS_MIN_ZOOM) {
         scheduleHide();
         return;
@@ -10870,18 +10890,22 @@
       clearTimeout(debounce);
       const pt = e.containerPoint, ll = e.latlng;
       debounce = setTimeout(() => {
+        if (overPanel) return;
         const my = ++gen;
         fetchHistMapSheets(map, ll, (sheets) => {
-          if (my !== gen) return;
+          if (my !== gen || overPanel) return;
           const html = _histMapsSectionHtml(sheets);
           if (!html) {
             scheduleHide();
             return;
           }
+          const key = sheets.map((s) => s.link).join("|");
           const p = ensurePanel();
-          p.innerHTML = `<div class="dw-histmap-hint">Hover in to open · drag corners to align</div>` + html;
-          p.style.display = "block";
           clearTimeout(hideTimer);
+          if (key === lastKey && p.style.display === "block") return;
+          lastKey = key;
+          p.innerHTML = `<div class="dw-histmap-hint">Move in to open · drag corners to align</div>` + html;
+          p.style.display = "block";
           const cw = container.clientWidth, ch = container.clientHeight;
           let x = pt.x + 16, y = pt.y + 16;
           if (x + p.offsetWidth > cw) x = Math.max(4, pt.x - p.offsetWidth - 16);
