@@ -61,7 +61,50 @@ export function _formatShaftTooltip(attrs) {
 	return lines.join("<br>");
 }
 
+// Historic mining title (ML/MC/MDL) footprints. /identify aliases:
+// displayname→"Permit number", permittype→"Permit type",
+// permitstatus→"Permit status", permitstate→"Permit sub-status",
+// permitminerals→"Mineral", authorisedholdername→"Authorised holder name".
+export function _formatLeaseTooltip(attrs) {
+	const a = attrs || {};
+	const num = _pickAny(a, ["Permit number", "displayname"]);
+	const type = _pickAny(a, ["Permit type", "permittype"]);
+	const status = _pickAny(a, ["Permit sub-status", "permitstate", "Permit status", "permitstatus"]);
+	const mineral = _pickAny(a, ["Mineral", "permitminerals"]);
+	const holder = _pickAny(a, ["Authorised holder name", "authorisedholdername"]);
+
+	const lines = [esc`<b>${num || "Historic mining title"}</b>`];
+	const st = [type, status].filter(Boolean).join(" · ");
+	if (st) lines.push(_escHtml(st));
+	if (mineral) lines.push(_escHtml(mineral.replace(/,/g, ", ")));
+	if (holder) lines.push(esc`<span class="dw-cad-sub">${holder}</span>`);
+	return lines.join("<br>");
+}
+
 export function createQldMiningProviders({ makeHoverIdentify }) {
+	const installLeasesHover = makeHoverIdentify({
+		baseUrl:    CFG.QLD_LEASES_SERVICE,
+		layers:     "all:" + CFG.QLD_LEASES_LAYER_IDS,
+		tolerance:  4,
+		minZoom:    CFG.QLD_LEASES_HOVER_MIN_ZOOM,
+		tipClass:   "dw-qpws-tip",
+		formatTooltip: _formatLeaseTooltip,
+	});
+
+	const HistoricLeasesLayerProvider = arcgisExportProvider({
+		baseUrl: CFG.QLD_LEASES_SERVICE,
+		showLayers: CFG.QLD_LEASES_LAYER_IDS,
+		pane: "dwLeasesPane", paneZIndex: 393,
+		opacity: 0.8, minZoom: 9, maxZoom: 25,
+		attribution:
+			'Mining permits &copy; <a href="https://georesglobe.information.qld.gov.au/" ' +
+			'target="_blank" rel="noreferrer">State of Queensland (Resources)</a>',
+		onAdd: (layer, map) => installLeasesHover(layer, map),
+		onRemove: (layer) => {
+			if (layer._dwHoverOff) { layer._dwHoverOff(); layer._dwHoverOff = null; }
+		},
+	});
+
 	const installShaftsHover = makeHoverIdentify({
 		baseUrl:    CFG.QLD_SHAFTS_SERVICE,
 		layers:     "all:" + CFG.QLD_SHAFTS_LAYER_IDS,
@@ -109,5 +152,5 @@ export function createQldMiningProviders({ makeHoverIdentify }) {
 		},
 	});
 
-	return { HistoricMinesLayerProvider, MineShaftsLayerProvider };
+	return { HistoricMinesLayerProvider, MineShaftsLayerProvider, HistoricLeasesLayerProvider };
 }

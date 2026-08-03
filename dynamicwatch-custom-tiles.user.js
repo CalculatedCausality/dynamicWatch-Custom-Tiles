@@ -148,6 +148,8 @@
     LAYER_NATIONAL_PARKS: "National Parks",
     LAYER_HIST_MINES: "Historic Mines",
     LAYER_MINE_SHAFTS: "Mine Shafts",
+    LAYER_MINE_LEASES: "Historic Mining Leases",
+    LAYER_HIST_MAPS: "Historic Map Sheets",
     LAYER_TOPO: "QLD Topo",
     LAYER_INTVL_GLOBAL: "INTVL Global Map",
     LAYER_GEOCACHING: "Geocaches",
@@ -293,6 +295,21 @@
     QLD_SHAFTS_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/GeoscientificInformation/AbandonedMines/MapServer",
     QLD_SHAFTS_LAYER_IDS: "45,75,65",
     QLD_SHAFTS_HOVER_MIN_ZOOM: 11,
+    // Historic mining title footprints (MinesPermitsHistoric). Catches
+    // small/old sites the shaft inventory misses — an old lease boundary
+    // says "mining happened here". Layer 170 = Historical ML extent
+    // (mining leases), 155 = Historical MC extent (mining claims), 135 =
+    // Historical MDL extent (mineral development licences). Polygons.
+    QLD_LEASES_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Economy/MinesPermitsHistoric/MapServer",
+    QLD_LEASES_LAYER_IDS: "170,155,135",
+    QLD_LEASES_HOVER_MIN_ZOOM: 11,
+    // Historical printed map sheets index (parish/town/topographic/
+    // exploration/… scans, 1860s-2012). Footprint overlay + click lists
+    // the sheets covering a point, each with a scan link; a scan can be
+    // superimposed and rubber-sheeted onto the live map. All ~50 series.
+    QLD_HIST_MAPS_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Imagery/HistoricalPrintedMapExtents/MapServer",
+    QLD_HIST_MAPS_LAYER_IDS: "100,101,102,103,104,105,106,107,108,200,201,202,300,301,302,303,304,400,401,402,500,501,502,503,504,505,506,507,508,600,601,602,603,604,605,700,701,702,703,704,705,800,801,802,803,804,900,901,902,903,904,905,906",
+    QLD_HIST_MAPS_MIN_ZOOM: 9,
     // OpenInfraMap public power vector-tile pyramid (MVT/pbf). Global,
     // CDN-served, derived from OSM — far more reliable than hitting raw
     // Overpass. Layers per tile: power_line, power_substation(_point),
@@ -353,7 +370,11 @@
     },
     {
       header: "Mining",
-      names: [CFG.LAYER_MINE_SHAFTS, CFG.LAYER_HIST_MINES]
+      names: [CFG.LAYER_MINE_SHAFTS, CFG.LAYER_HIST_MINES, CFG.LAYER_MINE_LEASES]
+    },
+    {
+      header: "Reference",
+      names: [CFG.LAYER_HIST_MAPS]
     },
     {
       header: "Live data",
@@ -10529,7 +10550,46 @@
     if (rem) lines.push(esc`<span class="dw-cad-sub">${rem}</span>`);
     return lines.join("<br>");
   }
+  function _formatLeaseTooltip(attrs) {
+    const a = attrs || {};
+    const num = _pickAny(a, ["Permit number", "displayname"]);
+    const type = _pickAny(a, ["Permit type", "permittype"]);
+    const status = _pickAny(a, ["Permit sub-status", "permitstate", "Permit status", "permitstatus"]);
+    const mineral = _pickAny(a, ["Mineral", "permitminerals"]);
+    const holder = _pickAny(a, ["Authorised holder name", "authorisedholdername"]);
+    const lines = [esc`<b>${num || "Historic mining title"}</b>`];
+    const st = [type, status].filter(Boolean).join(" · ");
+    if (st) lines.push(_escHtml(st));
+    if (mineral) lines.push(_escHtml(mineral.replace(/,/g, ", ")));
+    if (holder) lines.push(esc`<span class="dw-cad-sub">${holder}</span>`);
+    return lines.join("<br>");
+  }
   function createQldMiningProviders({ makeHoverIdentify: makeHoverIdentify2 }) {
+    const installLeasesHover = makeHoverIdentify2({
+      baseUrl: CFG.QLD_LEASES_SERVICE,
+      layers: "all:" + CFG.QLD_LEASES_LAYER_IDS,
+      tolerance: 4,
+      minZoom: CFG.QLD_LEASES_HOVER_MIN_ZOOM,
+      tipClass: "dw-qpws-tip",
+      formatTooltip: _formatLeaseTooltip
+    });
+    const HistoricLeasesLayerProvider2 = arcgisExportProvider({
+      baseUrl: CFG.QLD_LEASES_SERVICE,
+      showLayers: CFG.QLD_LEASES_LAYER_IDS,
+      pane: "dwLeasesPane",
+      paneZIndex: 393,
+      opacity: 0.8,
+      minZoom: 9,
+      maxZoom: 25,
+      attribution: 'Mining permits &copy; <a href="https://georesglobe.information.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (Resources)</a>',
+      onAdd: (layer, map) => installLeasesHover(layer, map),
+      onRemove: (layer) => {
+        if (layer._dwHoverOff) {
+          layer._dwHoverOff();
+          layer._dwHoverOff = null;
+        }
+      }
+    });
     const installShaftsHover = makeHoverIdentify2({
       baseUrl: CFG.QLD_SHAFTS_SERVICE,
       layers: "all:" + CFG.QLD_SHAFTS_LAYER_IDS,
@@ -10581,8 +10641,217 @@
         }
       }
     });
-    return { HistoricMinesLayerProvider: HistoricMinesLayerProvider2, MineShaftsLayerProvider: MineShaftsLayerProvider2 };
+    return { HistoricMinesLayerProvider: HistoricMinesLayerProvider2, MineShaftsLayerProvider: MineShaftsLayerProvider2, HistoricLeasesLayerProvider: HistoricLeasesLayerProvider2 };
   }
+
+  // src/providers/qld-historical-maps.js
+  function _adj(m) {
+    return [
+      m[4] * m[8] - m[5] * m[7],
+      m[2] * m[7] - m[1] * m[8],
+      m[1] * m[5] - m[2] * m[4],
+      m[5] * m[6] - m[3] * m[8],
+      m[0] * m[8] - m[2] * m[6],
+      m[2] * m[3] - m[0] * m[5],
+      m[3] * m[7] - m[4] * m[6],
+      m[1] * m[6] - m[0] * m[7],
+      m[0] * m[4] - m[1] * m[3]
+    ];
+  }
+  function _multmm(a, b) {
+    const r = [];
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+      let s = 0;
+      for (let k = 0; k < 3; k++) s += a[3 * i + k] * b[3 * k + j];
+      r[3 * i + j] = s;
+    }
+    return r;
+  }
+  function _multmv(m, v) {
+    return [
+      m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+      m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
+      m[6] * v[0] + m[7] * v[1] + m[8] * v[2]
+    ];
+  }
+  function _basisToPoints(p) {
+    const m = [p[0][0], p[1][0], p[2][0], p[0][1], p[1][1], p[2][1], 1, 1, 1];
+    const v = _multmv(_adj(m), [p[3][0], p[3][1], 1]);
+    return _multmm(m, [v[0], 0, 0, 0, v[1], 0, 0, 0, v[2]]);
+  }
+  function _general2DProjection(src, dst) {
+    return _multmm(_basisToPoints(dst), _adj(_basisToPoints(src)));
+  }
+  function _quadToMatrix3d(w, h, dst) {
+    const src = [[0, 0], [w, 0], [w, h], [0, h]];
+    const t = _general2DProjection(src, dst);
+    for (let i = 0; i < 9; i++) t[i] = t[i] / t[8];
+    const m = [
+      t[0],
+      t[3],
+      0,
+      t[6],
+      t[1],
+      t[4],
+      0,
+      t[7],
+      0,
+      0,
+      1,
+      0,
+      t[2],
+      t[5],
+      0,
+      t[8]
+    ];
+    return "matrix3d(" + m.join(",") + ")";
+  }
+  var OVERLAY_PANE = "dwHistMapPane";
+  var _activeOverlay = null;
+  function makeDistortableMapOverlay(map, opts) {
+    if (_activeOverlay) _activeOverlay.remove();
+    if (!map.getPane(OVERLAY_PANE)) {
+      map.createPane(OVERLAY_PANE);
+      map.getPane(OVERLAY_PANE).style.zIndex = "350";
+    }
+    const pane = map.getPane(OVERLAY_PANE);
+    pane.style.pointerEvents = "none";
+    const img = document.createElement("img");
+    img.className = "dw-histmap-img";
+    img.alt = opts.title || "historical map";
+    img.style.cssText = "position:absolute;left:0;top:0;transform-origin:0 0;pointer-events:none;will-change:transform;max-width:none;";
+    img.style.opacity = "0.7";
+    pane.appendChild(img);
+    const handleIcon = L.divIcon({ className: "dw-histmap-handle", iconSize: [16, 16] });
+    const corners = opts.corners.map((c) => L.marker(c, { draggable: true, icon: handleIcon, zIndexOffset: 2e3 }).addTo(map));
+    let W = 0, H = 0;
+    const update = () => {
+      if (!W || !H) return;
+      const p = corners.map((m) => map.latLngToLayerPoint(m.getLatLng()));
+      img.style.transform = _quadToMatrix3d(W, H, [[p[0].x, p[0].y], [p[1].x, p[1].y], [p[2].x, p[2].y], [p[3].x, p[3].y]]);
+    };
+    img.addEventListener("load", () => {
+      W = img.naturalWidth;
+      H = img.naturalHeight;
+      img.style.width = W + "px";
+      img.style.height = H + "px";
+      update();
+    });
+    img.addEventListener("error", () => setMsg("Couldn't load the map scan."));
+    img.src = opts.url;
+    corners.forEach((m) => m.on("drag", update));
+    const onMove = () => update();
+    map.on("move zoom viewreset zoomend moveend", onMove);
+    const ctl = L.DomUtil.create("div", "dw-histmap-ctl");
+    ctl.innerHTML = `<div class="dw-histmap-ttl">${_escHtml((opts.title || "Historical map").slice(0, 60))}</div><label>Opacity <input type="range" class="dw-histmap-op" min="0" max="1" step="0.05" value="0.7"></label><div class="dw-histmap-msg"></div><div class="dw-histmap-btns"><button type="button" class="dw-histmap-fit">Reset corners</button><button type="button" class="dw-histmap-del">Remove</button></div>`;
+    map.getContainer().appendChild(ctl);
+    L.DomEvent.disableClickPropagation(ctl);
+    L.DomEvent.disableScrollPropagation(ctl);
+    const msgEl = ctl.querySelector(".dw-histmap-msg");
+    const setMsg = (t) => {
+      if (msgEl) msgEl.textContent = t || "";
+    };
+    ctl.querySelector(".dw-histmap-op").addEventListener("input", (e) => {
+      img.style.opacity = e.target.value;
+    });
+    ctl.querySelector(".dw-histmap-fit").addEventListener("click", () => {
+      corners.forEach((m, i) => m.setLatLng(opts.corners[i]));
+      update();
+    });
+    const handle = {
+      remove() {
+        map.off("move zoom viewreset zoomend moveend", onMove);
+        corners.forEach((m) => m.remove());
+        if (img.parentNode) img.remove();
+        if (ctl.parentNode) ctl.remove();
+        if (_activeOverlay === handle) _activeOverlay = null;
+      }
+    };
+    ctl.querySelector(".dw-histmap-del").addEventListener("click", () => handle.remove());
+    _activeOverlay = handle;
+    return handle;
+  }
+  function _pick(a, keys) {
+    for (const k of keys) {
+      const v = a[k];
+      if (v !== null && v !== void 0 && String(v).trim() && String(v).trim().toLowerCase() !== "null") {
+        return String(v).trim();
+      }
+    }
+    return "";
+  }
+  function _yearOf(v) {
+    const m = String(v || "").match(/\b(1[6-9]\d\d|20\d\d)\b/);
+    return m ? m[1] : "";
+  }
+  function _histMapSheet(attrs) {
+    const a = attrs || {};
+    const title = _pick(a, ["Title", "title"]) || "Untitled sheet";
+    const year = _yearOf(_pick(a, ["Publication date", "publication_date"]));
+    const scale = _pick(a, ["Map scale", "map_scale"]);
+    const link = _pick(a, ["Download link", "download_link"]);
+    const preview = _pick(a, ["Map preview", "map_preview"]);
+    const w = parseFloat(_pick(a, ["Bounding box west longitude", "boundingboxwestlongitude"]));
+    const e = parseFloat(_pick(a, ["Bounding box east longitude", "boundingboxeastlongitude"]));
+    const n = parseFloat(_pick(a, ["Bounding box north latitude", "boundingboxnorthlatitude"]));
+    const s = parseFloat(_pick(a, ["Bounding box south latitude", "boundingboxsouthlatitude"]));
+    const bbox = [w, s, e, n].every(Number.isFinite) ? { w, s, e, n } : null;
+    return { title, year, scale, link, preview, bbox };
+  }
+  function _histMapsSectionHtml(sheets) {
+    const usable = sheets.filter((m) => m.link);
+    if (!usable.length) return "";
+    const rows = usable.slice(0, 30).map((m) => {
+      const meta = [m.year, m.scale ? "1:" + m.scale : ""].filter(Boolean).join(" · ");
+      const bboxAttr = m.bbox ? ` data-w="${m.bbox.w}" data-s="${m.bbox.s}" data-e="${m.bbox.e}" data-n="${m.bbox.n}"` : "";
+      const overlayBtn = m.bbox ? `<a href="#" class="dw-histmap-overlay-link" data-url="${_escHtml(m.link)}"${bboxAttr} data-title="${_escHtml(m.title)}">Overlay ▦</a>` : "";
+      return `<div class="dw-histmap-row"><div class="dw-histmap-row-t">${esc`<b>${m.title}</b>`}` + (meta ? esc` <span class="dw-cad-sub">${meta}</span>` : "") + `</div><div class="dw-histmap-row-a"><a href="${_escHtml(m.link)}" target="_blank" rel="noreferrer">Open scan ↗</a>` + (overlayBtn ? " &nbsp; " + overlayBtn : "") + `</div></div>`;
+    });
+    return `<div class="dw-histmap-list"><div class="dw-histmap-hd">Historical map sheets here (${usable.length})</div>${rows.join("")}</div>`;
+  }
+  function fetchHistMapSheets(map, latlng, cb) {
+    arcgisIdentify(map, latlng, {
+      baseUrl: CFG.QLD_HIST_MAPS_SERVICE,
+      layers: "all:" + CFG.QLD_HIST_MAPS_LAYER_IDS,
+      tolerance: 1
+    }, (err, _feat, raw) => {
+      const results = raw && raw.results || [];
+      const sheets = results.map((r) => _histMapSheet(r.attributes || {})).filter((m) => m.link);
+      sheets.sort((a, b) => Number(b.year || 0) - Number(a.year || 0));
+      cb(sheets);
+    });
+  }
+  var _histMapHookInstalled = false;
+  function _ensureHistMapHook(map) {
+    if (_histMapHookInstalled) return;
+    _histMapHookInstalled = true;
+    document.addEventListener("click", (e) => {
+      const a = e.target && e.target.closest && e.target.closest(".dw-histmap-overlay-link");
+      if (!a) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const n = parseFloat(a.dataset.n), s = parseFloat(a.dataset.s);
+      const w = parseFloat(a.dataset.w), ea = parseFloat(a.dataset.e);
+      if (![n, s, w, ea].every(Number.isFinite) || !a.dataset.url) return;
+      makeDistortableMapOverlay(map, {
+        url: a.dataset.url,
+        title: a.dataset.title || "",
+        corners: [[n, w], [n, ea], [s, ea], [s, w]]
+        // TL,TR,BR,BL
+      });
+    }, true);
+  }
+  var HistoricalMapsIndexProvider = arcgisExportProvider({
+    baseUrl: CFG.QLD_HIST_MAPS_SERVICE,
+    showLayers: CFG.QLD_HIST_MAPS_LAYER_IDS,
+    pane: "dwHistMapIndexPane",
+    paneZIndex: 388,
+    opacity: 0.7,
+    minZoom: 9,
+    maxZoom: 25,
+    attribution: 'Historical maps &copy; <a href="https://www.data.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (Resources)</a>',
+    onAdd: (layer, map) => _ensureHistMapHook(map)
+  });
 
   // src/tokens.js
   var TokenManagerBase = class {
@@ -10867,7 +11136,7 @@
   // src/app/custom-tiles-app.js
   var pageWin3 = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   var { QpwsLayerProvider, NationalParksLayerProvider } = createQldEnvironmentProviders({ makeHoverIdentify, gmJsonGet });
-  var { HistoricMinesLayerProvider, MineShaftsLayerProvider } = createQldMiningProviders({ makeHoverIdentify });
+  var { HistoricMinesLayerProvider, MineShaftsLayerProvider, HistoricLeasesLayerProvider } = createQldMiningProviders({ makeHoverIdentify });
   var CustomTilesApp = class {
     constructor() {
       this.qldToken = new QldTokenManager({
@@ -11052,6 +11321,8 @@
         );
         addOverlay(CFG.LAYER_MINE_SHAFTS, new MineShaftsLayerProvider());
         addOverlay(CFG.LAYER_HIST_MINES, new HistoricMinesLayerProvider());
+        addOverlay(CFG.LAYER_MINE_LEASES, new HistoricLeasesLayerProvider());
+        addOverlay(CFG.LAYER_HIST_MAPS, new HistoricalMapsIndexProvider());
         addOverlay(
           CFG.LAYER_INTVL_GLOBAL,
           new IntvlGlobalTilesLayerProvider()
@@ -11425,6 +11696,14 @@
           );
         });
       }
+      const histMaps = this.layers[CFG.LAYER_HIST_MAPS];
+      if (histMaps && map.hasLayer(histMaps) && map.getZoom() >= CFG.QLD_HIST_MAPS_MIN_ZOOM) {
+        fetchHistMapSheets(map, latlng, (sheets) => {
+          if (!isCurrent() || !sheets.length) return;
+          const html = _histMapsSectionHtml(sheets);
+          if (html) section("dw-popup-ident-histmaps", html);
+        });
+      }
     }
     _injectGroupHeaders(ctrl) {
       let savedGroups = [];
@@ -11685,6 +11964,19 @@
         ".popup-on-location .dw-popup-ident b { font-weight: 700; }",
         ".popup-on-location .dw-popup-ident .dw-cad-sub { color: #6b7280; font-size: 11px; }",
         ".popup-on-location .dw-popup-ident .dw-cad-link { font-weight: 600; }",
+        // Historic map sheets: popup list + the distortable-overlay
+        // corner handles and floating control.
+        ".dw-histmap-list .dw-histmap-hd { font-weight: 700; margin-bottom: 4px; }",
+        ".dw-histmap-row { margin: 4px 0; }",
+        ".dw-histmap-row-a a { font-weight: 600; }",
+        ".dw-histmap-handle { width: 16px; height: 16px; margin: -8px 0 0 -8px; background: #fff; border: 2px solid #dc2626; border-radius: 50%; box-shadow: 0 1px 4px rgba(0,0,0,.5); cursor: move; }",
+        ".dw-histmap-ctl { position: absolute; top: 90px; right: 12px; z-index: 1000; background: rgba(255,255,255,.96); border: 1px solid #999; border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.3); max-width: 240px; }",
+        ".dw-histmap-ctl .dw-histmap-ttl { font-weight: 700; margin-bottom: 6px; }",
+        ".dw-histmap-ctl label { display: block; margin: 4px 0; }",
+        ".dw-histmap-ctl input[type=range] { width: 100%; }",
+        ".dw-histmap-ctl .dw-histmap-msg { color: #b91c1c; min-height: 0; }",
+        ".dw-histmap-ctl .dw-histmap-btns { display: flex; gap: 6px; margin-top: 6px; }",
+        ".dw-histmap-ctl button { flex: 1; padding: 5px 6px; font-size: 12px; cursor: pointer; }",
         // 3D toggle in the planner action row. Matches the native
         // btn-default look; `.active` darkens it the same way
         // Bootstrap 3 does for pressed buttons.
@@ -11909,6 +12201,10 @@
         _pickJurisdiction,
         _formatMineTooltip,
         _formatShaftTooltip,
+        _formatLeaseTooltip,
+        _quadToMatrix3d,
+        _histMapSheet,
+        _histMapsSectionHtml,
         _deviAppUrl,
         _fmtSccDate,
         _formatSccTooltip,

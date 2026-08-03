@@ -1097,13 +1097,67 @@ t("advertised QLD Relief and National Parks overlays are grouped", () => {
 	assert(names.has(dw.CFG.LAYER_NATIONAL_PARKS), "National Parks missing from overlay groups");
 });
 
-t("Historic Mines + Mine Shafts overlays are registered in a Mining group", () => {
+t("Mining overlays (shafts, mines, leases) are registered in a Mining group", () => {
 	eq(dw.CFG.LAYER_HIST_MINES, "Historic Mines");
 	eq(dw.CFG.LAYER_MINE_SHAFTS, "Mine Shafts");
+	eq(dw.CFG.LAYER_MINE_LEASES, "Historic Mining Leases");
 	const mining = dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Mining");
 	assert(mining, "Mining group missing");
-	assert(mining.names.includes(dw.CFG.LAYER_HIST_MINES), "Historic Mines not in Mining group");
-	assert(mining.names.includes(dw.CFG.LAYER_MINE_SHAFTS), "Mine Shafts not in Mining group");
+	for (const n of [dw.CFG.LAYER_MINE_SHAFTS, dw.CFG.LAYER_HIST_MINES, dw.CFG.LAYER_MINE_LEASES]) {
+		assert(mining.names.includes(n), n + " not in Mining group");
+	}
+});
+
+t("_quadToMatrix3d maps an image rect onto a quad (identity + translate)", () => {
+	// dst == source rectangle → identity matrix3d
+	const id = dw._quadToMatrix3d(100, 200, [[0, 0], [100, 0], [100, 200], [0, 200]]);
+	const nums = id.replace(/matrix3d\(|\)/g, "").split(",").map(Number);
+	const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+	nums.forEach((v, i) => close(v, identity[i], 1e-6, `identity[${i}]`));
+	// pure translation by (10, 20): last column (tx, ty) = 10, 20
+	const tr = dw._quadToMatrix3d(100, 200, [[10, 20], [110, 20], [110, 220], [10, 220]]);
+	const t = tr.replace(/matrix3d\(|\)/g, "").split(",").map(Number);
+	close(t[12], 10, 1e-6, "tx"); close(t[13], 20, 1e-6, "ty");
+	close(t[0], 1, 1e-6, "scaleX"); close(t[5], 1, 1e-6, "scaleY");
+});
+
+t("_histMapSheet + _histMapsSectionHtml model + render historical sheets", () => {
+	// Real /identify shape: aliased keys.
+	const sheet = dw._histMapSheet({
+		"Title": "Gympie and Environs sheet 8", "Publication date": "1909",
+		"Map scale": "4752",
+		"Download link": "https://apps.information.qld.gov.au/x/original",
+		"Bounding box west longitude": "152.65", "Bounding box east longitude": "152.68",
+		"Bounding box south latitude": "-26.20", "Bounding box north latitude": "-26.18",
+	});
+	eq(sheet.title, "Gympie and Environs sheet 8");
+	eq(sheet.year, "1909");
+	assert(sheet.bbox && sheet.bbox.n === -26.18, "bbox not parsed: " + JSON.stringify(sheet.bbox));
+	const html = dw._histMapsSectionHtml([sheet]);
+	assert(html.includes("Gympie and Environs sheet 8"), "title missing");
+	assert(html.includes("1909 · 1:4752"), "meta line missing: " + html);
+	assert(html.includes("Open scan"), "scan link missing");
+	assert(html.includes("dw-histmap-overlay-link"), "overlay action missing (has bbox)");
+	// A sheet with a link but no bbox: Open only, no Overlay
+	const noBbox = dw._histMapsSectionHtml([{ title: "X", link: "https://y/z", year: "", scale: "", preview: "", bbox: null }]);
+	assert(noBbox.includes("Open scan") && !noBbox.includes("dw-histmap-overlay-link"),
+		"no-bbox sheet should not offer Overlay: " + noBbox);
+	// No usable sheets → empty section
+	eq(dw._histMapsSectionHtml([{ title: "X", link: "" }]), "");
+});
+
+t("_formatLeaseTooltip renders permit number, type, minerals, holder; escapes", () => {
+	// Real /identify shape for Historical ML extent (layer 170), aliased keys.
+	const html = dw._formatLeaseTooltip({
+		"Permit number": "ML 3737", "Permit type": "Mining Lease",
+		"Permit sub-status": "Surrendered", "Mineral": "SB,AU,PT",
+		"Authorised holder name": "OLEARY, Barry Kevin",
+	});
+	assert(html.includes("<b>ML 3737</b>"), "permit number not headlined: " + html);
+	assert(html.includes("Mining Lease · Surrendered"), "type/status line missing: " + html);
+	assert(html.includes("SB, AU, PT"), "minerals not spaced: " + html);
+	assert(html.includes("OLEARY, Barry Kevin"), "holder missing");
+	assert(dw._formatLeaseTooltip({ "Permit number": "<x" }).includes("&lt;x"), "not escaped");
 });
 
 t("_formatShaftTooltip headlines the opening type; drops 'Unknown'; escapes", () => {

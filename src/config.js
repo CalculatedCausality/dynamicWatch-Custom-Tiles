@@ -124,6 +124,8 @@ export const CFG = {
 	LAYER_NATIONAL_PARKS: "National Parks",
 	LAYER_HIST_MINES: "Historic Mines",
 	LAYER_MINE_SHAFTS: "Mine Shafts",
+	LAYER_MINE_LEASES: "Historic Mining Leases",
+	LAYER_HIST_MAPS: "Historic Map Sheets",
 	LAYER_TOPO:    "QLD Topo",
 	LAYER_INTVL_GLOBAL: "INTVL Global Map",
 	LAYER_GEOCACHING: "Geocaches",
@@ -305,6 +307,30 @@ export const CFG = {
 	QLD_SHAFTS_LAYER_IDS: "45,75,65",
 	QLD_SHAFTS_HOVER_MIN_ZOOM: 11,
 
+	// Historic mining title footprints (MinesPermitsHistoric). Catches
+	// small/old sites the shaft inventory misses — an old lease boundary
+	// says "mining happened here". Layer 170 = Historical ML extent
+	// (mining leases), 155 = Historical MC extent (mining claims), 135 =
+	// Historical MDL extent (mineral development licences). Polygons.
+	QLD_LEASES_SERVICE:
+		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+		"Economy/MinesPermitsHistoric/MapServer",
+	QLD_LEASES_LAYER_IDS: "170,155,135",
+	QLD_LEASES_HOVER_MIN_ZOOM: 11,
+
+	// Historical printed map sheets index (parish/town/topographic/
+	// exploration/… scans, 1860s-2012). Footprint overlay + click lists
+	// the sheets covering a point, each with a scan link; a scan can be
+	// superimposed and rubber-sheeted onto the live map. All ~50 series.
+	QLD_HIST_MAPS_SERVICE:
+		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+		"Imagery/HistoricalPrintedMapExtents/MapServer",
+	QLD_HIST_MAPS_LAYER_IDS:
+		"100,101,102,103,104,105,106,107,108,200,201,202,300,301,302,303,304," +
+		"400,401,402,500,501,502,503,504,505,506,507,508,600,601,602,603,604,605," +
+		"700,701,702,703,704,705,800,801,802,803,804,900,901,902,903,904,905,906",
+	QLD_HIST_MAPS_MIN_ZOOM: 9,
+
 	// OpenInfraMap public power vector-tile pyramid (MVT/pbf). Global,
 	// CDN-served, derived from OSM — far more reliable than hitting raw
 	// Overpass. Layers per tile: power_line, power_substation(_point),
@@ -381,7 +407,11 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Mining",
-		names:  [CFG.LAYER_MINE_SHAFTS, CFG.LAYER_HIST_MINES],
+		names:  [CFG.LAYER_MINE_SHAFTS, CFG.LAYER_HIST_MINES, CFG.LAYER_MINE_LEASES],
+	},
+	{
+		header: "Reference",
+		names:  [CFG.LAYER_HIST_MAPS],
 	},
 	{
 		header: "Live data",

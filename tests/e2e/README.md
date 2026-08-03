@@ -173,6 +173,21 @@ Each run writes:
 
 `test-results/` is gitignored.
 
+### `verify-histmap-overlay.mjs` — Historic Map Sheets + georectifier
+
+```bash
+npm run e2e:histmap
+```
+
+Enables the **Historic Map Sheets** layer over the Gympie goldfield, asserts
+the footprint index `/export` tiles load, then triggers the "Overlay ▦"
+action and asserts the scanned map superimposes as a distortable image —
+a CSS `matrix3d` transform, four corner handles, and the floating control.
+Confirms it **re-warps on zoom** and **re-warps when a corner moves** (the
+corner is driven through the map API — synthetic Leaflet marker mouse-drag
+is unreliable in automation). Panning deliberately does *not* change the
+matrix (Leaflet translates the pane), so zoom is the map-driven signal.
+
 ### Vexcel Aerial suite
 
 ```bash

@@ -55,6 +55,11 @@ import {
 } from "../providers/openinframap.js";
 import { createQldEnvironmentProviders } from "../providers/qld-environment.js";
 import { createQldMiningProviders } from "../providers/qld-mining.js";
+import {
+	HistoricalMapsIndexProvider,
+	fetchHistMapSheets,
+	_histMapsSectionHtml,
+} from "../providers/qld-historical-maps.js";
 import { AppleTokenManager, QldTokenManager } from "../tokens.js";
 import { gmJsonGet } from "../utils/http.js";
 import { _escHtml } from "../utils/html.js";
@@ -75,7 +80,7 @@ const pageWin = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
  */
 const { QpwsLayerProvider, NationalParksLayerProvider } =
 	createQldEnvironmentProviders({ makeHoverIdentify, gmJsonGet });
-const { HistoricMinesLayerProvider, MineShaftsLayerProvider } =
+const { HistoricMinesLayerProvider, MineShaftsLayerProvider, HistoricLeasesLayerProvider } =
 	createQldMiningProviders({ makeHoverIdentify });
 
 /* -- Application ------------------------------------------------------- */
@@ -298,6 +303,8 @@ export class CustomTilesApp {
 				new NationalParksLayerProvider());
 			addOverlay(CFG.LAYER_MINE_SHAFTS, new MineShaftsLayerProvider());
 			addOverlay(CFG.LAYER_HIST_MINES, new HistoricMinesLayerProvider());
+			addOverlay(CFG.LAYER_MINE_LEASES, new HistoricLeasesLayerProvider());
+			addOverlay(CFG.LAYER_HIST_MAPS, new HistoricalMapsIndexProvider());
 			addOverlay(CFG.LAYER_INTVL_GLOBAL,
 				new IntvlGlobalTilesLayerProvider());
 
@@ -780,6 +787,19 @@ export class CustomTilesApp {
 					(type ? _escHtml(type) : ""));
 			});
 		}
+
+		// HISTORIC MAP SHEETS — list scanned parish/town/topographic sheets
+		// covering this point, each with a link to the scan and an
+		// "Overlay ▦" action that superimposes + rubber-sheets it.
+		const histMaps = this.layers[CFG.LAYER_HIST_MAPS];
+		if (histMaps && map.hasLayer(histMaps) &&
+			map.getZoom() >= CFG.QLD_HIST_MAPS_MIN_ZOOM) {
+			fetchHistMapSheets(map, latlng, (sheets) => {
+				if (!isCurrent() || !sheets.length) return;
+				const html = _histMapsSectionHtml(sheets);
+				if (html) section("dw-popup-ident-histmaps", html);
+			});
+		}
 	}
 
 	_injectGroupHeaders(ctrl) {
@@ -1063,6 +1083,19 @@ export class CustomTilesApp {
 			".popup-on-location .dw-popup-ident b { font-weight: 700; }",
 			".popup-on-location .dw-popup-ident .dw-cad-sub { color: #6b7280; font-size: 11px; }",
 			".popup-on-location .dw-popup-ident .dw-cad-link { font-weight: 600; }",
+			// Historic map sheets: popup list + the distortable-overlay
+			// corner handles and floating control.
+			".dw-histmap-list .dw-histmap-hd { font-weight: 700; margin-bottom: 4px; }",
+			".dw-histmap-row { margin: 4px 0; }",
+			".dw-histmap-row-a a { font-weight: 600; }",
+			".dw-histmap-handle { width: 16px; height: 16px; margin: -8px 0 0 -8px; background: #fff; border: 2px solid #dc2626; border-radius: 50%; box-shadow: 0 1px 4px rgba(0,0,0,.5); cursor: move; }",
+			".dw-histmap-ctl { position: absolute; top: 90px; right: 12px; z-index: 1000; background: rgba(255,255,255,.96); border: 1px solid #999; border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.3); max-width: 240px; }",
+			".dw-histmap-ctl .dw-histmap-ttl { font-weight: 700; margin-bottom: 6px; }",
+			".dw-histmap-ctl label { display: block; margin: 4px 0; }",
+			".dw-histmap-ctl input[type=range] { width: 100%; }",
+			".dw-histmap-ctl .dw-histmap-msg { color: #b91c1c; min-height: 0; }",
+			".dw-histmap-ctl .dw-histmap-btns { display: flex; gap: 6px; margin-top: 6px; }",
+			".dw-histmap-ctl button { flex: 1; padding: 5px 6px; font-size: 12px; cursor: pointer; }",
 			// 3D toggle in the planner action row. Matches the native
 			// btn-default look; `.active` darkens it the same way
 			// Bootstrap 3 does for pressed buttons.

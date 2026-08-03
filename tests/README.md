@@ -13,14 +13,14 @@ bash tests/run.sh --ci   # plain text, log-scrapable, same exit code
 Exits with the sum of failures. Run individual suites:
 
 ```bash
-node tests/unit.mjs        # 108 tests, no network, ~200 ms
+node tests/unit.mjs        # 111 tests, no network, ~200 ms
 bash tests/smoke.sh         # 34 tests + 7 skips, ~15 s
 node tests/shape.mjs        # 42 tests + 2 skips, ~15 s
 ```
 
 ## Three layers, increasing depth
 
-### `unit.mjs` — pure helpers (108 tests, no network)
+### `unit.mjs` — pure helpers (111 tests, no network)
 
 Loads the bundled userscript via `_loader.mjs` in a `vm.createContext`
 sandbox (Leaflet + GM + browser globals stubbed; boot disabled by test
