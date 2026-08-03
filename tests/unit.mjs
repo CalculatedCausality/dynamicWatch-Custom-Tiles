@@ -1097,11 +1097,33 @@ t("advertised QLD Relief and National Parks overlays are grouped", () => {
 	assert(names.has(dw.CFG.LAYER_NATIONAL_PARKS), "National Parks missing from overlay groups");
 });
 
-t("Historic Mines overlay is registered in a Mining group", () => {
+t("Historic Mines + Mine Shafts overlays are registered in a Mining group", () => {
 	eq(dw.CFG.LAYER_HIST_MINES, "Historic Mines");
+	eq(dw.CFG.LAYER_MINE_SHAFTS, "Mine Shafts");
 	const mining = dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Mining");
 	assert(mining, "Mining group missing");
 	assert(mining.names.includes(dw.CFG.LAYER_HIST_MINES), "Historic Mines not in Mining group");
+	assert(mining.names.includes(dw.CFG.LAYER_MINE_SHAFTS), "Mine Shafts not in Mining group");
+});
+
+t("_formatShaftTooltip headlines the opening type; drops 'Unknown'; escapes", () => {
+	// Real /identify shape for layer 45 (Mine openings): alias keys.
+	const html = dw._formatShaftTooltip({
+		"Type": "Vertical shaft", "Mine Name": "Unknown ",
+		"Commodity": "gold", "Remediation Status": "Remediated",
+	});
+	assert(html.includes("<b>Vertical shaft</b>"), "type not headlined: " + html);
+	assert(html.includes("gold"), "missing commodity");
+	assert(!html.includes("Unknown"), "'Unknown' mine name should be dropped: " + html);
+	assert(html.includes("Remediated"), "missing remediation status");
+	// Shallow-working/pit layers key differently
+	const alt = dw._formatShaftTooltip({ "Feature Sub Type": "shallow pit", "Feature Remediated": "None" });
+	assert(alt.includes("shallow pit"), "sub-type not read: " + alt);
+	// Named mine is kept
+	assert(dw._formatShaftTooltip({ "Type": "Adit", "Mine Name": "Day Dawn" }).includes("Day Dawn"),
+		"named mine dropped");
+	// escaping
+	assert(dw._formatShaftTooltip({ "Type": "<b>x" }).includes("&lt;b&gt;x"), "type not escaped");
 });
 
 t("_formatMineTooltip renders name, commodity/status, locality; escapes", () => {

@@ -123,6 +123,7 @@ export const CFG = {
 	LAYER_RELIEF:  "QLD Relief",
 	LAYER_NATIONAL_PARKS: "National Parks",
 	LAYER_HIST_MINES: "Historic Mines",
+	LAYER_MINE_SHAFTS: "Mine Shafts",
 	LAYER_TOPO:    "QLD Topo",
 	LAYER_INTVL_GLOBAL: "INTVL Global Map",
 	LAYER_GEOCACHING: "Geocaches",
@@ -293,6 +294,17 @@ export const CFG = {
 	QLD_MINING_LAYER_IDS: "16,102",
 	QLD_MINING_HOVER_MIN_ZOOM: 10,
 
+	// GSQ Abandoned Mine Lands — the shaft-precise dataset. Note the
+	// public service is plain "AbandonedMines"; the "_GeoResGlobePublic"
+	// sibling is token-gated (499). Layer 45 = "Mine openings" (~10.4k
+	// shafts/adits with feature_type "Vertical shaft" + remediation
+	// status), 75 = "Shallow working (point)", 65 = "Pit (point)".
+	QLD_SHAFTS_SERVICE:
+		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+		"GeoscientificInformation/AbandonedMines/MapServer",
+	QLD_SHAFTS_LAYER_IDS: "45,75,65",
+	QLD_SHAFTS_HOVER_MIN_ZOOM: 11,
+
 	// OpenInfraMap public power vector-tile pyramid (MVT/pbf). Global,
 	// CDN-served, derived from OSM — far more reliable than hitting raw
 	// Overpass. Layers per tile: power_line, power_substation(_point),
@@ -369,7 +381,7 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Mining",
-		names:  [CFG.LAYER_HIST_MINES],
+		names:  [CFG.LAYER_MINE_SHAFTS, CFG.LAYER_HIST_MINES],
 	},
 	{
 		header: "Live data",

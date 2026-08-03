@@ -75,7 +75,7 @@ const pageWin = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
  */
 const { QpwsLayerProvider, NationalParksLayerProvider } =
 	createQldEnvironmentProviders({ makeHoverIdentify, gmJsonGet });
-const { HistoricMinesLayerProvider } =
+const { HistoricMinesLayerProvider, MineShaftsLayerProvider } =
 	createQldMiningProviders({ makeHoverIdentify });
 
 /* -- Application ------------------------------------------------------- */
@@ -296,6 +296,7 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_RELIEF,     new QldReliefLayerProvider());
 			addOverlay(CFG.LAYER_NATIONAL_PARKS,
 				new NationalParksLayerProvider());
+			addOverlay(CFG.LAYER_MINE_SHAFTS, new MineShaftsLayerProvider());
 			addOverlay(CFG.LAYER_HIST_MINES, new HistoricMinesLayerProvider());
 			addOverlay(CFG.LAYER_INTVL_GLOBAL,
 				new IntvlGlobalTilesLayerProvider());

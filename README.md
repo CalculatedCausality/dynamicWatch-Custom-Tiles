@@ -82,6 +82,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 
 | Layer | Notes |
 |---|---|
+| **Mine Shafts** | Queensland's abandoned-mine physical features — ~10,400 mapped **mine openings** (shafts/adits), plus shallow workings and pits, from the GSQ Abandoned Mine Lands program. Hover a feature for its type (e.g. "Vertical shaft"), mine name, commodity, and remediation status. Best layer for pinpointing actual shafts |
 | **Historic Mines** | Queensland's historical mine sites — ~15,000 "historical workings" plus historical coal workings, from the Geological Survey of Queensland (GeoResGlobe). Hover a site for its name, commodity, mine status, and locality |
 
 **Heatmaps**
@@ -109,6 +110,7 @@ A few layers show inline tooltips on hover:
 
 - **Australia Cadastre** — lot/plan, name, address, tenure, area, locality (any state/territory), plus OnTheHouse property history (last sale, estimate, sales timeline) auto-loaded inline where a street address resolves
 - **QPWS Estate** — protected-area name and management type
+- **Mine Shafts** — opening type (e.g. "Vertical shaft"), mine name, commodity, and remediation status
 - **Historic Mines** — mine site name, commodity, mine status, and locality
 - **INTVL Global Map** — territory size, the owner's colour swatch, and the precise recording time decoded from the activity's cuid
 
@@ -221,7 +223,7 @@ bash tests/run.sh        # run suites against current bundle
 bash tests/run.sh --ci   # plain text output
 ```
 
-- **`unit.mjs`** (107 tests, no network, ~200 ms) — pure helpers: tile geometry, MVT/protobuf decode, Cadastre formatters, OnTheHouse URL builders, INTVL date utilities, layer-provider factories, and layer-group registration. Loaded into a sandboxed `vm.createContext` via [`_loader.mjs`](tests/_loader.mjs) so the production code itself is what gets exercised.
+- **`unit.mjs`** (108 tests, no network, ~200 ms) — pure helpers: tile geometry, MVT/protobuf decode, Cadastre formatters, OnTheHouse URL builders, INTVL date utilities, layer-provider factories, and layer-group registration. Loaded into a sandboxed `vm.createContext` via [`_loader.mjs`](tests/_loader.mjs) so the production code itself is what gets exercised.
 - **`smoke.sh`** (34 tests + 7 skips, ~15 s) — HTTP probe every public layer endpoint over Brisbane CBD: HTTP 200 + content-type + minimum body size. Mapbox Terrain-DEM is skipped unless `MAPBOX_TOKEN` is set.
 - **`shape.mjs`** (42 tests + 2 skips, ~15 s) — deep structural validation: PNG/JPEG magic-byte sniff, PBF decoded via the userscript's own `mvtDecode`, JSON field walks asserting every field the script reads. Also runs the full QLD CSRF token bootstrap, Apple DuckDuckGo → bootstrap chain, and the Esri Wayback catalog → release → tile pipeline end-to-end. Mapbox terrain probes are opt-in via `MAPBOX_TOKEN`.
 - **`e2e/run-3d-asserts.mjs`** (8 tests, ~60 s) — Playwright-driven assertions on a real Chromium against a saved plan. Covers 3D enable, marker reprojection under rotation, waypoint drag, the rapid-toggle stress path, heatmap persistence, overlay-above-base layer order, and the 3D → 2D → 3D cycle. Needs `npm install` + `npm run e2e:install` + `npm run e2e:auth` once; see [`tests/e2e/README.md`](tests/e2e/README.md).

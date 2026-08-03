@@ -147,6 +147,7 @@
     LAYER_RELIEF: "QLD Relief",
     LAYER_NATIONAL_PARKS: "National Parks",
     LAYER_HIST_MINES: "Historic Mines",
+    LAYER_MINE_SHAFTS: "Mine Shafts",
     LAYER_TOPO: "QLD Topo",
     LAYER_INTVL_GLOBAL: "INTVL Global Map",
     LAYER_GEOCACHING: "Geocaches",
@@ -284,6 +285,14 @@
     QLD_MINING_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/GeoscientificInformation/MiningResources/MapServer",
     QLD_MINING_LAYER_IDS: "16,102",
     QLD_MINING_HOVER_MIN_ZOOM: 10,
+    // GSQ Abandoned Mine Lands — the shaft-precise dataset. Note the
+    // public service is plain "AbandonedMines"; the "_GeoResGlobePublic"
+    // sibling is token-gated (499). Layer 45 = "Mine openings" (~10.4k
+    // shafts/adits with feature_type "Vertical shaft" + remediation
+    // status), 75 = "Shallow working (point)", 65 = "Pit (point)".
+    QLD_SHAFTS_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/GeoscientificInformation/AbandonedMines/MapServer",
+    QLD_SHAFTS_LAYER_IDS: "45,75,65",
+    QLD_SHAFTS_HOVER_MIN_ZOOM: 11,
     // OpenInfraMap public power vector-tile pyramid (MVT/pbf). Global,
     // CDN-served, derived from OSM — far more reliable than hitting raw
     // Overpass. Layers per tile: power_line, power_substation(_point),
@@ -344,7 +353,7 @@
     },
     {
       header: "Mining",
-      names: [CFG.LAYER_HIST_MINES]
+      names: [CFG.LAYER_MINE_SHAFTS, CFG.LAYER_HIST_MINES]
     },
     {
       header: "Live data",
@@ -10507,7 +10516,45 @@
     if (kind) lines.push(esc`<span class="dw-cad-sub">${kind}</span>`);
     return lines.join("<br>");
   }
+  function _formatShaftTooltip(attrs) {
+    const a = attrs || {};
+    const type = _pickAny(a, ["Type", "feature_type", "Feature Sub Type", "ftr_sub"]);
+    const mine = _pickAny(a, ["Mine Name", "mine_name"]);
+    const commodity = _pickAny(a, ["Commodity", "commodity"]);
+    const rem = _pickAny(a, ["Remediation Status", "rem_status", "Feature Remediated", "ftr_rehab"]);
+    const lines = [esc`<b>${type || "Mine opening"}</b>`];
+    const named = mine && mine.toLowerCase() !== "unknown" ? mine : "";
+    const bits = [named, commodity].filter(Boolean);
+    if (bits.length) lines.push(_escHtml(bits.join(" · ")));
+    if (rem) lines.push(esc`<span class="dw-cad-sub">${rem}</span>`);
+    return lines.join("<br>");
+  }
   function createQldMiningProviders({ makeHoverIdentify: makeHoverIdentify2 }) {
+    const installShaftsHover = makeHoverIdentify2({
+      baseUrl: CFG.QLD_SHAFTS_SERVICE,
+      layers: "all:" + CFG.QLD_SHAFTS_LAYER_IDS,
+      tolerance: 6,
+      minZoom: CFG.QLD_SHAFTS_HOVER_MIN_ZOOM,
+      tipClass: "dw-qpws-tip",
+      formatTooltip: _formatShaftTooltip
+    });
+    const MineShaftsLayerProvider2 = arcgisExportProvider({
+      baseUrl: CFG.QLD_SHAFTS_SERVICE,
+      showLayers: CFG.QLD_SHAFTS_LAYER_IDS,
+      pane: "dwShaftsPane",
+      paneZIndex: 400,
+      opacity: 0.95,
+      minZoom: 9,
+      maxZoom: 25,
+      attribution: 'Abandoned mines &copy; <a href="https://georesglobe.information.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (Resources)</a>',
+      onAdd: (layer, map) => installShaftsHover(layer, map),
+      onRemove: (layer) => {
+        if (layer._dwHoverOff) {
+          layer._dwHoverOff();
+          layer._dwHoverOff = null;
+        }
+      }
+    });
     const installMinesHover = makeHoverIdentify2({
       baseUrl: CFG.QLD_MINING_SERVICE,
       layers: "all:" + CFG.QLD_MINING_LAYER_IDS,
@@ -10534,7 +10581,7 @@
         }
       }
     });
-    return { HistoricMinesLayerProvider: HistoricMinesLayerProvider2 };
+    return { HistoricMinesLayerProvider: HistoricMinesLayerProvider2, MineShaftsLayerProvider: MineShaftsLayerProvider2 };
   }
 
   // src/tokens.js
@@ -10820,7 +10867,7 @@
   // src/app/custom-tiles-app.js
   var pageWin3 = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   var { QpwsLayerProvider, NationalParksLayerProvider } = createQldEnvironmentProviders({ makeHoverIdentify, gmJsonGet });
-  var { HistoricMinesLayerProvider } = createQldMiningProviders({ makeHoverIdentify });
+  var { HistoricMinesLayerProvider, MineShaftsLayerProvider } = createQldMiningProviders({ makeHoverIdentify });
   var CustomTilesApp = class {
     constructor() {
       this.qldToken = new QldTokenManager({
@@ -11003,6 +11050,7 @@
           CFG.LAYER_NATIONAL_PARKS,
           new NationalParksLayerProvider()
         );
+        addOverlay(CFG.LAYER_MINE_SHAFTS, new MineShaftsLayerProvider());
         addOverlay(CFG.LAYER_HIST_MINES, new HistoricMinesLayerProvider());
         addOverlay(
           CFG.LAYER_INTVL_GLOBAL,
@@ -11860,6 +11908,7 @@
         _parseAuStreetAddress,
         _pickJurisdiction,
         _formatMineTooltip,
+        _formatShaftTooltip,
         _deviAppUrl,
         _fmtSccDate,
         _formatSccTooltip,

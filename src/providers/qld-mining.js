@@ -42,7 +42,50 @@ export function _formatMineTooltip(attrs) {
 	return lines.join("<br>");
 }
 
+// Abandoned-mine physical features (shafts/adits/pits). Layer 45 keys by
+// "Type"/"Mine Name"/"Commodity"/"Remediation Status"; the shallow-working
+// and pit layers key by "Feature Sub Type"/"Feature Remediated" — read both.
+export function _formatShaftTooltip(attrs) {
+	const a = attrs || {};
+	const type = _pickAny(a, ["Type", "feature_type", "Feature Sub Type", "ftr_sub"]);
+	const mine = _pickAny(a, ["Mine Name", "mine_name"]);
+	const commodity = _pickAny(a, ["Commodity", "commodity"]);
+	const rem = _pickAny(a, ["Remediation Status", "rem_status", "Feature Remediated", "ftr_rehab"]);
+
+	const lines = [esc`<b>${type || "Mine opening"}</b>`];
+	// mine_name is frequently "Unknown" — drop it rather than show noise.
+	const named = mine && mine.toLowerCase() !== "unknown" ? mine : "";
+	const bits = [named, commodity].filter(Boolean);
+	if (bits.length) lines.push(_escHtml(bits.join(" · ")));
+	if (rem) lines.push(esc`<span class="dw-cad-sub">${rem}</span>`);
+	return lines.join("<br>");
+}
+
 export function createQldMiningProviders({ makeHoverIdentify }) {
+	const installShaftsHover = makeHoverIdentify({
+		baseUrl:    CFG.QLD_SHAFTS_SERVICE,
+		layers:     "all:" + CFG.QLD_SHAFTS_LAYER_IDS,
+		tolerance:  6,
+		minZoom:    CFG.QLD_SHAFTS_HOVER_MIN_ZOOM,
+		tipClass:   "dw-qpws-tip",
+		formatTooltip: _formatShaftTooltip,
+	});
+
+	const MineShaftsLayerProvider = arcgisExportProvider({
+		baseUrl: CFG.QLD_SHAFTS_SERVICE,
+		showLayers: CFG.QLD_SHAFTS_LAYER_IDS,
+		pane: "dwShaftsPane", paneZIndex: 400,
+		opacity: 0.95, minZoom: 9, maxZoom: 25,
+		attribution:
+			'Abandoned mines &copy; <a href="https://georesglobe.information.qld.gov.au/" ' +
+			'target="_blank" rel="noreferrer">State of Queensland (Resources)</a>',
+		onAdd: (layer, map) => installShaftsHover(layer, map),
+		onRemove: (layer) => {
+			if (layer._dwHoverOff) { layer._dwHoverOff(); layer._dwHoverOff = null; }
+		},
+	});
+
+
 	const installMinesHover = makeHoverIdentify({
 		baseUrl:    CFG.QLD_MINING_SERVICE,
 		layers:     "all:" + CFG.QLD_MINING_LAYER_IDS,
@@ -66,5 +109,5 @@ export function createQldMiningProviders({ makeHoverIdentify }) {
 		},
 	});
 
-	return { HistoricMinesLayerProvider };
+	return { HistoricMinesLayerProvider, MineShaftsLayerProvider };
 }

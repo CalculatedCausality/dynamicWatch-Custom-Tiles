@@ -18,7 +18,7 @@ import {
 	_slugify,
 } from './providers/qld-cadastre.js';
 import { _parseAuStreetAddress, _pickJurisdiction } from './providers/cadastre-au.js';
-import { _formatMineTooltip } from './providers/qld-mining.js';
+import { _formatMineTooltip, _formatShaftTooltip } from './providers/qld-mining.js';
 import { oimIcon } from './providers/openinframap.js';
 import {
 	_vexcelIsCredString,
@@ -114,7 +114,7 @@ export function bootUserscript() {
 			_cadVal, _escHtml, esc, _safeColor, _fmtPrice, _fmtDate,
 			_slugify, _othStreetTypeSlug, _othCanonicalUrlFromLocation,
 			_formatCadastreTooltip, _formatAddressLine,
-			_parseAuStreetAddress, _pickJurisdiction, _formatMineTooltip,
+			_parseAuStreetAddress, _pickJurisdiction, _formatMineTooltip, _formatShaftTooltip,
 			_deviAppUrl, _fmtSccDate, _formatSccTooltip, _formatSccPopup,
 			_sccDefaultState, _sccLoadState,
 			_deviDetailUrl, _parseSccDetailHtml, _renderSccDetail,
