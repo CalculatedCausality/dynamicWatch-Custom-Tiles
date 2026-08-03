@@ -788,11 +788,12 @@ export class CustomTilesApp {
 			});
 		}
 
-		// HISTORIC MAP SHEETS — list scanned parish/town/topographic sheets
-		// covering this point, each with a link to the scan and an
-		// "Overlay ▦" action that superimposes + rubber-sheets it.
+		// HISTORIC MAP SHEETS — touch only; on desktop the layer shows a
+		// floating hover panel instead (so each device gets one surface, not
+		// two). Lists the scanned sheets covering this point, each with a
+		// scan link and an "Overlay ▦" action that superimposes + warps it.
 		const histMaps = this.layers[CFG.LAYER_HIST_MAPS];
-		if (histMaps && map.hasLayer(histMaps) &&
+		if (noHover && histMaps && map.hasLayer(histMaps) &&
 			map.getZoom() >= CFG.QLD_HIST_MAPS_MIN_ZOOM) {
 			fetchHistMapSheets(map, latlng, (sheets) => {
 				if (!isCurrent() || !sheets.length) return;

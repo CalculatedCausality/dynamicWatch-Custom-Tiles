@@ -273,6 +273,11 @@ export function _ensureHistMapHook(map) {
  * and hides shortly after leaving both it and the footprints.
  */
 function installHistMapHover(layer, map) {
+	// Hover is a desktop interaction. On touch there is no hover — pans fire
+	// synthetic mousemoves that would spuriously open the panel, and the
+	// tap/long-press location popup already carries the sheet list — so skip
+	// the floating panel entirely on touch devices.
+	if (L.Browser.mobile || (window.matchMedia && window.matchMedia("(hover: none)").matches)) return;
 	const container = map.getContainer();
 	let panel = null, hideTimer = null, debounce = null, gen = 0;
 	let lastKey = "";     // signature of the currently-shown sheet set

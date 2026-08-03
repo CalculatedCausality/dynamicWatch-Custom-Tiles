@@ -10851,6 +10851,7 @@
     }, true);
   }
   function installHistMapHover(layer, map) {
+    if (L.Browser.mobile || window.matchMedia && window.matchMedia("(hover: none)").matches) return;
     const container = map.getContainer();
     let panel = null, hideTimer = null, debounce = null, gen = 0;
     let lastKey = "";
@@ -11793,7 +11794,7 @@
         });
       }
       const histMaps = this.layers[CFG.LAYER_HIST_MAPS];
-      if (histMaps && map.hasLayer(histMaps) && map.getZoom() >= CFG.QLD_HIST_MAPS_MIN_ZOOM) {
+      if (noHover && histMaps && map.hasLayer(histMaps) && map.getZoom() >= CFG.QLD_HIST_MAPS_MIN_ZOOM) {
         fetchHistMapSheets(map, latlng, (sheets) => {
           if (!isCurrent() || !sheets.length) return;
           const html = _histMapsSectionHtml(sheets);
