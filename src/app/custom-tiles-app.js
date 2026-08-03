@@ -1088,6 +1088,14 @@ export class CustomTilesApp {
 			".dw-histmap-list .dw-histmap-hd { font-weight: 700; margin-bottom: 4px; }",
 			".dw-histmap-row { margin: 4px 0; }",
 			".dw-histmap-row-a a { font-weight: 600; }",
+			// Interactive hover panel: hovering the footprints lists the
+			// sheets there; the pointer can move into it to click Overlay.
+			".dw-histmap-hover { position: absolute; z-index: 1000; max-width: 300px; max-height: 45%; overflow-y: auto; background: rgba(255,255,255,.98); border: 1px solid #999; border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45; box-shadow: 0 2px 10px rgba(0,0,0,.3); }",
+			".dw-histmap-hover .dw-histmap-hint { color: #6b7280; font-size: 10.5px; margin-bottom: 4px; }",
+			".dw-histmap-hover .dw-histmap-hd { font-weight: 700; margin-bottom: 4px; }",
+			".dw-histmap-hover .dw-histmap-row { margin: 5px 0; padding-bottom: 4px; border-bottom: 1px solid #f0f0f0; }",
+			".dw-histmap-hover a { font-weight: 600; }",
+			".dw-histmap-hover .dw-cad-sub { color: #6b7280; }",
 			".dw-histmap-handle { width: 16px; height: 16px; margin: -8px 0 0 -8px; background: #fff; border: 2px solid #dc2626; border-radius: 50%; box-shadow: 0 1px 4px rgba(0,0,0,.5); cursor: move; }",
 			".dw-histmap-ctl { position: absolute; top: 90px; right: 12px; z-index: 1000; background: rgba(255,255,255,.96); border: 1px solid #999; border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.3); max-width: 240px; }",
 			".dw-histmap-ctl .dw-histmap-ttl { font-weight: 700; margin-bottom: 6px; }",

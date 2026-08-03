@@ -51,18 +51,23 @@ const on = await page.evaluate(() => {
 if (!on) { console.error("Historic Map Sheets layer missing"); await browser.close(); process.exit(1); }
 await page.waitForTimeout(3500);
 
-// Trigger the overlay action the way the popup does: an .dw-histmap-overlay-link.
-await page.evaluate(() => {
-	const a = document.createElement("a");
-	a.className = "dw-histmap-overlay-link";
-	a.href = "#";
-	a.dataset.url = "https://apps.information.qld.gov.au/data/v2/HistoricalMaps/StaticMap/topographic/topo-map-6chain-line-colour-gympie-sh8-1909/original";
-	a.dataset.title = "Gympie and Environs sheet 8 (1909)";
-	// Small box centred in-view so all four corner handles are on-screen.
-	a.dataset.n = "-26.183"; a.dataset.s = "-26.197"; a.dataset.w = "152.652"; a.dataset.e = "152.668";
-	document.body.appendChild(a);
-	a.click();
+// REAL discovery path: HOVER the footprints → an interactive panel lists
+// the sheets there (a plain map click would just drop a waypoint). Move
+// into the panel and click "Overlay ▦".
+const c = await page.evaluate(() => {
+	const r = window._dwLayerCtrl._map.getContainer().getBoundingClientRect();
+	return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
 });
+// Jiggle over the footprint to fire Leaflet mousemove → cursor-identify.
+for (let i = 0; i < 4; i++) { await page.mouse.move(c.x + i, c.y + i); await page.waitForTimeout(120); }
+const sectionShown = await page.waitForSelector(".dw-histmap-hover .dw-histmap-overlay-link",
+	{ timeout: 30_000 }).then(() => true).catch(() => false);
+console.log(`  hover panel lists sheets with Overlay links: ${sectionShown}`);
+
+if (sectionShown) {
+	await page.hover(".dw-histmap-hover .dw-histmap-overlay-link");
+	await page.click(".dw-histmap-hover .dw-histmap-overlay-link");
+}
 
 // The scan img must appear, load, and receive a matrix3d transform; 4 corner
 // handles + the control must exist.
@@ -114,12 +119,13 @@ await page.screenshot({ path: shot });
 
 console.log("\n=== Historic Map Sheets verification ===");
 console.log(`  index footprint tiles (export 200): ${indexTiles}`);
+console.log(`  hover panel lists sheets w/ Overlay link: ${sectionShown}`);
 console.log(`  scan superimposed + warped (matrix3d, 4 handles, control): ${warped}`);
 console.log(`  re-warps on zoom: ${zoomReWarped}`);
 console.log(`  re-warps on corner drag (handle found: ${cornerDrag.found}): ${cornerDrag.changed}`);
 console.log(`  page errors: ${errors.length}${errors.length ? " -> " + errors.slice(0, 2).join(" | ") : ""}`);
 console.log(`  screenshot: ${shot}`);
-const ok = indexTiles > 0 && warped && reWarped && errors.length === 0;
+const ok = indexTiles > 0 && sectionShown && warped && reWarped && errors.length === 0;
 console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — historic map overlay ${ok ? "superimposes + rubber-sheets" : "did not fully verify"}`);
 await browser.close();
 process.exit(ok ? 0 : 1);

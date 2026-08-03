@@ -90,7 +90,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 
 | Layer | Notes |
 |---|---|
-| **Historic Map Sheets** | Footprint index of QLD's scanned historical maps — parish, town, topographic (incl. 1:4,752 goldfield sheets that plot individual shafts), and exploration series, 1860s–2012. Click the map to list the sheets covering that spot with a link to each scan; **"Overlay ▦"** superimposes a scan on the live map with four **draggable corners** so you can rubber-sheet it into alignment and read old shaft/mine symbols against real-world positions |
+| **Historic Map Sheets** | Footprint index of QLD's scanned historical maps — parish, town, topographic (incl. 1:4,752 goldfield sheets that plot individual shafts), and exploration series, 1860s–2012. **Hover** a footprint and a panel lists the sheets there, each with a link to the scan; move into the panel and hit **"Overlay ▦"** to superimpose that scan on the live map with four **draggable corners**, so you can rubber-sheet it into alignment and read old shaft/mine symbols against real-world positions |
 
 **Heatmaps**
 

@@ -20,7 +20,9 @@ export function arcgisIdentify(map, latlng, opts, cb) {
 		`&returnGeometry=false&f=json`;
 	gmJsonGet(url, (err, data) => {
 		if (err) { cb(err, null); return; }
-		cb(null, (data.results || [])[0] || null);
+		// Third arg = the full response, so callers that need every result
+		// (not just the first feature) can read data.results.
+		cb(null, (data.results || [])[0] || null, data);
 	});
 }
 

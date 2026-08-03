@@ -247,7 +247,69 @@ export function _ensureHistMapHook(map) {
 			title: a.dataset.title || "",
 			corners: [[n, w], [n, ea], [s, ea], [s, w]], // TL,TR,BR,BL
 		});
+		// Dismiss the hover panel once a sheet is chosen.
+		const panel = a.closest(".dw-histmap-hover");
+		if (panel) panel.style.display = "none";
 	}, true);
+}
+
+/* -- Hover panel ------------------------------------------------------
+ * A plain map click drops a route waypoint, so the sheet chooser can't
+ * live in a click popup. Instead: hovering the footprints cursor-identifies
+ * the sheets underneath and shows an INTERACTIVE panel (you can move into
+ * it to click "Overlay ▦"). The panel stays while the pointer is over it
+ * and hides shortly after leaving both it and the footprints.
+ */
+function installHistMapHover(layer, map) {
+	const container = map.getContainer();
+	let panel = null, hideTimer = null, debounce = null, gen = 0;
+
+	const scheduleHide = () => {
+		clearTimeout(hideTimer);
+		hideTimer = setTimeout(() => { if (panel) panel.style.display = "none"; }, 500);
+	};
+	const ensurePanel = () => {
+		if (panel) return panel;
+		panel = L.DomUtil.create("div", "dw-histmap-hover", container);
+		panel.style.display = "none";
+		L.DomEvent.disableClickPropagation(panel);
+		L.DomEvent.disableScrollPropagation(panel);
+		panel.addEventListener("mouseenter", () => clearTimeout(hideTimer));
+		panel.addEventListener("mouseleave", scheduleHide);
+		return panel;
+	};
+
+	const onMove = (e) => {
+		if (map.getZoom() < CFG.QLD_HIST_MAPS_MIN_ZOOM) { scheduleHide(); return; }
+		clearTimeout(debounce);
+		const pt = e.containerPoint, ll = e.latlng;
+		debounce = setTimeout(() => {
+			const my = ++gen;
+			fetchHistMapSheets(map, ll, (sheets) => {
+				if (my !== gen) return;
+				const html = _histMapsSectionHtml(sheets);
+				if (!html) { scheduleHide(); return; }
+				const p = ensurePanel();
+				p.innerHTML = `<div class="dw-histmap-hint">Hover in to open · drag corners to align</div>` + html;
+				p.style.display = "block";
+				clearTimeout(hideTimer);
+				const cw = container.clientWidth, ch = container.clientHeight;
+				let x = pt.x + 16, y = pt.y + 16;
+				if (x + p.offsetWidth > cw) x = Math.max(4, pt.x - p.offsetWidth - 16);
+				if (y + p.offsetHeight > ch) y = Math.max(4, ch - p.offsetHeight - 6);
+				p.style.left = x + "px"; p.style.top = y + "px";
+			});
+		}, 220);
+	};
+
+	map.on("mousemove", onMove);
+	map.on("mouseout", scheduleHide);
+	layer._dwHistHoverOff = () => {
+		clearTimeout(debounce); clearTimeout(hideTimer);
+		map.off("mousemove", onMove);
+		map.off("mouseout", scheduleHide);
+		if (panel) { panel.remove(); panel = null; }
+	};
 }
 
 export const HistoricalMapsIndexProvider = arcgisExportProvider({
@@ -258,5 +320,6 @@ export const HistoricalMapsIndexProvider = arcgisExportProvider({
 	attribution:
 		'Historical maps &copy; <a href="https://www.data.qld.gov.au/" ' +
 		'target="_blank" rel="noreferrer">State of Queensland (Resources)</a>',
-	onAdd: (layer, map) => _ensureHistMapHook(map),
+	onAdd: (layer, map) => { _ensureHistMapHook(map); installHistMapHover(layer, map); },
+	onRemove: (layer) => { if (layer._dwHistHoverOff) { layer._dwHistHoverOff(); layer._dwHistHoverOff = null; } },
 });
