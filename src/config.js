@@ -122,6 +122,7 @@ export const CFG = {
 	LAYER_QPWS:    "QPWS Estate",
 	LAYER_RELIEF:  "QLD Relief",
 	LAYER_NATIONAL_PARKS: "National Parks",
+	LAYER_HIST_MINES: "Historic Mines",
 	LAYER_TOPO:    "QLD Topo",
 	LAYER_INTVL_GLOBAL: "INTVL Global Map",
 	LAYER_GEOCACHING: "Geocaches",
@@ -282,6 +283,16 @@ export const CFG = {
 		"Environment/ParksTerrestrialProtectedAreas/MapServer",
 	QLD_QPWS_LAYER_IDS: "10,5,6,7,8,9",
 
+	// GSQ MiningResources (GeoResGlobe). Public, CORS-open, token-free —
+	// same host as the cadastre, so already in @connect. Layer 16 =
+	// "Historical workings" (~15k named old mine sites), 102 = "Historical
+	// coal workings". Point features with commodity/status/size attributes.
+	QLD_MINING_SERVICE:
+		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+		"GeoscientificInformation/MiningResources/MapServer",
+	QLD_MINING_LAYER_IDS: "16,102",
+	QLD_MINING_HOVER_MIN_ZOOM: 10,
+
 	// OpenInfraMap public power vector-tile pyramid (MVT/pbf). Global,
 	// CDN-served, derived from OSM — far more reliable than hitting raw
 	// Overpass. Layers per tile: power_line, power_substation(_point),
@@ -355,6 +366,10 @@ export const DW_OVERLAY_GROUPS = [
 	{
 		header: "Environment",
 		names:  [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS],
+	},
+	{
+		header: "Mining",
+		names:  [CFG.LAYER_HIST_MINES],
 	},
 	{
 		header: "Live data",

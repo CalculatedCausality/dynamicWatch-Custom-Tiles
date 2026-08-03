@@ -1097,6 +1097,35 @@ t("advertised QLD Relief and National Parks overlays are grouped", () => {
 	assert(names.has(dw.CFG.LAYER_NATIONAL_PARKS), "National Parks missing from overlay groups");
 });
 
+t("Historic Mines overlay is registered in a Mining group", () => {
+	eq(dw.CFG.LAYER_HIST_MINES, "Historic Mines");
+	const mining = dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Mining");
+	assert(mining, "Mining group missing");
+	assert(mining.names.includes(dw.CFG.LAYER_HIST_MINES), "Historic Mines not in Mining group");
+});
+
+t("_formatMineTooltip renders name, commodity/status, locality; escapes", () => {
+	// Real ArcGIS /identify shape: attributes keyed by alias, "Null" sentinels.
+	const html = dw._formatMineTooltip({
+		"Occurrence name": "BANTAM", "Main commodity": "GOLD",
+		"Mine status": "ABANDONED MINE", "Deposit size": "Small",
+		"site locality": "4KM NW OF CEMENT HILL", "Group name": "Null",
+		"Site type": "MINERAL OCCURRENCE",
+	});
+	assert(html.includes("BANTAM"), "missing name");
+	assert(html.includes("GOLD · ABANDONED MINE · Small"), "missing commodity/status/size line: " + html);
+	assert(html.includes("4KM NW OF CEMENT HILL"), "missing locality");
+	assert(html.includes("MINERAL OCCURRENCE"), "Group name 'Null' should fall through to Site type");
+	// Also accepts the raw GeoJSON field-name form
+	assert(dw._formatMineTooltip({ occur_name: "MORNING STAR" }).includes("MORNING STAR"),
+		"raw field-name form not read");
+	// null/"Null" sentinels and missing name are handled
+	eq(dw._formatMineTooltip({ "Occurrence name": null, "Mine status": "Null" }),
+		"<b>Historic mine</b>");
+	assert(dw._formatMineTooltip({ "Occurrence name": '<img src=x onerror=alert(1)>' })
+		.includes("&lt;img"), "occur_name not escaped");
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

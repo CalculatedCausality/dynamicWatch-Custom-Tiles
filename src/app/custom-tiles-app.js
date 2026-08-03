@@ -54,6 +54,7 @@ import {
 	WaterLayerProvider,
 } from "../providers/openinframap.js";
 import { createQldEnvironmentProviders } from "../providers/qld-environment.js";
+import { createQldMiningProviders } from "../providers/qld-mining.js";
 import { AppleTokenManager, QldTokenManager } from "../tokens.js";
 import { gmJsonGet } from "../utils/http.js";
 import { _escHtml } from "../utils/html.js";
@@ -74,6 +75,8 @@ const pageWin = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
  */
 const { QpwsLayerProvider, NationalParksLayerProvider } =
 	createQldEnvironmentProviders({ makeHoverIdentify, gmJsonGet });
+const { HistoricMinesLayerProvider } =
+	createQldMiningProviders({ makeHoverIdentify });
 
 /* -- Application ------------------------------------------------------- */
 
@@ -293,6 +296,7 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_RELIEF,     new QldReliefLayerProvider());
 			addOverlay(CFG.LAYER_NATIONAL_PARKS,
 				new NationalParksLayerProvider());
+			addOverlay(CFG.LAYER_HIST_MINES, new HistoricMinesLayerProvider());
 			addOverlay(CFG.LAYER_INTVL_GLOBAL,
 				new IntvlGlobalTilesLayerProvider());
 

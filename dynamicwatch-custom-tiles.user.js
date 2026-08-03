@@ -146,6 +146,7 @@
     LAYER_QPWS: "QPWS Estate",
     LAYER_RELIEF: "QLD Relief",
     LAYER_NATIONAL_PARKS: "National Parks",
+    LAYER_HIST_MINES: "Historic Mines",
     LAYER_TOPO: "QLD Topo",
     LAYER_INTVL_GLOBAL: "INTVL Global Map",
     LAYER_GEOCACHING: "Geocaches",
@@ -276,6 +277,13 @@
     // Rendered server-side so we inherit official QPWS symbology.
     QLD_QPWS_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Environment/ParksTerrestrialProtectedAreas/MapServer",
     QLD_QPWS_LAYER_IDS: "10,5,6,7,8,9",
+    // GSQ MiningResources (GeoResGlobe). Public, CORS-open, token-free —
+    // same host as the cadastre, so already in @connect. Layer 16 =
+    // "Historical workings" (~15k named old mine sites), 102 = "Historical
+    // coal workings". Point features with commodity/status/size attributes.
+    QLD_MINING_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/GeoscientificInformation/MiningResources/MapServer",
+    QLD_MINING_LAYER_IDS: "16,102",
+    QLD_MINING_HOVER_MIN_ZOOM: 10,
     // OpenInfraMap public power vector-tile pyramid (MVT/pbf). Global,
     // CDN-served, derived from OSM — far more reliable than hitting raw
     // Overpass. Layers per tile: power_line, power_substation(_point),
@@ -333,6 +341,10 @@
     {
       header: "Environment",
       names: [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS]
+    },
+    {
+      header: "Mining",
+      names: [CFG.LAYER_HIST_MINES]
     },
     {
       header: "Live data",
@@ -10467,6 +10479,64 @@
     }
   };
 
+  // src/providers/qld-mining.js
+  function _mineVal(v) {
+    if (v === null || v === void 0) return "";
+    const s = String(v).trim();
+    return s && s.toLowerCase() !== "null" ? s : "";
+  }
+  function _pickAny(a, keys) {
+    for (const k of keys) {
+      const v = _mineVal(a[k]);
+      if (v) return v;
+    }
+    return "";
+  }
+  function _formatMineTooltip(attrs) {
+    const a = attrs || {};
+    const name = _pickAny(a, ["Occurrence name", "occur_name"]);
+    const commodity = _pickAny(a, ["Main commodity", "main_commodity"]);
+    const status = _pickAny(a, ["Mine status", "mine_status"]);
+    const size = _pickAny(a, ["Deposit size", "deposit_size"]);
+    const locality = _pickAny(a, ["site locality", "Site locality", "site_locality"]);
+    const kind = _pickAny(a, ["Group name", "group_name", "Site type", "site_type"]);
+    const lines = [esc`<b>${name || "Historic mine"}</b>`];
+    const bits = [commodity, status, size].filter(Boolean);
+    if (bits.length) lines.push(_escHtml(bits.join(" · ")));
+    if (locality) lines.push(_escHtml(locality));
+    if (kind) lines.push(esc`<span class="dw-cad-sub">${kind}</span>`);
+    return lines.join("<br>");
+  }
+  function createQldMiningProviders({ makeHoverIdentify: makeHoverIdentify2 }) {
+    const installMinesHover = makeHoverIdentify2({
+      baseUrl: CFG.QLD_MINING_SERVICE,
+      layers: "all:" + CFG.QLD_MINING_LAYER_IDS,
+      tolerance: 8,
+      // points need a wider grab than polygons
+      minZoom: CFG.QLD_MINING_HOVER_MIN_ZOOM,
+      tipClass: "dw-qpws-tip",
+      formatTooltip: _formatMineTooltip
+    });
+    const HistoricMinesLayerProvider2 = arcgisExportProvider({
+      baseUrl: CFG.QLD_MINING_SERVICE,
+      showLayers: CFG.QLD_MINING_LAYER_IDS,
+      pane: "dwMiningPane",
+      paneZIndex: 399,
+      opacity: 0.95,
+      minZoom: 8,
+      maxZoom: 25,
+      attribution: 'Mines &copy; <a href="https://georesglobe.information.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (GSQ)</a>',
+      onAdd: (layer, map) => installMinesHover(layer, map),
+      onRemove: (layer) => {
+        if (layer._dwHoverOff) {
+          layer._dwHoverOff();
+          layer._dwHoverOff = null;
+        }
+      }
+    });
+    return { HistoricMinesLayerProvider: HistoricMinesLayerProvider2 };
+  }
+
   // src/tokens.js
   var TokenManagerBase = class {
     constructor(opts) {
@@ -10750,6 +10820,7 @@
   // src/app/custom-tiles-app.js
   var pageWin3 = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   var { QpwsLayerProvider, NationalParksLayerProvider } = createQldEnvironmentProviders({ makeHoverIdentify, gmJsonGet });
+  var { HistoricMinesLayerProvider } = createQldMiningProviders({ makeHoverIdentify });
   var CustomTilesApp = class {
     constructor() {
       this.qldToken = new QldTokenManager({
@@ -10932,6 +11003,7 @@
           CFG.LAYER_NATIONAL_PARKS,
           new NationalParksLayerProvider()
         );
+        addOverlay(CFG.LAYER_HIST_MINES, new HistoricMinesLayerProvider());
         addOverlay(
           CFG.LAYER_INTVL_GLOBAL,
           new IntvlGlobalTilesLayerProvider()
@@ -11787,6 +11859,7 @@
         _formatAddressLine,
         _parseAuStreetAddress,
         _pickJurisdiction,
+        _formatMineTooltip,
         _deviAppUrl,
         _fmtSccDate,
         _formatSccTooltip,
