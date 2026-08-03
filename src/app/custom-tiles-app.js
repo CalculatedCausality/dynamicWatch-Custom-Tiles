@@ -1091,7 +1091,9 @@ export class CustomTilesApp {
 			".dw-histmap-row-a a { font-weight: 600; }",
 			// Interactive hover panel: hovering the footprints lists the
 			// sheets there; the pointer can move into it to click Overlay.
-			".dw-histmap-hover { position: absolute; z-index: 1000; max-width: 300px; max-height: 45%; overflow-y: auto; background: rgba(255,255,255,.98); border: 1px solid #999; border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45; box-shadow: 0 2px 10px rgba(0,0,0,.3); }",
+			".dw-histmap-hover { position: absolute; z-index: 1000; width: 280px; max-width: 90%; height: 300px; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; background: rgba(255,255,255,.98); border: 1px solid #999; border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45; box-shadow: 0 2px 10px rgba(0,0,0,.3); }",
+			// Touch popup version: cap + scroll so it can't run off the popup.
+			".dw-popup-ident-histmaps .dw-histmap-list { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; }",
 			".dw-histmap-hover .dw-histmap-hint { color: #6b7280; font-size: 10.5px; margin-bottom: 4px; }",
 			".dw-histmap-hover .dw-histmap-hd { font-weight: 700; margin-bottom: 4px; }",
 			".dw-histmap-hover .dw-histmap-row { margin: 5px 0; padding-bottom: 4px; border-bottom: 1px solid #f0f0f0; }",
