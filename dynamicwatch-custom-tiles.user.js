@@ -10901,88 +10901,7 @@
         corners: [[n, w], [n, ea], [s, ea], [s, w]]
         // TL,TR,BR,BL
       });
-      const panel = a.closest(".dw-histmap-hover");
-      if (panel) panel.style.display = "none";
     }, true);
-  }
-  function installHistMapHover(layer, map) {
-    if (L.Browser.mobile || window.matchMedia && window.matchMedia("(hover: none)").matches) return;
-    const container = map.getContainer();
-    let panel = null, hideTimer = null, debounce = null, gen = 0;
-    let lastKey = "";
-    let overPanel = false;
-    const scheduleHide = () => {
-      clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => {
-        if (panel) {
-          panel.style.display = "none";
-          lastKey = "";
-        }
-      }, 500);
-    };
-    const ensurePanel = () => {
-      if (panel) return panel;
-      panel = L.DomUtil.create("div", "dw-histmap-hover", container);
-      panel.style.display = "none";
-      L.DomEvent.disableClickPropagation(panel);
-      L.DomEvent.disableScrollPropagation(panel);
-      L.DomEvent.on(panel, "mousemove", L.DomEvent.stopPropagation);
-      panel.addEventListener("mouseenter", () => {
-        overPanel = true;
-        clearTimeout(hideTimer);
-      });
-      panel.addEventListener("mouseleave", () => {
-        overPanel = false;
-        scheduleHide();
-      });
-      return panel;
-    };
-    const onMove = (e) => {
-      if (overPanel) return;
-      if (map.getZoom() < CFG.QLD_HIST_MAPS_MIN_ZOOM) {
-        scheduleHide();
-        return;
-      }
-      clearTimeout(debounce);
-      const pt = e.containerPoint, ll = e.latlng;
-      debounce = setTimeout(() => {
-        if (overPanel) return;
-        const my = ++gen;
-        fetchHistMapSheets(map, ll, (sheets) => {
-          if (my !== gen || overPanel) return;
-          const html = _histMapsSectionHtml(sheets);
-          if (!html) {
-            scheduleHide();
-            return;
-          }
-          const key = sheets.map((s) => s.link).join("|");
-          const p = ensurePanel();
-          clearTimeout(hideTimer);
-          if (key === lastKey && p.style.display === "block") return;
-          lastKey = key;
-          p.innerHTML = `<div class="dw-histmap-hint">Move in to open · drag corners to align</div>` + html;
-          p.style.display = "block";
-          const cw = container.clientWidth, ch = container.clientHeight;
-          let x = pt.x + 16, y = pt.y + 16;
-          if (x + p.offsetWidth > cw) x = Math.max(4, pt.x - p.offsetWidth - 16);
-          if (y + p.offsetHeight > ch) y = Math.max(4, ch - p.offsetHeight - 6);
-          p.style.left = x + "px";
-          p.style.top = y + "px";
-        });
-      }, 220);
-    };
-    map.on("mousemove", onMove);
-    map.on("mouseout", scheduleHide);
-    layer._dwHistHoverOff = () => {
-      clearTimeout(debounce);
-      clearTimeout(hideTimer);
-      map.off("mousemove", onMove);
-      map.off("mouseout", scheduleHide);
-      if (panel) {
-        panel.remove();
-        panel = null;
-      }
-    };
   }
   var HistoricalMapsIndexProvider = arcgisExportProvider({
     baseUrl: CFG.QLD_HIST_MAPS_SERVICE,
@@ -10993,16 +10912,10 @@
     minZoom: 9,
     maxZoom: 25,
     attribution: 'Historical maps &copy; <a href="https://www.data.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (Resources)</a>',
-    onAdd: (layer, map) => {
-      _ensureHistMapHook(map);
-      installHistMapHover(layer, map);
-    },
-    onRemove: (layer) => {
-      if (layer._dwHistHoverOff) {
-        layer._dwHistHoverOff();
-        layer._dwHistHoverOff = null;
-      }
-    }
+    // The sheet chooser lives in the right-click / long-press location popup
+    // (see _injectIdentifyIntoPopup) — no hover panel — so panning never pops
+    // a floating menu. onAdd only wires the delegated Overlay-link click.
+    onAdd: (layer, map) => _ensureHistMapHook(map)
   });
 
   // src/tokens.js
@@ -11849,7 +11762,7 @@
         });
       }
       const histMaps = this.layers[CFG.LAYER_HIST_MAPS];
-      if (noHover && histMaps && map.hasLayer(histMaps) && map.getZoom() >= CFG.QLD_HIST_MAPS_MIN_ZOOM) {
+      if (histMaps && map.hasLayer(histMaps) && map.getZoom() >= CFG.QLD_HIST_MAPS_MIN_ZOOM) {
         fetchHistMapSheets(map, latlng, (sheets) => {
           if (!isCurrent() || !sheets.length) return;
           const html = _histMapsSectionHtml(sheets);
@@ -12121,16 +12034,9 @@
         ".dw-histmap-list .dw-histmap-hd { font-weight: 700; margin-bottom: 4px; }",
         ".dw-histmap-row { margin: 4px 0; }",
         ".dw-histmap-row-a a { font-weight: 600; }",
-        // Interactive hover panel: hovering the footprints lists the
-        // sheets there; the pointer can move into it to click Overlay.
-        ".dw-histmap-hover { position: absolute; z-index: 1000; width: 280px; max-width: 90%; height: 300px; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; background: rgba(255,255,255,.98); border: 1px solid #999; border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45; box-shadow: 0 2px 10px rgba(0,0,0,.3); }",
-        // Touch popup version: cap + scroll so it can't run off the popup.
-        ".dw-popup-ident-histmaps .dw-histmap-list { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; }",
-        ".dw-histmap-hover .dw-histmap-hint { color: #6b7280; font-size: 10.5px; margin-bottom: 4px; }",
-        ".dw-histmap-hover .dw-histmap-hd { font-weight: 700; margin-bottom: 4px; }",
-        ".dw-histmap-hover .dw-histmap-row { margin: 5px 0; padding-bottom: 4px; border-bottom: 1px solid #f0f0f0; }",
-        ".dw-histmap-hover a { font-weight: 600; }",
-        ".dw-histmap-hover .dw-cad-sub { color: #6b7280; }",
+        // The sheet list lives in the right-click / long-press popup — cap
+        // its height + scroll so a busy spot can't run off the popup.
+        ".dw-popup-ident-histmaps .dw-histmap-list { max-height: 300px; overflow-y: auto; overscroll-behavior: contain; }",
         ".dw-histmap-handle { width: 16px; height: 16px; margin: -8px 0 0 -8px; background: #fff; border: 2px solid #dc2626; border-radius: 50%; box-shadow: 0 1px 4px rgba(0,0,0,.5); cursor: move; }",
         // Edge-midpoint + centre control points: smaller and blue, so the
         // four corner points still read as the primary anchors.

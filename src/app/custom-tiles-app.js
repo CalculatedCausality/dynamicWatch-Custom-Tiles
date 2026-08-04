@@ -788,12 +788,12 @@ export class CustomTilesApp {
 			});
 		}
 
-		// HISTORIC MAP SHEETS — touch only; on desktop the layer shows a
-		// floating hover panel instead (so each device gets one surface, not
-		// two). Lists the scanned sheets covering this point, each with a
-		// scan link and an "Overlay ▦" action that superimposes + warps it.
+		// HISTORIC MAP SHEETS — in the right-click / long-press location popup
+		// (a plain left-click just drops a waypoint, and a hover panel got in
+		// the way of panning). Lists the scanned sheets covering this point,
+		// each with a scan link and an "Overlay ▦" action that warps it.
 		const histMaps = this.layers[CFG.LAYER_HIST_MAPS];
-		if (noHover && histMaps && map.hasLayer(histMaps) &&
+		if (histMaps && map.hasLayer(histMaps) &&
 			map.getZoom() >= CFG.QLD_HIST_MAPS_MIN_ZOOM) {
 			fetchHistMapSheets(map, latlng, (sheets) => {
 				if (!isCurrent() || !sheets.length) return;
@@ -1089,16 +1089,9 @@ export class CustomTilesApp {
 			".dw-histmap-list .dw-histmap-hd { font-weight: 700; margin-bottom: 4px; }",
 			".dw-histmap-row { margin: 4px 0; }",
 			".dw-histmap-row-a a { font-weight: 600; }",
-			// Interactive hover panel: hovering the footprints lists the
-			// sheets there; the pointer can move into it to click Overlay.
-			".dw-histmap-hover { position: absolute; z-index: 1000; width: 280px; max-width: 90%; height: 300px; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; background: rgba(255,255,255,.98); border: 1px solid #999; border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45; box-shadow: 0 2px 10px rgba(0,0,0,.3); }",
-			// Touch popup version: cap + scroll so it can't run off the popup.
-			".dw-popup-ident-histmaps .dw-histmap-list { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; }",
-			".dw-histmap-hover .dw-histmap-hint { color: #6b7280; font-size: 10.5px; margin-bottom: 4px; }",
-			".dw-histmap-hover .dw-histmap-hd { font-weight: 700; margin-bottom: 4px; }",
-			".dw-histmap-hover .dw-histmap-row { margin: 5px 0; padding-bottom: 4px; border-bottom: 1px solid #f0f0f0; }",
-			".dw-histmap-hover a { font-weight: 600; }",
-			".dw-histmap-hover .dw-cad-sub { color: #6b7280; }",
+			// The sheet list lives in the right-click / long-press popup — cap
+			// its height + scroll so a busy spot can't run off the popup.
+			".dw-popup-ident-histmaps .dw-histmap-list { max-height: 300px; overflow-y: auto; overscroll-behavior: contain; }",
 			".dw-histmap-handle { width: 16px; height: 16px; margin: -8px 0 0 -8px; background: #fff; border: 2px solid #dc2626; border-radius: 50%; box-shadow: 0 1px 4px rgba(0,0,0,.5); cursor: move; }",
 			// Edge-midpoint + centre control points: smaller and blue, so the
 			// four corner points still read as the primary anchors.

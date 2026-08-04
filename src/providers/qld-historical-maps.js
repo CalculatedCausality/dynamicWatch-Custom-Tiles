@@ -324,90 +324,7 @@ export function _ensureHistMapHook(map) {
 			title: a.dataset.title || "",
 			corners: [[n, w], [n, ea], [s, ea], [s, w]], // TL,TR,BR,BL
 		});
-		// Dismiss the hover panel once a sheet is chosen.
-		const panel = a.closest(".dw-histmap-hover");
-		if (panel) panel.style.display = "none";
 	}, true);
-}
-
-/* -- Hover panel ------------------------------------------------------
- * A plain map click drops a route waypoint, so the sheet chooser can't
- * live in a click popup. Instead: hovering the footprints cursor-identifies
- * the sheets underneath and shows an INTERACTIVE panel (you can move into
- * it to click "Overlay ▦"). The panel stays while the pointer is over it
- * and hides shortly after leaving both it and the footprints.
- */
-function installHistMapHover(layer, map) {
-	// Hover is a desktop interaction. On touch there is no hover — pans fire
-	// synthetic mousemoves that would spuriously open the panel, and the
-	// tap/long-press location popup already carries the sheet list — so skip
-	// the floating panel entirely on touch devices.
-	if (L.Browser.mobile || (window.matchMedia && window.matchMedia("(hover: none)").matches)) return;
-	const container = map.getContainer();
-	let panel = null, hideTimer = null, debounce = null, gen = 0;
-	let lastKey = "";     // signature of the currently-shown sheet set
-	let overPanel = false; // pointer is inside the panel (scrolling/clicking)
-
-	const scheduleHide = () => {
-		clearTimeout(hideTimer);
-		hideTimer = setTimeout(() => {
-			if (panel) { panel.style.display = "none"; lastKey = ""; }
-		}, 500);
-	};
-	const ensurePanel = () => {
-		if (panel) return panel;
-		panel = L.DomUtil.create("div", "dw-histmap-hover", container);
-		panel.style.display = "none";
-		L.DomEvent.disableClickPropagation(panel);
-		L.DomEvent.disableScrollPropagation(panel);
-		// Keep the panel's own pointer moves from bubbling to the map — else
-		// every move inside it re-fires identify and the panel jumps / its
-		// scroll position resets, making it impossible to scroll or reach a row.
-		L.DomEvent.on(panel, "mousemove", L.DomEvent.stopPropagation);
-		panel.addEventListener("mouseenter", () => { overPanel = true; clearTimeout(hideTimer); });
-		panel.addEventListener("mouseleave", () => { overPanel = false; scheduleHide(); });
-		return panel;
-	};
-
-	const onMove = (e) => {
-		if (overPanel) return;
-		if (map.getZoom() < CFG.QLD_HIST_MAPS_MIN_ZOOM) { scheduleHide(); return; }
-		clearTimeout(debounce);
-		const pt = e.containerPoint, ll = e.latlng;
-		debounce = setTimeout(() => {
-			if (overPanel) return;
-			const my = ++gen;
-			fetchHistMapSheets(map, ll, (sheets) => {
-				if (my !== gen || overPanel) return;
-				const html = _histMapsSectionHtml(sheets);
-				if (!html) { scheduleHide(); return; }
-				const key = sheets.map((s) => s.link).join("|");
-				const p = ensurePanel();
-				clearTimeout(hideTimer);
-				// Same sheets already displayed → leave the panel exactly where
-				// it is (stable position + preserved scroll). Only re-render and
-				// reposition when the sheet set actually changes.
-				if (key === lastKey && p.style.display === "block") return;
-				lastKey = key;
-				p.innerHTML = `<div class="dw-histmap-hint">Move in to open · drag corners to align</div>` + html;
-				p.style.display = "block";
-				const cw = container.clientWidth, ch = container.clientHeight;
-				let x = pt.x + 16, y = pt.y + 16;
-				if (x + p.offsetWidth > cw) x = Math.max(4, pt.x - p.offsetWidth - 16);
-				if (y + p.offsetHeight > ch) y = Math.max(4, ch - p.offsetHeight - 6);
-				p.style.left = x + "px"; p.style.top = y + "px";
-			});
-		}, 220);
-	};
-
-	map.on("mousemove", onMove);
-	map.on("mouseout", scheduleHide);
-	layer._dwHistHoverOff = () => {
-		clearTimeout(debounce); clearTimeout(hideTimer);
-		map.off("mousemove", onMove);
-		map.off("mouseout", scheduleHide);
-		if (panel) { panel.remove(); panel = null; }
-	};
 }
 
 export const HistoricalMapsIndexProvider = arcgisExportProvider({
@@ -418,6 +335,8 @@ export const HistoricalMapsIndexProvider = arcgisExportProvider({
 	attribution:
 		'Historical maps &copy; <a href="https://www.data.qld.gov.au/" ' +
 		'target="_blank" rel="noreferrer">State of Queensland (Resources)</a>',
-	onAdd: (layer, map) => { _ensureHistMapHook(map); installHistMapHover(layer, map); },
-	onRemove: (layer) => { if (layer._dwHistHoverOff) { layer._dwHistHoverOff(); layer._dwHistHoverOff = null; } },
+	// The sheet chooser lives in the right-click / long-press location popup
+	// (see _injectIdentifyIntoPopup) — no hover panel — so panning never pops
+	// a floating menu. onAdd only wires the delegated Overlay-link click.
+	onAdd: (layer, map) => _ensureHistMapHook(map),
 });

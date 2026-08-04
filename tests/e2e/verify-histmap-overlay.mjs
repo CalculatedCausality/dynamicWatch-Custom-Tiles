@@ -51,21 +51,23 @@ const on = await page.evaluate(() => {
 if (!on) { console.error("Historic Map Sheets layer missing"); await browser.close(); process.exit(1); }
 await page.waitForTimeout(3500);
 
-// REAL discovery path: HOVER the footprints → an interactive panel lists
-// the sheets there (a plain map click would just drop a waypoint). Move
-// into the panel and click "Overlay ▦".
-// Drive the Leaflet map 'mousemove' the hover handler listens on. (A
-// synthetic OS-level mouse move doesn't reliably reach Leaflet's internal
-// handler in headless; firing the map event is the faithful handler test —
-// real cursor movement produces the same event.)
+// REAL discovery path: the sheet list is injected into the right-click /
+// long-press location popup (a plain left-click just drops a waypoint).
+// Open a site-shaped location popup and assert the section appears.
 await page.evaluate(() => {
 	const map = window._dwLayerCtrl._map;
-	const ll = L.latLng(-26.19, 152.66);
-	map.fire("mousemove", { latlng: ll, containerPoint: map.latLngToContainerPoint(ll), originalEvent: {} });
+	const lat = -26.19, lng = 152.66;
+	L.popup({ minWidth: 260 })
+		.setLatLng([lat, lng])
+		.setContent(
+			`<div class="popup-on-location">` +
+			`<div id="waypoint-popup-title">${lat.toFixed(6)},${lng.toFixed(6)}</div>` +
+			`<button type="button">Add point</button></div>`)
+		.openOn(map);
 });
-const sectionShown = await page.waitForSelector(".dw-histmap-hover .dw-histmap-overlay-link",
+const sectionShown = await page.waitForSelector(".dw-popup-ident-histmaps .dw-histmap-overlay-link",
 	{ timeout: 30_000 }).then(() => true).catch(() => false);
-console.log(`  hover panel lists sheets with Overlay links: ${sectionShown}`);
+console.log(`  location popup lists sheets with Overlay links: ${sectionShown}`);
 
 if (sectionShown) {
 	// A help modal can reappear and intercept pointer events — clear it.
@@ -73,7 +75,7 @@ if (sectionShown) {
 		document.querySelectorAll(".modal, .modal-backdrop, #help-modal").forEach((el) => el.remove());
 		document.body.classList.remove("modal-open"); document.body.style.overflow = "";
 	});
-	await page.click(".dw-histmap-hover .dw-histmap-overlay-link", { force: true });
+	await page.click(".dw-popup-ident-histmaps .dw-histmap-overlay-link", { force: true });
 }
 
 // The scan must appear as a triangle mesh (each tri gets a matrix()
@@ -130,7 +132,7 @@ await page.screenshot({ path: shot });
 
 console.log("\n=== Historic Map Sheets verification ===");
 console.log(`  index footprint tiles (export 200): ${indexTiles}`);
-console.log(`  hover panel lists sheets w/ Overlay link: ${sectionShown}`);
+console.log(`  location popup lists sheets w/ Overlay link: ${sectionShown}`);
 console.log(`  scan superimposed as mesh (8 tris, 9 handles, control): ${warped}`);
 console.log(`  re-warps on zoom: ${zoomReWarped}`);
 console.log(`  re-warps on interior-point drag (found: ${cornerDrag.found}): ${cornerDrag.changed}`);
