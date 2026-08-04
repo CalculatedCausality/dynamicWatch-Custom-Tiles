@@ -19,7 +19,7 @@ import {
 } from './providers/qld-cadastre.js';
 import { _parseAuStreetAddress, _pickJurisdiction } from './providers/cadastre-au.js';
 import { _formatMineTooltip, _formatShaftTooltip, _formatLeaseTooltip } from './providers/qld-mining.js';
-import { _quadToMatrix3d, _histMapSheet, _histMapsSectionHtml } from './providers/qld-historical-maps.js';
+import { _quadToMatrix3d, _triAffine, _histMapSheet, _histMapsSectionHtml } from './providers/qld-historical-maps.js';
 import { oimIcon } from './providers/openinframap.js';
 import {
 	_vexcelIsCredString,
@@ -117,7 +117,7 @@ export function bootUserscript() {
 			_formatCadastreTooltip, _formatAddressLine,
 			_parseAuStreetAddress, _pickJurisdiction,
 			_formatMineTooltip, _formatShaftTooltip, _formatLeaseTooltip,
-			_quadToMatrix3d, _histMapSheet, _histMapsSectionHtml,
+			_quadToMatrix3d, _triAffine, _histMapSheet, _histMapsSectionHtml,
 			_deviAppUrl, _fmtSccDate, _formatSccTooltip, _formatSccPopup,
 			_sccDefaultState, _sccLoadState,
 			_deviDetailUrl, _parseSccDetailHtml, _renderSccDetail,

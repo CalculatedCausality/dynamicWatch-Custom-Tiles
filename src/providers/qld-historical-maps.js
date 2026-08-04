@@ -66,13 +66,42 @@ export function _quadToMatrix3d(w, h, dst) {
 	return "matrix3d(" + m.join(",") + ")";
 }
 
-/* -- Distortable image overlay ---------------------------------------- */
+// 2D affine mapping a source triangle onto a destination triangle. Given
+// src/dst = [[x,y]×3], returns [a,b,c,d,e,f] for CSS matrix(a,b,c,d,e,f):
+//   X = a·x + c·y + e ,  Y = b·x + d·y + f
+// Solved by Cramer's rule on the source basis; underpins the control-point
+// mesh (each triangle warps independently so interior points bend the map).
+export function _triAffine(s, d) {
+	const x0 = s[0][0], y0 = s[0][1], x1 = s[1][0], y1 = s[1][1], x2 = s[2][0], y2 = s[2][1];
+	const det = x0 * (y1 - y2) - x1 * (y0 - y2) + x2 * (y0 - y1);
+	if (!det) return [1, 0, 0, 1, 0, 0];
+	const X0 = d[0][0], X1 = d[1][0], X2 = d[2][0], Y0 = d[0][1], Y1 = d[1][1], Y2 = d[2][1];
+	const a = (X0 * (y1 - y2) + X1 * (y2 - y0) + X2 * (y0 - y1)) / det;
+	const c = (X0 * (x2 - x1) + X1 * (x0 - x2) + X2 * (x1 - x0)) / det;
+	const e = (X0 * (x1 * y2 - x2 * y1) + X1 * (x2 * y0 - x0 * y2) + X2 * (x0 * y1 - x1 * y0)) / det;
+	const b = (Y0 * (y1 - y2) + Y1 * (y2 - y0) + Y2 * (y0 - y1)) / det;
+	const dd = (Y0 * (x2 - x1) + Y1 * (x0 - x2) + Y2 * (x1 - x0)) / det;
+	const f = (Y0 * (x1 * y2 - x2 * y1) + Y1 * (x2 * y0 - x0 * y2) + Y2 * (x0 * y1 - x1 * y0)) / det;
+	return [a, b, c, dd, e, f];
+}
+
+/* -- Distortable image overlay (control-point mesh) -------------------
+ * A single 4-corner homography can only correct perspective/skew. Old map
+ * scans carry local, non-linear distortion (paper shrinkage, projection),
+ * so the sheet is warped through a 3×3 lattice of draggable control points
+ * — corners PLUS edge-midpoints and centre. The image is split into 8
+ * triangles; each is background-clipped to its source triangle and given
+ * its own affine transform, so dragging any point bends the map locally
+ * while triangles stay joined at shared vertices.
+ */
 
 const OVERLAY_PANE = "dwHistMapPane";
-let _activeOverlay = null; // only one warped sheet at a time
+const _GRID = 2;                                  // 2×2 cells → 3×3 points, 8 triangles
+const _CORNER_IDX = new Set([0, 2, 6, 8]);        // lattice corners (bigger handles)
+let _activeOverlay = null;                        // only one warped sheet at a time
 
 // Superimpose `url` on the map, initially filling the geographic bbox
-// [[N,W],[N,E],[S,E],[S,W]] (TL,TR,BR,BL), with draggable corners.
+// corners [[N,W],[N,E],[S,E],[S,W]] (TL,TR,BR,BL), with a draggable mesh.
 export function makeDistortableMapOverlay(map, opts) {
 	if (_activeOverlay) _activeOverlay.remove();
 
@@ -83,46 +112,82 @@ export function makeDistortableMapOverlay(map, opts) {
 	const pane = map.getPane(OVERLAY_PANE);
 	pane.style.pointerEvents = "none";
 
-	const img = document.createElement("img");
-	img.className = "dw-histmap-img";
-	img.alt = opts.title || "historical map";
-	img.style.cssText =
-		"position:absolute;left:0;top:0;transform-origin:0 0;" +
-		"pointer-events:none;will-change:transform;max-width:none;";
-	img.style.opacity = "0.7";
-	pane.appendChild(img);
+	const wrap = L.DomUtil.create("div", "dw-histmap-warp", pane);
+	wrap.style.cssText = "position:absolute;left:0;top:0;transform-origin:0 0;opacity:0.7;";
 
-	const handleIcon = L.divIcon({ className: "dw-histmap-handle", iconSize: [16, 16] });
-	const corners = opts.corners.map((c) =>
-		L.marker(c, { draggable: true, icon: handleIcon, zIndexOffset: 2000 }).addTo(map));
+	// 3×3 control-point lattice, bilinear-interpolated from the 4 corners.
+	const [NW, NE, SE, SW] = opts.corners;
+	const gridLL = [];
+	for (let r = 0; r <= _GRID; r++) for (let cc = 0; cc <= _GRID; cc++) {
+		const u = cc / _GRID, v = r / _GRID;
+		const tLat = NW[0] + (NE[0] - NW[0]) * u, tLng = NW[1] + (NE[1] - NW[1]) * u;
+		const bLat = SW[0] + (SE[0] - SW[0]) * u, bLng = SW[1] + (SE[1] - SW[1]) * u;
+		gridLL.push([tLat + (bLat - tLat) * v, tLng + (bLng - tLng) * v]);
+	}
+	const cornerIcon = L.divIcon({ className: "dw-histmap-handle", iconSize: [16, 16] });
+	const midIcon = L.divIcon({ className: "dw-histmap-handle dw-histmap-handle--mid", iconSize: [14, 14] });
+	const markers = gridLL.map((ll, i) =>
+		L.marker(ll, {
+			draggable: true, zIndexOffset: 2000,
+			icon: _CORNER_IDX.has(i) ? cornerIcon : midIcon,
+		}).addTo(map));
 
-	let W = 0, H = 0;
-	const update = () => {
-		if (!W || !H) return;
-		const p = corners.map((m) => map.latLngToLayerPoint(m.getLatLng()));
-		img.style.transform =
-			_quadToMatrix3d(W, H, [[p[0].x, p[0].y], [p[1].x, p[1].y], [p[2].x, p[2].y], [p[3].x, p[3].y]]);
+	// Two triangles per cell (indices into the row-major 3×3 lattice).
+	const tris = [];
+	for (let r = 0; r < _GRID; r++) for (let cc = 0; cc < _GRID; cc++) {
+		const tl = r * (_GRID + 1) + cc, tr = tl + 1, bl = tl + (_GRID + 1), br = bl + 1;
+		tris.push([tl, tr, br], [tl, br, bl]);
+	}
+
+	let W = 0, H = 0, srcPts = [];
+	const triDivs = [];
+	// Grow each clip triangle slightly toward its edges so neighbours overlap
+	// by ~1px and no anti-aliased hairline seam shows between them.
+	const dilate = (t, px) => {
+		const cx = (t[0][0] + t[1][0] + t[2][0]) / 3, cy = (t[0][1] + t[1][1] + t[2][1]) / 3;
+		return t.map(([x, y]) => { const dx = x - cx, dy = y - cy, l = Math.hypot(dx, dy) || 1; return [x + dx / l * px, y + dy / l * px]; });
 	};
-	img.addEventListener("load", () => {
-		W = img.naturalWidth; H = img.naturalHeight;
-		img.style.width = W + "px"; img.style.height = H + "px";
-		update();
-	});
-	img.addEventListener("error", () => setMsg("Couldn't load the map scan."));
-	img.src = opts.url;
+	const buildTris = () => {
+		srcPts = [];
+		for (let r = 0; r <= _GRID; r++) for (let cc = 0; cc <= _GRID; cc++) srcPts.push([cc / _GRID * W, r / _GRID * H]);
+		tris.forEach((t) => {
+			const div = L.DomUtil.create("div", "dw-histmap-tri", wrap);
+			div.style.cssText =
+				`position:absolute;left:0;top:0;width:${W}px;height:${H}px;transform-origin:0 0;` +
+				`background-image:url("${opts.url}");background-size:${W}px ${H}px;background-repeat:no-repeat;`;
+			const s = dilate([srcPts[t[0]], srcPts[t[1]], srcPts[t[2]]], 1);
+			div.style.clipPath = `polygon(${s[0][0]}px ${s[0][1]}px, ${s[1][0]}px ${s[1][1]}px, ${s[2][0]}px ${s[2][1]}px)`;
+			triDivs.push(div);
+		});
+	};
+	const update = () => {
+		if (!W || !H || !triDivs.length) return;
+		const pts = markers.map((m) => { const p = map.latLngToLayerPoint(m.getLatLng()); return [p.x, p.y]; });
+		tris.forEach((t, i) => {
+			const s = [srcPts[t[0]], srcPts[t[1]], srcPts[t[2]]];
+			const d = [pts[t[0]], pts[t[1]], pts[t[2]]];
+			triDivs[i].style.transform = "matrix(" + _triAffine(s, d).join(",") + ")";
+		});
+	};
 
-	corners.forEach((m) => m.on("drag", update));
+	// Preload to learn the natural pixel size, then build + place the mesh.
+	const probe = new Image();
+	probe.addEventListener("load", () => { W = probe.naturalWidth; H = probe.naturalHeight; buildTris(); update(); });
+	probe.addEventListener("error", () => setMsg("Couldn't load the map scan."));
+	probe.src = opts.url;
+
+	markers.forEach((m) => m.on("drag", update));
 	const onMove = () => update();
 	map.on("move zoom viewreset zoomend moveend", onMove);
 
-	// Floating control: opacity, fit-to-bbox, remove.
+	// Floating control: opacity, reset-mesh, remove.
 	const ctl = L.DomUtil.create("div", "dw-histmap-ctl");
 	ctl.innerHTML =
 		`<div class="dw-histmap-ttl">${_escHtml((opts.title || "Historical map").slice(0, 60))}</div>` +
 		`<label>Opacity <input type="range" class="dw-histmap-op" min="0" max="1" step="0.05" value="0.7"></label>` +
 		`<div class="dw-histmap-msg"></div>` +
 		`<div class="dw-histmap-btns">` +
-		`<button type="button" class="dw-histmap-fit">Reset corners</button>` +
+		`<button type="button" class="dw-histmap-fit">Reset points</button>` +
 		`<button type="button" class="dw-histmap-del">Remove</button></div>`;
 	map.getContainer().appendChild(ctl);
 	L.DomEvent.disableClickPropagation(ctl);
@@ -131,18 +196,18 @@ export function makeDistortableMapOverlay(map, opts) {
 	const setMsg = (t) => { if (msgEl) msgEl.textContent = t || ""; };
 
 	ctl.querySelector(".dw-histmap-op").addEventListener("input", (e) => {
-		img.style.opacity = e.target.value;
+		wrap.style.opacity = e.target.value;
 	});
 	ctl.querySelector(".dw-histmap-fit").addEventListener("click", () => {
-		corners.forEach((m, i) => m.setLatLng(opts.corners[i]));
+		markers.forEach((m, i) => m.setLatLng(gridLL[i]));
 		update();
 	});
 
 	const handle = {
 		remove() {
 			map.off("move zoom viewreset zoomend moveend", onMove);
-			corners.forEach((m) => m.remove());
-			if (img.parentNode) img.remove();
+			markers.forEach((m) => m.remove());
+			if (wrap.parentNode) wrap.remove();
 			if (ctl.parentNode) ctl.remove();
 			if (_activeOverlay === handle) _activeOverlay = null;
 		},

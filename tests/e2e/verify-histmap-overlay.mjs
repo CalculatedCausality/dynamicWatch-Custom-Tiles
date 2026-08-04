@@ -76,47 +76,51 @@ if (sectionShown) {
 	await page.click(".dw-histmap-hover .dw-histmap-overlay-link", { force: true });
 }
 
-// The scan img must appear, load, and receive a matrix3d transform; 4 corner
-// handles + the control must exist.
+// The scan must appear as a triangle mesh (each tri gets a matrix()
+// transform), with a 3×3 lattice of 9 draggable handles + the control.
 const warped = await page.waitForFunction(() => {
-	const img = document.querySelector(".dw-histmap-img");
-	if (!img || !img.complete || !img.naturalWidth) return false;
-	const tf = getComputedStyle(img).transform;
-	return tf && tf !== "none" && document.querySelectorAll(".dw-histmap-handle").length === 4 &&
+	const tris = [...document.querySelectorAll(".dw-histmap-tri")];
+	if (tris.length !== 8) return false;
+	const drawn = tris.every((d) => {
+		const tf = getComputedStyle(d).transform;
+		return tf && tf !== "none";
+	});
+	return drawn && document.querySelectorAll(".dw-histmap-handle").length === 9 &&
 		!!document.querySelector(".dw-histmap-ctl");
 }, undefined, { timeout: 30_000 }).then(() => true).catch(() => false);
 
-const tf = () => page.evaluate(() => document.querySelector(".dw-histmap-img").style.transform);
+// Signature of all triangle transforms — changes when the mesh re-warps.
+const meshTf = () => page.evaluate(() =>
+	[...document.querySelectorAll(".dw-histmap-tri")].map((d) => d.style.transform).join("|"));
 
-// Zoom re-warps the overlay (layer points change → new matrix3d). Panning
-// correctly does NOT (Leaflet translates the whole pane), so zoom is the
-// right map-driven re-warp signal.
+// Zoom re-warps the mesh (layer points change). Panning correctly does NOT
+// (Leaflet translates the whole pane).
 let zoomReWarped = false;
 if (warped) {
-	const before = await tf();
+	const before = await meshTf();
 	await page.evaluate(() => window._dwLayerCtrl._map.setZoom(window._dwLayerCtrl._map.getZoom() - 1, { animate: false }));
 	await page.waitForTimeout(600);
-	zoomReWarped = before !== (await tf());
+	zoomReWarped = before !== (await meshTf());
 }
 
-// Corner-drag re-warp: drive a corner handle through the map API (a
-// synthetic Leaflet marker mouse-drag is unreliable in automation) and
-// confirm the image re-warps — proving the handle → update → matrix3d wiring.
+// Interior-point drag: move an EDGE-MIDPOINT/centre handle (not a corner)
+// via the map API and confirm the mesh re-warps — proving control points
+// beyond the corners bend the map.
 const cornerDrag = warped ? await page.evaluate(() => {
 	const map = window._dwLayerCtrl._map;
-	const img = document.querySelector(".dw-histmap-img");
-	let marker = null;
+	const before = [...document.querySelectorAll(".dw-histmap-tri")].map((d) => d.style.transform).join("|");
+	let mid = null;
 	for (const id in map._layers) {
 		const l = map._layers[id];
-		if (l.options && l.options.icon && l.options.icon.options &&
-			l.options.icon.options.className === "dw-histmap-handle") { marker = l; break; }
+		const cn = l.options && l.options.icon && l.options.icon.options && l.options.icon.options.className;
+		if (cn && /dw-histmap-handle--mid/.test(cn)) { mid = l; break; }
 	}
-	if (!marker) return { found: false, changed: false };
-	const before = img.style.transform;
-	const ll = marker.getLatLng();
-	marker.setLatLng([ll.lat + 0.004, ll.lng + 0.004]);
-	marker.fire("drag");
-	return { found: true, changed: img.style.transform !== before };
+	if (!mid) return { found: false, changed: false };
+	const ll = mid.getLatLng();
+	mid.setLatLng([ll.lat + 0.003, ll.lng - 0.003]);
+	mid.fire("drag");
+	const after = [...document.querySelectorAll(".dw-histmap-tri")].map((d) => d.style.transform).join("|");
+	return { found: true, changed: after !== before };
 }) : { found: false, changed: false };
 const reWarped = zoomReWarped && cornerDrag.changed;
 
@@ -127,9 +131,9 @@ await page.screenshot({ path: shot });
 console.log("\n=== Historic Map Sheets verification ===");
 console.log(`  index footprint tiles (export 200): ${indexTiles}`);
 console.log(`  hover panel lists sheets w/ Overlay link: ${sectionShown}`);
-console.log(`  scan superimposed + warped (matrix3d, 4 handles, control): ${warped}`);
+console.log(`  scan superimposed as mesh (8 tris, 9 handles, control): ${warped}`);
 console.log(`  re-warps on zoom: ${zoomReWarped}`);
-console.log(`  re-warps on corner drag (handle found: ${cornerDrag.found}): ${cornerDrag.changed}`);
+console.log(`  re-warps on interior-point drag (found: ${cornerDrag.found}): ${cornerDrag.changed}`);
 console.log(`  page errors: ${errors.length}${errors.length ? " -> " + errors.slice(0, 2).join(" | ") : ""}`);
 console.log(`  screenshot: ${shot}`);
 const ok = indexTiles > 0 && sectionShown && warped && reWarped && errors.length === 0;

@@ -1100,6 +1100,10 @@ export class CustomTilesApp {
 			".dw-histmap-hover a { font-weight: 600; }",
 			".dw-histmap-hover .dw-cad-sub { color: #6b7280; }",
 			".dw-histmap-handle { width: 16px; height: 16px; margin: -8px 0 0 -8px; background: #fff; border: 2px solid #dc2626; border-radius: 50%; box-shadow: 0 1px 4px rgba(0,0,0,.5); cursor: move; }",
+			// Edge-midpoint + centre control points: smaller and blue, so the
+			// four corner points still read as the primary anchors.
+			".dw-histmap-handle--mid { width: 12px; height: 12px; margin: -6px 0 0 -6px; border-color: #2563eb; border-width: 2px; }",
+			".dw-histmap-tri { pointer-events: none; }",
 			".dw-histmap-ctl { position: absolute; top: 90px; right: 12px; z-index: 1000; background: rgba(255,255,255,.96); border: 1px solid #999; border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.3); max-width: 240px; }",
 			".dw-histmap-ctl .dw-histmap-ttl { font-weight: 700; margin-bottom: 6px; }",
 			".dw-histmap-ctl label { display: block; margin: 4px 0; }",

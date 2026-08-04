@@ -1121,6 +1121,27 @@ t("_quadToMatrix3d maps an image rect onto a quad (identity + translate)", () =>
 	close(t[0], 1, 1e-6, "scaleX"); close(t[5], 1, 1e-6, "scaleY");
 });
 
+t("_triAffine maps a source triangle onto a destination triangle", () => {
+	const s = [[0, 0], [100, 0], [0, 100]];
+	// identity: dst == src → [1,0,0,1,0,0]
+	deepEq(dw._triAffine(s, s), [1, 0, 0, 1, 0, 0]);
+	// pure translation by (10, 20)
+	const tr = dw._triAffine(s, [[10, 20], [110, 20], [10, 120]]);
+	tr.forEach((v, i) => close(v, [1, 0, 0, 1, 10, 20][i], 1e-9, `translate[${i}]`));
+	// 2× scale about the origin
+	const sc = dw._triAffine(s, [[0, 0], [200, 0], [0, 200]]);
+	sc.forEach((v, i) => close(v, [2, 0, 0, 2, 0, 0][i], 1e-9, `scale[${i}]`));
+	// verify the affine actually sends each source vertex to its dest vertex
+	const d = [[13, 7], [190, 44], [55, 205]];
+	const [a, b, c, dd, e, f] = dw._triAffine(s, d);
+	s.forEach(([x, y], i) => {
+		close(a * x + c * y + e, d[i][0], 1e-6, `X${i}`);
+		close(b * x + dd * y + f, d[i][1], 1e-6, `Y${i}`);
+	});
+	// degenerate (collinear source) → identity, no NaN
+	deepEq(dw._triAffine([[0, 0], [1, 1], [2, 2]], [[0, 0], [5, 5], [9, 9]]), [1, 0, 0, 1, 0, 0]);
+});
+
 t("_histMapSheet + _histMapsSectionHtml model + render historical sheets", () => {
 	// Real /identify shape: aliased keys.
 	const sheet = dw._histMapSheet({
