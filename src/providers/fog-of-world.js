@@ -1,7 +1,6 @@
 import { dwRegisterMbLayer } from "../bridge/mapbox-tile-bridge.js";
 import { CFG } from "../config.js";
 import { LayerProvider } from "../layers/provider-factories.js";
-import { gmGet } from "../utils/http.js";
 
 const FILENAME_MASK1 = "olhwjsktri";
 const FILENAME_MASK2 = "eizxdwknmo";
@@ -17,6 +16,8 @@ const FOW_CHUNK_ZOOM = 9;
 const CACHE_LIMIT = 16;
 const CACHE_TTL = 5 * 60 * 1000;
 const DROPBOX_DOWNLOAD_URL = "https://www.dropbox.com/2/files/download";
+const DROPBOX_QUEUE_KEY = "dw_fow_dropbox_bridge_queue";
+const DROPBOX_RESPONSE_PREFIX = "dw_fow_dropbox_bridge_response_";
 
 function loadDropboxSession() {
 	try { return JSON.parse(GM_getValue(CFG.FOW_DROPBOX_SESSION_KEY, "{}")) || {}; }
@@ -90,6 +91,58 @@ export function startDropboxSessionBroker() {
 		};
 		XHR.prototype._dwDropboxWrapped = true;
 	}
+
+	const bytesToBase64 = (buffer) => {
+		const bytes = new Uint8Array(buffer);
+		let binary = "";
+		for (let i = 0; i < bytes.length; i += 0x8000) {
+			binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+		}
+		return btoa(binary);
+	};
+	const active = new Set();
+	const serviceQueue = async () => {
+		let queue;
+		try { queue = JSON.parse(GM_getValue(DROPBOX_QUEUE_KEY, "[]")); }
+		catch (_) { queue = []; }
+		if (!Array.isArray(queue) || !queue.length) return;
+		try { GM_setValue(DROPBOX_QUEUE_KEY, "[]"); } catch (_) {}
+		for (const request of queue) {
+			if (!request?.id || !request.path || active.has(request.id) ||
+				Date.now() - Number(request.createdAt || 0) > 120000) continue;
+			active.add(request.id);
+			Promise.resolve().then(async () => {
+				captureCookie();
+				const session = loadDropboxSession();
+				if (!session.csrf) throw new Error("Dropbox CSRF cookie unavailable");
+				const headers = {
+					"Content-Type": "application/octet-stream",
+					"Dropbox-API-Arg": JSON.stringify({ path: request.path }),
+					"X-CSRF-Token": session.csrf,
+				};
+				if (session.uid) headers["X-Dropbox-Uid"] = session.uid;
+				if (session.pathRoot) headers["X-Dropbox-Path-Root"] = session.pathRoot;
+				const response = await page.fetch(DROPBOX_DOWNLOAD_URL, {
+					method: "POST",
+					headers,
+					credentials: "same-origin",
+					body: new Uint8Array(0),
+				});
+				if (response.status === 404 || response.status === 409) {
+					return { ok: true, missing: true };
+				}
+				if (!response.ok) throw new Error("Dropbox HTTP " + response.status);
+				return { ok: true, data: bytesToBase64(await response.arrayBuffer()) };
+			}).catch((error) => ({ ok: false, error: error.message || String(error) }))
+				.then((result) => {
+					try { GM_setValue(DROPBOX_RESPONSE_PREFIX + request.id, JSON.stringify(result)); }
+					catch (_) {}
+					active.delete(request.id);
+				});
+		}
+	};
+	setInterval(serviceQueue, 200);
+	serviceQueue();
 	console.info("[CustomTiles] Fog of World Dropbox session broker active");
 }
 
@@ -194,64 +247,54 @@ async function inflateZlib(arrayBuffer) {
 	return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-function readDropboxCsrfCookie() {
-	return new Promise((resolve) => {
-		if (typeof GM_cookie === "undefined" || typeof GM_cookie.list !== "function") {
-			resolve("");
-			return;
-		}
-		try {
-			GM_cookie.list({ url: "https://www.dropbox.com/" }, (cookies, error) => {
-				if (error || !Array.isArray(cookies)) { resolve(""); return; }
-				resolve(cookies.find((cookie) => cookie.name === "__Host-js_csrf")?.value || "");
-			});
-		} catch (_) { resolve(""); }
-	});
-}
-
-async function dropboxSessionGet(path) {
-	const session = loadDropboxSession();
-	const csrf = session.csrf || await readDropboxCsrfCookie();
-	if (!csrf) {
-		throw new Error("Open and reload the Fog of World Sync folder on dropbox.com");
-	}
-	const headers = {
-		"Content-Type": "application/octet-stream",
-		"Dropbox-API-Arg": JSON.stringify({ path }),
-		"X-CSRF-Token": csrf,
-		Referer: "https://www.dropbox.com/home" + path.slice(0, path.lastIndexOf("/")),
-	};
-	if (session.uid) headers["X-Dropbox-Uid"] = session.uid;
-	if (session.pathRoot) headers["X-Dropbox-Path-Root"] = session.pathRoot;
+function dropboxSessionGet(path) {
 	return new Promise((resolve, reject) => {
-		gmGet(DROPBOX_DOWNLOAD_URL, {
-			method: "POST",
-			headers,
-			responseType: "arraybuffer",
-			timeout: 60000,
-			anonymous: false,
-		}, (err, response) => {
-			if (err) { reject(err); return; }
-			if (!response || response.status === 404 || response.status === 409) {
-				resolve(null);
-				return;
-			}
-			if (/\/login(?:\?|$)/.test(response.finalUrl || "")) {
-				reject(new Error("Sign in to dropbox.com in this browser first"));
-				return;
-			}
-			if (response.status < 200 || response.status >= 300) {
-				reject(new Error("Dropbox HTTP " + response.status));
-				return;
-			}
-			const bytes = new Uint8Array(response.response || new ArrayBuffer(0));
-			// A Fog of World chunk is a zlib stream (RFC 1950 header checksum).
-			if (bytes.length < 2 || bytes[0] !== 0x78 || ((bytes[0] << 8) + bytes[1]) % 31 !== 0) {
-				reject(new Error("Dropbox returned a non-chunk response"));
-				return;
-			}
-			resolve(response.response);
-		});
+		const request = {
+			id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+			path,
+			createdAt: Date.now(),
+		};
+		const responseKey = DROPBOX_RESPONSE_PREFIX + request.id;
+		let finished = false;
+		const enqueue = () => {
+			let queue;
+			try { queue = JSON.parse(GM_getValue(DROPBOX_QUEUE_KEY, "[]")); }
+			catch (_) { queue = []; }
+			if (!Array.isArray(queue)) queue = [];
+			if (!queue.some((item) => item?.id === request.id)) queue.push(request);
+			try { GM_setValue(DROPBOX_QUEUE_KEY, JSON.stringify(queue.slice(-64))); }
+			catch (_) {}
+		};
+		const finish = (error, value) => {
+			if (finished) return;
+			finished = true;
+			clearInterval(pollTimer);
+			clearInterval(retryTimer);
+			clearTimeout(timeoutTimer);
+			try { GM_deleteValue(responseKey); } catch (_) {}
+			if (error) reject(error); else resolve(value);
+		};
+		const poll = () => {
+			const raw = GM_getValue(responseKey, "");
+			if (!raw) return;
+			let response;
+			try { response = JSON.parse(raw); }
+			catch (_) { return; }
+			if (!response.ok) { finish(new Error(response.error || "Dropbox bridge failed")); return; }
+			if (response.missing) { finish(null, null); return; }
+			try {
+				const binary = atob(response.data || "");
+				const bytes = new Uint8Array(binary.length);
+				for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+				finish(null, bytes.buffer);
+			} catch (error) { finish(error); }
+		};
+		enqueue();
+		const pollTimer = setInterval(poll, 100);
+		const retryTimer = setInterval(enqueue, 2000);
+		const timeoutTimer = setTimeout(() => {
+			finish(new Error("Keep the Dropbox Sync tab open and reload it"));
+		}, 30000);
 	});
 }
 
@@ -396,7 +439,7 @@ export class FogOfWorldLayerProvider extends LayerProvider {
 						ctx.textAlign = "center";
 						ctx.fillText("Dropbox session unavailable", 128, 120);
 						ctx.fillText("Reload the Dropbox Sync tab", 128, 140);
-						done(error, canvas);
+						done(null, canvas);
 					});
 				return canvas;
 			},

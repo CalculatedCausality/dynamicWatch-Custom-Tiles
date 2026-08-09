@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.10.1
+// @version      7.10.2
 // @description  Multi-source basemaps and overlays for dynamicWatch, including Dropbox-backed Fog of World data, QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, and 3D terrain.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -11,7 +11,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
-// @grant        GM_cookie
+// @grant        GM_deleteValue
 // @grant        unsafeWindow
 // @connect      qldglobe.information.qld.gov.au
 // @connect      spatial-img.information.qld.gov.au
@@ -7046,6 +7046,8 @@
   var CACHE_LIMIT = 16;
   var CACHE_TTL = 5 * 60 * 1e3;
   var DROPBOX_DOWNLOAD_URL = "https://www.dropbox.com/2/files/download";
+  var DROPBOX_QUEUE_KEY = "dw_fow_dropbox_bridge_queue";
+  var DROPBOX_RESPONSE_PREFIX = "dw_fow_dropbox_bridge_response_";
   function loadDropboxSession() {
     try {
       return JSON.parse(GM_getValue(CFG.FOW_DROPBOX_SESSION_KEY, "{}")) || {};
@@ -7117,6 +7119,63 @@
       };
       XHR.prototype._dwDropboxWrapped = true;
     }
+    const bytesToBase64 = (buffer) => {
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 32768) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
+      }
+      return btoa(binary);
+    };
+    const active = /* @__PURE__ */ new Set();
+    const serviceQueue = async () => {
+      let queue;
+      try {
+        queue = JSON.parse(GM_getValue(DROPBOX_QUEUE_KEY, "[]"));
+      } catch (_) {
+        queue = [];
+      }
+      if (!Array.isArray(queue) || !queue.length) return;
+      try {
+        GM_setValue(DROPBOX_QUEUE_KEY, "[]");
+      } catch (_) {
+      }
+      for (const request of queue) {
+        if (!request?.id || !request.path || active.has(request.id) || Date.now() - Number(request.createdAt || 0) > 12e4) continue;
+        active.add(request.id);
+        Promise.resolve().then(async () => {
+          captureCookie();
+          const session = loadDropboxSession();
+          if (!session.csrf) throw new Error("Dropbox CSRF cookie unavailable");
+          const headers = {
+            "Content-Type": "application/octet-stream",
+            "Dropbox-API-Arg": JSON.stringify({ path: request.path }),
+            "X-CSRF-Token": session.csrf
+          };
+          if (session.uid) headers["X-Dropbox-Uid"] = session.uid;
+          if (session.pathRoot) headers["X-Dropbox-Path-Root"] = session.pathRoot;
+          const response = await page.fetch(DROPBOX_DOWNLOAD_URL, {
+            method: "POST",
+            headers,
+            credentials: "same-origin",
+            body: new Uint8Array(0)
+          });
+          if (response.status === 404 || response.status === 409) {
+            return { ok: true, missing: true };
+          }
+          if (!response.ok) throw new Error("Dropbox HTTP " + response.status);
+          return { ok: true, data: bytesToBase64(await response.arrayBuffer()) };
+        }).catch((error) => ({ ok: false, error: error.message || String(error) })).then((result) => {
+          try {
+            GM_setValue(DROPBOX_RESPONSE_PREFIX + request.id, JSON.stringify(result));
+          } catch (_) {
+          }
+          active.delete(request.id);
+        });
+      }
+    };
+    setInterval(serviceQueue, 200);
+    serviceQueue();
     console.info("[CustomTiles] Fog of World Dropbox session broker active");
   }
   function md5ShortAscii(value) {
@@ -7283,70 +7342,74 @@
     const stream = new Blob([arrayBuffer]).stream().pipeThrough(new DecompressionStream("deflate"));
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
-  function readDropboxCsrfCookie() {
-    return new Promise((resolve) => {
-      if (typeof GM_cookie === "undefined" || typeof GM_cookie.list !== "function") {
-        resolve("");
-        return;
-      }
-      try {
-        GM_cookie.list({ url: "https://www.dropbox.com/" }, (cookies, error) => {
-          if (error || !Array.isArray(cookies)) {
-            resolve("");
-            return;
-          }
-          resolve(cookies.find((cookie) => cookie.name === "__Host-js_csrf")?.value || "");
-        });
-      } catch (_) {
-        resolve("");
-      }
-    });
-  }
-  async function dropboxSessionGet(path) {
-    const session = loadDropboxSession();
-    const csrf = session.csrf || await readDropboxCsrfCookie();
-    if (!csrf) {
-      throw new Error("Open and reload the Fog of World Sync folder on dropbox.com");
-    }
-    const headers = {
-      "Content-Type": "application/octet-stream",
-      "Dropbox-API-Arg": JSON.stringify({ path }),
-      "X-CSRF-Token": csrf,
-      Referer: "https://www.dropbox.com/home" + path.slice(0, path.lastIndexOf("/"))
-    };
-    if (session.uid) headers["X-Dropbox-Uid"] = session.uid;
-    if (session.pathRoot) headers["X-Dropbox-Path-Root"] = session.pathRoot;
+  function dropboxSessionGet(path) {
     return new Promise((resolve, reject) => {
-      gmGet(DROPBOX_DOWNLOAD_URL, {
-        method: "POST",
-        headers,
-        responseType: "arraybuffer",
-        timeout: 6e4,
-        anonymous: false
-      }, (err, response) => {
-        if (err) {
-          reject(err);
+      const request = {
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+        path,
+        createdAt: Date.now()
+      };
+      const responseKey = DROPBOX_RESPONSE_PREFIX + request.id;
+      let finished = false;
+      const enqueue = () => {
+        let queue;
+        try {
+          queue = JSON.parse(GM_getValue(DROPBOX_QUEUE_KEY, "[]"));
+        } catch (_) {
+          queue = [];
+        }
+        if (!Array.isArray(queue)) queue = [];
+        if (!queue.some((item) => item?.id === request.id)) queue.push(request);
+        try {
+          GM_setValue(DROPBOX_QUEUE_KEY, JSON.stringify(queue.slice(-64)));
+        } catch (_) {
+        }
+      };
+      const finish = (error, value) => {
+        if (finished) return;
+        finished = true;
+        clearInterval(pollTimer);
+        clearInterval(retryTimer);
+        clearTimeout(timeoutTimer);
+        try {
+          GM_deleteValue(responseKey);
+        } catch (_) {
+        }
+        if (error) reject(error);
+        else resolve(value);
+      };
+      const poll = () => {
+        const raw = GM_getValue(responseKey, "");
+        if (!raw) return;
+        let response;
+        try {
+          response = JSON.parse(raw);
+        } catch (_) {
           return;
         }
-        if (!response || response.status === 404 || response.status === 409) {
-          resolve(null);
+        if (!response.ok) {
+          finish(new Error(response.error || "Dropbox bridge failed"));
           return;
         }
-        if (/\/login(?:\?|$)/.test(response.finalUrl || "")) {
-          reject(new Error("Sign in to dropbox.com in this browser first"));
+        if (response.missing) {
+          finish(null, null);
           return;
         }
-        if (response.status < 200 || response.status >= 300) {
-          reject(new Error("Dropbox HTTP " + response.status));
-          return;
+        try {
+          const binary = atob(response.data || "");
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          finish(null, bytes.buffer);
+        } catch (error) {
+          finish(error);
         }
-        const bytes = new Uint8Array(response.response || new ArrayBuffer(0));
-        if (bytes.length < 2 || bytes[0] !== 120 || ((bytes[0] << 8) + bytes[1]) % 31 !== 0) {
-          reject(new Error("Dropbox returned a non-chunk response"));
-          return;
-        }
-        resolve(response.response);
-      });
+      };
+      enqueue();
+      const pollTimer = setInterval(poll, 100);
+      const retryTimer = setInterval(enqueue, 2e3);
+      const timeoutTimer = setTimeout(() => {
+        finish(new Error("Keep the Dropbox Sync tab open and reload it"));
+      }, 3e4);
     });
   }
   function canvasPng(canvas) {
@@ -7480,7 +7543,7 @@
             ctx.textAlign = "center";
             ctx.fillText("Dropbox session unavailable", 128, 120);
             ctx.fillText("Reload the Dropbox Sync tab", 128, 140);
-            done(error, canvas);
+            done(null, canvas);
           });
           return canvas;
         },
