@@ -16,6 +16,82 @@ const FOW_NATIVE_ZOOM = 22;
 const FOW_CHUNK_ZOOM = 9;
 const CACHE_LIMIT = 16;
 const CACHE_TTL = 5 * 60 * 1000;
+const DROPBOX_DOWNLOAD_URL = "https://www.dropbox.com/2/files/download";
+
+function loadDropboxSession() {
+	try { return JSON.parse(GM_getValue(CFG.FOW_DROPBOX_SESSION_KEY, "{}")) || {}; }
+	catch (_) { return {}; }
+}
+
+function saveDropboxSession(values) {
+	const next = { ...loadDropboxSession(), ...values, capturedAt: Date.now() };
+	try { GM_setValue(CFG.FOW_DROPBOX_SESSION_KEY, JSON.stringify(next)); }
+	catch (_) {}
+}
+
+function captureDropboxHeaders(headersLike) {
+	try {
+		const headers = new Headers(headersLike || {});
+		const values = {};
+		for (const [header, key] of [
+			["x-csrf-token", "csrf"],
+			["x-dropbox-uid", "uid"],
+			["x-dropbox-path-root", "pathRoot"],
+		]) {
+			const value = headers.get(header);
+			if (value) values[key] = value;
+		}
+		if (Object.keys(values).length) saveDropboxSession(values);
+	} catch (_) {}
+}
+
+export function isDropboxWebPage() {
+	return globalThis.location?.hostname === "www.dropbox.com" &&
+		globalThis.location?.pathname.startsWith("/home");
+}
+
+// This script also runs on Dropbox's own /home page. It does not alter the
+// UI: it only observes the headers Dropbox's web client already sends and
+// shares the CSRF/user/root values with the dynamic.watch script instance.
+export function startDropboxSessionBroker() {
+	const page = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+	const captureCookie = () => {
+		const match = document.cookie.match(/(?:^|;\s*)__Host-js_csrf=([^;]+)/);
+		if (match) saveDropboxSession({ csrf: decodeURIComponent(match[1]) });
+	};
+	captureCookie();
+	const cookieTimer = setInterval(captureCookie, 2000);
+	setTimeout(() => clearInterval(cookieTimer), 30000);
+
+	if (typeof page.fetch === "function" && !page.fetch._dwDropboxWrapped) {
+		const originalFetch = page.fetch.bind(page);
+		const wrapped = function (input, init) {
+			captureDropboxHeaders(init?.headers || input?.headers);
+			return originalFetch(input, init);
+		};
+		wrapped._dwDropboxWrapped = true;
+		page.fetch = wrapped;
+	}
+
+	const XHR = page.XMLHttpRequest;
+	if (XHR?.prototype && !XHR.prototype._dwDropboxWrapped) {
+		const headerMap = new WeakMap();
+		const originalSet = XHR.prototype.setRequestHeader;
+		const originalSend = XHR.prototype.send;
+		XHR.prototype.setRequestHeader = function (name, value) {
+			let headers = headerMap.get(this);
+			if (!headers) { headers = {}; headerMap.set(this, headers); }
+			headers[name] = value;
+			return originalSet.apply(this, arguments);
+		};
+		XHR.prototype.send = function () {
+			captureDropboxHeaders(headerMap.get(this));
+			return originalSend.apply(this, arguments);
+		};
+		XHR.prototype._dwDropboxWrapped = true;
+	}
+	console.info("[CustomTiles] Fog of World Dropbox session broker active");
+}
 
 // Fog of World uses the first four MD5 hex characters of the decimal tile
 // id as a filename prefix. Tile ids are at most six ASCII digits, so one MD5
@@ -118,15 +194,48 @@ async function inflateZlib(arrayBuffer) {
 	return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-function dropboxSessionGet(url) {
+function readDropboxCsrfCookie() {
+	return new Promise((resolve) => {
+		if (typeof GM_cookie === "undefined" || typeof GM_cookie.list !== "function") {
+			resolve("");
+			return;
+		}
+		try {
+			GM_cookie.list({ url: "https://www.dropbox.com/" }, (cookies, error) => {
+				if (error || !Array.isArray(cookies)) { resolve(""); return; }
+				resolve(cookies.find((cookie) => cookie.name === "__Host-js_csrf")?.value || "");
+			});
+		} catch (_) { resolve(""); }
+	});
+}
+
+async function dropboxSessionGet(path) {
+	const session = loadDropboxSession();
+	const csrf = session.csrf || await readDropboxCsrfCookie();
+	if (!csrf) {
+		throw new Error("Open and reload the Fog of World Sync folder on dropbox.com");
+	}
+	const headers = {
+		"Content-Type": "application/octet-stream",
+		"Dropbox-API-Arg": JSON.stringify({ path }),
+		"X-CSRF-Token": csrf,
+		Referer: "https://www.dropbox.com/home" + path.slice(0, path.lastIndexOf("/")),
+	};
+	if (session.uid) headers["X-Dropbox-Uid"] = session.uid;
+	if (session.pathRoot) headers["X-Dropbox-Path-Root"] = session.pathRoot;
 	return new Promise((resolve, reject) => {
-		gmGet(url, {
+		gmGet(DROPBOX_DOWNLOAD_URL, {
+			method: "POST",
+			headers,
 			responseType: "arraybuffer",
 			timeout: 60000,
 			anonymous: false,
 		}, (err, response) => {
 			if (err) { reject(err); return; }
-			if (!response || response.status === 404) { resolve(null); return; }
+			if (!response || response.status === 404 || response.status === 409) {
+				resolve(null);
+				return;
+			}
 			if (/\/login(?:\?|$)/.test(response.finalUrl || "")) {
 				reject(new Error("Sign in to dropbox.com in this browser first"));
 				return;
@@ -136,10 +245,9 @@ function dropboxSessionGet(url) {
 				return;
 			}
 			const bytes = new Uint8Array(response.response || new ArrayBuffer(0));
-			// A missing private file resolves to the normal Dropbox HTML view.
 			// A Fog of World chunk is a zlib stream (RFC 1950 header checksum).
 			if (bytes.length < 2 || bytes[0] !== 0x78 || ((bytes[0] << 8) + bytes[1]) % 31 !== 0) {
-				resolve(null);
+				reject(new Error("Dropbox returned a non-chunk response"));
 				return;
 			}
 			resolve(response.response);
@@ -209,10 +317,8 @@ class DropboxFogSource {
 
 	async _downloadChunk(id) {
 		const filename = _fowFilenameForId(id);
-		const folder = this.folder.split("/").filter(Boolean).map(encodeURIComponent).join("/");
-		const url = "https://www.dropbox.com/home/" + folder +
-			"?preview=" + encodeURIComponent(filename) + "&dl=1";
-		const compressed = await dropboxSessionGet(url);
+		const path = this.folder + "/" + filename;
+		const compressed = await dropboxSessionGet(path);
 		if (!compressed) return null;
 		return _fowParseInflated(filename, await inflateZlib(compressed));
 	}
@@ -282,6 +388,14 @@ export class FogOfWorldLayerProvider extends LayerProvider {
 					.then(() => done(null, canvas))
 					.catch((error) => {
 						console.warn("[CustomTiles] Fog of World tile:", error.message);
+						const ctx = canvas.getContext("2d");
+						ctx.fillStyle = "rgba(65, 12, 20, 0.82)";
+						ctx.fillRect(0, 0, 256, 256);
+						ctx.fillStyle = "#fff";
+						ctx.font = "13px sans-serif";
+						ctx.textAlign = "center";
+						ctx.fillText("Dropbox session unavailable", 128, 120);
+						ctx.fillText("Reload the Dropbox Sync tab", 128, 140);
 						done(error, canvas);
 					});
 				return canvas;

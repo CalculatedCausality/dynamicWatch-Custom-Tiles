@@ -1,15 +1,17 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.10.0
+// @version      7.10.1
 // @description  Multi-source basemaps and overlays for dynamicWatch, including Dropbox-backed Fog of World data, QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, and 3D terrain.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
+// @match        https://www.dropbox.com/home*
 // @match        https://embed.waze.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_cookie
 // @grant        unsafeWindow
 // @connect      qldglobe.information.qld.gov.au
 // @connect      spatial-img.information.qld.gov.au
@@ -122,6 +124,7 @@
     LAYER_GARMIN: "Garmin Heatmap",
     LAYER_FOG_OF_WORLD: "Fog of World",
     FOW_DROPBOX_FOLDER_KEY: "dw_fow_dropbox_folder",
+    FOW_DROPBOX_SESSION_KEY: "dw_fow_dropbox_session",
     FOW_DROPBOX_DEFAULT_FOLDER: "/Apps/Fog of World/Sync",
     QLD_ORIGIN: "https://qldglobe.information.qld.gov.au",
     QLD_TOKEN_EP: "https://qldglobe.information.qld.gov.au/api/qldglobe/public/token",
@@ -7042,6 +7045,80 @@
   var FOW_CHUNK_ZOOM = 9;
   var CACHE_LIMIT = 16;
   var CACHE_TTL = 5 * 60 * 1e3;
+  var DROPBOX_DOWNLOAD_URL = "https://www.dropbox.com/2/files/download";
+  function loadDropboxSession() {
+    try {
+      return JSON.parse(GM_getValue(CFG.FOW_DROPBOX_SESSION_KEY, "{}")) || {};
+    } catch (_) {
+      return {};
+    }
+  }
+  function saveDropboxSession(values) {
+    const next = { ...loadDropboxSession(), ...values, capturedAt: Date.now() };
+    try {
+      GM_setValue(CFG.FOW_DROPBOX_SESSION_KEY, JSON.stringify(next));
+    } catch (_) {
+    }
+  }
+  function captureDropboxHeaders(headersLike) {
+    try {
+      const headers = new Headers(headersLike || {});
+      const values = {};
+      for (const [header, key] of [
+        ["x-csrf-token", "csrf"],
+        ["x-dropbox-uid", "uid"],
+        ["x-dropbox-path-root", "pathRoot"]
+      ]) {
+        const value = headers.get(header);
+        if (value) values[key] = value;
+      }
+      if (Object.keys(values).length) saveDropboxSession(values);
+    } catch (_) {
+    }
+  }
+  function isDropboxWebPage() {
+    return globalThis.location?.hostname === "www.dropbox.com" && globalThis.location?.pathname.startsWith("/home");
+  }
+  function startDropboxSessionBroker() {
+    const page = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+    const captureCookie = () => {
+      const match = document.cookie.match(/(?:^|;\s*)__Host-js_csrf=([^;]+)/);
+      if (match) saveDropboxSession({ csrf: decodeURIComponent(match[1]) });
+    };
+    captureCookie();
+    const cookieTimer = setInterval(captureCookie, 2e3);
+    setTimeout(() => clearInterval(cookieTimer), 3e4);
+    if (typeof page.fetch === "function" && !page.fetch._dwDropboxWrapped) {
+      const originalFetch = page.fetch.bind(page);
+      const wrapped = function(input, init) {
+        captureDropboxHeaders(init?.headers || input?.headers);
+        return originalFetch(input, init);
+      };
+      wrapped._dwDropboxWrapped = true;
+      page.fetch = wrapped;
+    }
+    const XHR = page.XMLHttpRequest;
+    if (XHR?.prototype && !XHR.prototype._dwDropboxWrapped) {
+      const headerMap = /* @__PURE__ */ new WeakMap();
+      const originalSet = XHR.prototype.setRequestHeader;
+      const originalSend = XHR.prototype.send;
+      XHR.prototype.setRequestHeader = function(name, value) {
+        let headers = headerMap.get(this);
+        if (!headers) {
+          headers = {};
+          headerMap.set(this, headers);
+        }
+        headers[name] = value;
+        return originalSet.apply(this, arguments);
+      };
+      XHR.prototype.send = function() {
+        captureDropboxHeaders(headerMap.get(this));
+        return originalSend.apply(this, arguments);
+      };
+      XHR.prototype._dwDropboxWrapped = true;
+    }
+    console.info("[CustomTiles] Fog of World Dropbox session broker active");
+  }
   function md5ShortAscii(value) {
     const bytes = Array.from(String(value), (char) => char.charCodeAt(0));
     const words = new Int32Array(16);
@@ -7206,9 +7283,43 @@
     const stream = new Blob([arrayBuffer]).stream().pipeThrough(new DecompressionStream("deflate"));
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
-  function dropboxSessionGet(url) {
+  function readDropboxCsrfCookie() {
+    return new Promise((resolve) => {
+      if (typeof GM_cookie === "undefined" || typeof GM_cookie.list !== "function") {
+        resolve("");
+        return;
+      }
+      try {
+        GM_cookie.list({ url: "https://www.dropbox.com/" }, (cookies, error) => {
+          if (error || !Array.isArray(cookies)) {
+            resolve("");
+            return;
+          }
+          resolve(cookies.find((cookie) => cookie.name === "__Host-js_csrf")?.value || "");
+        });
+      } catch (_) {
+        resolve("");
+      }
+    });
+  }
+  async function dropboxSessionGet(path) {
+    const session = loadDropboxSession();
+    const csrf = session.csrf || await readDropboxCsrfCookie();
+    if (!csrf) {
+      throw new Error("Open and reload the Fog of World Sync folder on dropbox.com");
+    }
+    const headers = {
+      "Content-Type": "application/octet-stream",
+      "Dropbox-API-Arg": JSON.stringify({ path }),
+      "X-CSRF-Token": csrf,
+      Referer: "https://www.dropbox.com/home" + path.slice(0, path.lastIndexOf("/"))
+    };
+    if (session.uid) headers["X-Dropbox-Uid"] = session.uid;
+    if (session.pathRoot) headers["X-Dropbox-Path-Root"] = session.pathRoot;
     return new Promise((resolve, reject) => {
-      gmGet(url, {
+      gmGet(DROPBOX_DOWNLOAD_URL, {
+        method: "POST",
+        headers,
         responseType: "arraybuffer",
         timeout: 6e4,
         anonymous: false
@@ -7217,7 +7328,7 @@
           reject(err);
           return;
         }
-        if (!response || response.status === 404) {
+        if (!response || response.status === 404 || response.status === 409) {
           resolve(null);
           return;
         }
@@ -7231,7 +7342,7 @@
         }
         const bytes = new Uint8Array(response.response || new ArrayBuffer(0));
         if (bytes.length < 2 || bytes[0] !== 120 || ((bytes[0] << 8) + bytes[1]) % 31 !== 0) {
-          resolve(null);
+          reject(new Error("Dropbox returned a non-chunk response"));
           return;
         }
         resolve(response.response);
@@ -7297,9 +7408,8 @@
     }
     async _downloadChunk(id) {
       const filename = _fowFilenameForId(id);
-      const folder = this.folder.split("/").filter(Boolean).map(encodeURIComponent).join("/");
-      const url = "https://www.dropbox.com/home/" + folder + "?preview=" + encodeURIComponent(filename) + "&dl=1";
-      const compressed = await dropboxSessionGet(url);
+      const path = this.folder + "/" + filename;
+      const compressed = await dropboxSessionGet(path);
       if (!compressed) return null;
       return _fowParseInflated(filename, await inflateZlib(compressed));
     }
@@ -7362,6 +7472,14 @@
           canvas.height = 256;
           source.paint(canvas, coords.z, coords.x, coords.y).then(() => done(null, canvas)).catch((error) => {
             console.warn("[CustomTiles] Fog of World tile:", error.message);
+            const ctx = canvas.getContext("2d");
+            ctx.fillStyle = "rgba(65, 12, 20, 0.82)";
+            ctx.fillRect(0, 0, 256, 256);
+            ctx.fillStyle = "#fff";
+            ctx.font = "13px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("Dropbox session unavailable", 128, 120);
+            ctx.fillText("Reload the Dropbox Sync tab", 128, 140);
             done(error, canvas);
           });
           return canvas;
@@ -12595,6 +12713,10 @@
 
   // src/app.js
   function bootUserscript() {
+    if (isDropboxWebPage()) {
+      startDropboxSessionBroker();
+      return;
+    }
     if (isWazeTokenFrame()) {
       startWazeTokenBroker();
       return;

@@ -133,6 +133,7 @@ export function loadHelpers() {
 		GM_getValue: (_k, d) => d,
 		GM_setValue: noop,
 		GM_registerMenuCommand: noop,
+		GM_cookie: { list: (_details, cb) => cb([], null) },
 		GM_xmlhttpRequest: () => ({ abort: noop }),
 	};
 	sandbox.window = sandbox;

@@ -202,9 +202,10 @@ The overlay reads Fog of World's reverse-engineered sync chunks directly. Data s
 
 1. Enable Dropbox sync in Fog of World and wait for it to finish.
 2. Sign in at [dropbox.com](https://www.dropbox.com/) in the same browser profile that runs Tampermonkey.
-3. Enable **Fog of World** in the layer switcher.
+3. Open `/Apps/Fog of World/Sync` on Dropbox and reload that tab once. The userscript observes Dropbox's own session headers; it does not read file contents on that page.
+4. Enable **Fog of World** in the layer switcher.
 
-The default folder is `/Apps/Fog of World/Sync`. Use Tampermonkey's **Set Fog of World Dropbox folder** menu command if your folder differs. The provider derives filenames from visible zoom-9 tile IDs, sends private-file requests with the existing Dropbox cookies, and caches 16 decoded chunks for five minutes. The overlay starts at zoom 9 and works in both 2D and 3D modes.
+The default folder is `/Apps/Fog of World/Sync`. Use Tampermonkey's **Set Fog of World Dropbox folder** menu command if your folder differs. The provider derives filenames from visible zoom-9 tile IDs, calls Dropbox's cookie-authenticated web download route with the CSRF/user/root headers captured from the Dropbox tab, and caches 16 decoded chunks for five minutes. The overlay starts at zoom 9 and works in both 2D and 3D modes. A red diagnostic tile appears instead of silent gray fog when the session is unavailable.
 
 ---
 

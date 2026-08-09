@@ -78,6 +78,7 @@ export const CFG = {
 	LAYER_GARMIN: "Garmin Heatmap",
 	LAYER_FOG_OF_WORLD: "Fog of World",
 	FOW_DROPBOX_FOLDER_KEY: "dw_fow_dropbox_folder",
+	FOW_DROPBOX_SESSION_KEY: "dw_fow_dropbox_session",
 	FOW_DROPBOX_DEFAULT_FOLDER: "/Apps/Fog of World/Sync",
 
 	QLD_ORIGIN: "https://qldglobe.information.qld.gov.au",
