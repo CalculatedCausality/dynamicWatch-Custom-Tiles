@@ -83,16 +83,8 @@ import {
 	prepareLayers,
 } from './utils/mvt.js';
 import { tileToBBox4326, tileToBBox3857, utfGridCellToLatLng } from './utils/tile-geometry.js';
-import {
-	_fowDecodeFilename, _fowFilenameForId, _fowParseInflated, _fowVisited,
-	isDropboxWebPage, startDropboxSessionBroker,
-} from './providers/fog-of-world.js';
 
 export function bootUserscript() {
-	if (isDropboxWebPage()) {
-		startDropboxSessionBroker();
-		return;
-	}
 	// When this script instance is running inside the hidden
 	// embed.waze.com iframe (see waze-token.js), it exists ONLY to mint
 	// reCAPTCHA tokens in the waze.com origin — there is no dynamic.watch
@@ -143,7 +135,6 @@ export function bootUserscript() {
 			_vexcelIsCredString,
 			LayerProvider, tileProvider, tokenTileProvider,
 			arcgisExportProvider, pollingDataLayer, oimIcon,
-			_fowDecodeFilename, _fowFilenameForId, _fowParseInflated, _fowVisited,
 		};
 	}
 

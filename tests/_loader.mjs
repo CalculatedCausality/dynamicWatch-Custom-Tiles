@@ -48,7 +48,6 @@ const HELPERS = [
 	// Layer-provider factories
 	"LayerProvider", "tileProvider", "tokenTileProvider",
 	"arcgisExportProvider", "pollingDataLayer", "oimIcon",
-	"_fowDecodeFilename", "_fowFilenameForId", "_fowParseInflated", "_fowVisited",
 ];
 
 export function loadHelpers() {
@@ -133,7 +132,6 @@ export function loadHelpers() {
 		GM_getValue: (_k, d) => d,
 		GM_setValue: noop,
 		GM_registerMenuCommand: noop,
-		GM_deleteValue: noop,
 		GM_xmlhttpRequest: () => ({ abort: noop }),
 	};
 	sandbox.window = sandbox;

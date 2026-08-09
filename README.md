@@ -98,7 +98,6 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 |---|---|---|
 | **Strava Heatmap** | 11 | Anonymous global aggregate heatmap; 512 px native tiles |
 | **Garmin Heatmap** | 17 | Composited from 5 activity feeds (running, hiking, trail running, road cycling, mountain biking) with additive canvas blending |
-| **Fog of World** | 22 | Personal explored-area fog loaded lazily from Fog of World's Dropbox `Sync` chunk files using your existing browser login |
 
 | QLD Globe + Strava Heatmap | QLD Historical (1972) | INTVL Territories + Geocaches |
 |---|---|---|
@@ -187,7 +186,6 @@ Quick-reference table — what you need to log in to for each layer to render.
 | Waze Traffic | No | Waze live-map georss (reCAPTCHA-gated) | Token minted in a hidden `embed.waze.com` iframe; activates at z≥9. Manual override: `GM_setValue("dw_waze_token_manual", "<token>")` |
 | INTVL Global Map | No | Public Mapbox Vector Tile CDN | |
 | Geocaches | No | Groundspeak's public tile-info + map.details endpoints | No login. UTFGrid drives placement; lazy map.details fetch enriches on click. |
-| Fog of World | Yes | Existing `dropbox.com` browser session | No API app or token; credentialed userscript requests reuse the browser's Dropbox login. |
 
 **Auto-token implementation details:**
 
@@ -195,21 +193,6 @@ Quick-reference table — what you need to log in to for each layer to render.
 - **Apple Maps** — uses a short-lived JWT from DuckDuckGo's MapKit proxy, then exchanges it at Apple's bootstrap endpoint for an `accessKey` (30 min TTL). Refreshes are auto-scheduled.
 - **Stamen Terrain** — Stadia Maps' keyless endpoint accepts requests from a `localhost` Origin; the script spoofs that header via Tampermonkey's privileged XHR.
 - **Geocaches** — uses Groundspeak's pre-2018 public tile API (`tiles{01..04}.geocaching.com`). The visible cache icons are Groundspeak's own `map.png` raster tiles (real per-type symbology) drawn via a Leaflet tile layer; the `map.info` UTFGrid (a 64×64 grid per tile encoding code + name per occupied cell) drives transparent click/hover hit-areas and the 3D dots. Cell coordinates reverse to lat/lng at tile_size/64 precision (~150 m at z=12). Difficulty/terrain/container/owner/favourites are pulled lazily from `map.details?i=GC<code>` on click. Two quirks handled transparently: `map.info` requires a `geocaching.com` Referer (real Tampermonkey sets it; the tile-layer `<img>` requests don't need it), and "cold" tiles return HTTP 204 until a `map.png` GET warms them (the tile layer does this automatically). No login, no API key.
-
-### Fog of World Dropbox setup
-
-The overlay reads Fog of World's reverse-engineered sync chunks directly. Data stays between your browser and Dropbox; there is no developer app, API token, or project server.
-
-1. Enable Dropbox sync in Fog of World and wait for it to finish.
-2. Sign in at [dropbox.com](https://www.dropbox.com/) in the same browser profile that runs Tampermonkey.
-3. Open `/Apps/Fog of World/Sync` on Dropbox, reload that tab once, and leave it open while using the layer.
-4. Enable **Fog of World** in the layer switcher. The map asks the Dropbox tab for visible chunks through Tampermonkey's shared local storage; downloads therefore remain same-origin with Dropbox.
-
-The default folder is `/Apps/Fog of World/Sync`. Use Tampermonkey's **Set Fog of World Dropbox folder** menu command if your folder differs. The provider derives filenames from visible zoom-9 tile IDs; the open Dropbox tab calls its cookie-authenticated web download route, returns compressed bytes through local extension storage, and the map caches 16 decoded chunks for five minutes. The overlay starts at zoom 9 and works in both 2D and 3D modes. While active, a bottom-centre status panel always reports the current zoom requirement, Dropbox-tab connection, requested filename, HTTP/bridge error, missing chunk, or successfully decoded block count.
-
-If Dropbox's private web endpoint rejects the browser session, use Tampermonkey's **Import Fog of World Sync folder** command on dynamicWatch and select the locally synced `Dropbox/Apps/Fog of World/Sync` directory. Valid chunks are copied into browser IndexedDB and remain available across reloads without an API token or open Dropbox tab. Re-run the import whenever Fog of World has synced changes.
-
----
 
 ## Known limitations
 

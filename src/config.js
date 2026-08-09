@@ -76,11 +76,6 @@ export const CFG = {
 		"World_Transportation/MapServer/tile/{z}/{y}/{x}",
 	LAYER_STRAVA: "Strava Heatmap",
 	LAYER_GARMIN: "Garmin Heatmap",
-	LAYER_FOG_OF_WORLD: "Fog of World",
-	FOW_DROPBOX_FOLDER_KEY: "dw_fow_dropbox_folder",
-	FOW_DROPBOX_SESSION_KEY: "dw_fow_dropbox_session",
-	FOW_DROPBOX_DEFAULT_FOLDER: "/Apps/Fog of World/Sync",
-	FOW_LOCAL_COUNT_KEY: "dw_fow_local_chunk_count",
 
 	QLD_ORIGIN: "https://qldglobe.information.qld.gov.au",
 	QLD_TOKEN_EP:
@@ -425,6 +420,6 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Heatmaps",
-		names:  [CFG.LAYER_FOG_OF_WORLD, CFG.LAYER_STRAVA, CFG.LAYER_GARMIN],
+		names:  [CFG.LAYER_STRAVA, CFG.LAYER_GARMIN],
 	},
 ];
