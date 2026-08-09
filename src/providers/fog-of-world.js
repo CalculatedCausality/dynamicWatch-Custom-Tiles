@@ -59,8 +59,11 @@ export function isDropboxWebPage() {
 // shares the CSRF/user/root values with the dynamic.watch script instance.
 export function startDropboxSessionBroker() {
 	const page = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+	let brokerBadge = null;
 	const showBadge = () => {
-		if (!document.body || document.getElementById("dw-fow-broker-badge")) return;
+		if (!document.body) return;
+		const existing = document.getElementById("dw-fow-broker-badge");
+		if (existing) { brokerBadge = existing; return; }
 		const badge = document.createElement("div");
 		badge.id = "dw-fow-broker-badge";
 		badge.textContent = "Fog bridge active";
@@ -79,6 +82,15 @@ export function startDropboxSessionBroker() {
 			pointerEvents: "none",
 		});
 		document.body.appendChild(badge);
+		brokerBadge = badge;
+	};
+	const setBadge = (message, isError = false) => {
+		showBadge();
+		if (!brokerBadge) return;
+		brokerBadge.textContent = "Fog bridge: " + message;
+		brokerBadge.style.background = isError ? "#ffebee" : "#e8f5e9";
+		brokerBadge.style.color = isError ? "#8e1621" : "#1b5e20";
+		brokerBadge.style.borderColor = isError ? "#ef5350" : "#65a66f";
 	};
 	showBadge();
 	if (!document.body) document.addEventListener("DOMContentLoaded", showBadge, { once: true });
@@ -129,6 +141,21 @@ export function startDropboxSessionBroker() {
 		}
 		return btoa(binary);
 	};
+	const isZlib = (buffer) => {
+		const bytes = new Uint8Array(buffer);
+		return bytes.length >= 2 && bytes[0] === 0x78 &&
+			(((bytes[0] << 8) + bytes[1]) % 31 === 0);
+	};
+	const legacyDownload = async (path, uid) => {
+		const encodedPath = path.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+		const url = "https://www.dropbox.com/pri/get/" + encodedPath +
+			(uid ? "?_subject_uid=" + encodeURIComponent(uid) : "");
+		const response = await page.fetch(url, { credentials: "same-origin" });
+		if (!response.ok) throw new Error("legacy HTTP " + response.status);
+		const buffer = await response.arrayBuffer();
+		if (!isZlib(buffer)) throw new Error("legacy route returned HTML");
+		return buffer;
+	};
 	const active = new Set();
 	const serviceQueue = async () => {
 		let queue;
@@ -141,6 +168,8 @@ export function startDropboxSessionBroker() {
 				Date.now() - Number(request.createdAt || 0) > 120000) continue;
 			active.add(request.id);
 			Promise.resolve().then(async () => {
+				const filename = request.path.split("/").pop();
+				setBadge("requesting " + filename + "...");
 				captureCookie();
 				const session = loadDropboxSession();
 				if (!session.csrf) throw new Error("Dropbox CSRF cookie unavailable");
@@ -157,13 +186,26 @@ export function startDropboxSessionBroker() {
 					credentials: "same-origin",
 					body: new Uint8Array(0),
 				});
-				if (response.status === 404 || response.status === 409) {
-					return { ok: true, missing: true };
+				if (response.ok) {
+					const buffer = await response.arrayBuffer();
+					if (!isZlib(buffer)) throw new Error("Dropbox returned non-chunk data");
+					return { ok: true, data: bytesToBase64(buffer), route: "v2" };
 				}
-				if (!response.ok) throw new Error("Dropbox HTTP " + response.status);
-				return { ok: true, data: bytesToBase64(await response.arrayBuffer()) };
+				try {
+					const buffer = await legacyDownload(request.path, session.uid);
+					return { ok: true, data: bytesToBase64(buffer), route: "legacy" };
+				} catch (legacyError) {
+					if (response.status === 404 || response.status === 409) {
+						return { ok: true, missing: true, route: "v2" };
+					}
+					throw new Error("Dropbox HTTP " + response.status + "; " + legacyError.message);
+				}
 			}).catch((error) => ({ ok: false, error: error.message || String(error) }))
 				.then((result) => {
+					const filename = request.path.split("/").pop();
+					if (!result.ok) setBadge(filename + ": " + result.error, true);
+					else if (result.missing) setBadge(filename + ": file not present", true);
+					else setBadge(filename + " downloaded via " + result.route);
 					try { GM_setValue(DROPBOX_RESPONSE_PREFIX + request.id, JSON.stringify(result)); }
 					catch (_) {}
 					active.delete(request.id);
