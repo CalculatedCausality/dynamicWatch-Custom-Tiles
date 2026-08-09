@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.10.3
+// @version      7.10.4
 // @description  Multi-source basemaps and overlays for dynamicWatch, including Dropbox-backed Fog of World data, QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, and 3D terrain.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -7079,10 +7079,34 @@
     }
   }
   function isDropboxWebPage() {
-    return globalThis.location?.hostname === "www.dropbox.com" && globalThis.location?.pathname.startsWith("/home");
+    const pageLocation = typeof unsafeWindow !== "undefined" ? unsafeWindow.location : typeof window !== "undefined" ? window.location : globalThis.location;
+    return pageLocation?.hostname === "www.dropbox.com" && pageLocation?.pathname.startsWith("/home");
   }
   function startDropboxSessionBroker() {
     const page = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+    const showBadge = () => {
+      if (!document.body || document.getElementById("dw-fow-broker-badge")) return;
+      const badge = document.createElement("div");
+      badge.id = "dw-fow-broker-badge";
+      badge.textContent = "Fog bridge active";
+      Object.assign(badge.style, {
+        position: "fixed",
+        right: "12px",
+        bottom: "12px",
+        zIndex: "2147483647",
+        padding: "6px 10px",
+        border: "1px solid #65a66f",
+        borderRadius: "6px",
+        background: "#e8f5e9",
+        color: "#1b5e20",
+        boxShadow: "0 1px 5px rgba(0,0,0,.25)",
+        font: "600 12px/1.3 sans-serif",
+        pointerEvents: "none"
+      });
+      document.body.appendChild(badge);
+    };
+    showBadge();
+    if (!document.body) document.addEventListener("DOMContentLoaded", showBadge, { once: true });
     const heartbeat = () => saveDropboxSession({ brokerAt: Date.now() });
     heartbeat();
     setInterval(heartbeat, 3e3);
