@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.10.5
+// @version      7.11.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including Dropbox-backed Fog of World data, QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, and 3D terrain.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*

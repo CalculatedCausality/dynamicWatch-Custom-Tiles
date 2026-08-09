@@ -207,6 +207,8 @@ The overlay reads Fog of World's reverse-engineered sync chunks directly. Data s
 
 The default folder is `/Apps/Fog of World/Sync`. Use Tampermonkey's **Set Fog of World Dropbox folder** menu command if your folder differs. The provider derives filenames from visible zoom-9 tile IDs; the open Dropbox tab calls its cookie-authenticated web download route, returns compressed bytes through local extension storage, and the map caches 16 decoded chunks for five minutes. The overlay starts at zoom 9 and works in both 2D and 3D modes. While active, a bottom-centre status panel always reports the current zoom requirement, Dropbox-tab connection, requested filename, HTTP/bridge error, missing chunk, or successfully decoded block count.
 
+If Dropbox's private web endpoint rejects the browser session, use Tampermonkey's **Import Fog of World Sync folder** command on dynamicWatch and select the locally synced `Dropbox/Apps/Fog of World/Sync` directory. Valid chunks are copied into browser IndexedDB and remain available across reloads without an API token or open Dropbox tab. Re-run the import whenever Fog of World has synced changes.
+
 ---
 
 ## Known limitations

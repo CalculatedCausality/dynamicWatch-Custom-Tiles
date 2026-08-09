@@ -80,6 +80,7 @@ export const CFG = {
 	FOW_DROPBOX_FOLDER_KEY: "dw_fow_dropbox_folder",
 	FOW_DROPBOX_SESSION_KEY: "dw_fow_dropbox_session",
 	FOW_DROPBOX_DEFAULT_FOLDER: "/Apps/Fog of World/Sync",
+	FOW_LOCAL_COUNT_KEY: "dw_fow_local_chunk_count",
 
 	QLD_ORIGIN: "https://qldglobe.information.qld.gov.au",
 	QLD_TOKEN_EP:

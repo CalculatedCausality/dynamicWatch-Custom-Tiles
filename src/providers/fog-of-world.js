@@ -18,6 +18,47 @@ const CACHE_TTL = 5 * 60 * 1000;
 const DROPBOX_DOWNLOAD_URL = "https://www.dropbox.com/2/files/download";
 const DROPBOX_QUEUE_KEY = "dw_fow_dropbox_bridge_queue";
 const DROPBOX_RESPONSE_PREFIX = "dw_fow_dropbox_bridge_response_";
+const LOCAL_DB_NAME = "dw_fog_of_world";
+const LOCAL_STORE_NAME = "chunks";
+
+function openLocalChunkDb() {
+	return new Promise((resolve, reject) => {
+		if (typeof indexedDB === "undefined") {
+			reject(new Error("IndexedDB is unavailable"));
+			return;
+		}
+		const request = indexedDB.open(LOCAL_DB_NAME, 1);
+		request.onupgradeneeded = () => {
+			if (!request.result.objectStoreNames.contains(LOCAL_STORE_NAME)) {
+				request.result.createObjectStore(LOCAL_STORE_NAME);
+			}
+		};
+		request.onsuccess = () => resolve(request.result);
+		request.onerror = () => reject(request.error || new Error("Could not open Fog storage"));
+	});
+}
+
+async function getLocalChunk(filename) {
+	const db = await openLocalChunkDb();
+	return new Promise((resolve, reject) => {
+		const transaction = db.transaction(LOCAL_STORE_NAME, "readonly");
+		const request = transaction.objectStore(LOCAL_STORE_NAME).get(filename);
+		request.onsuccess = () => resolve(request.result || null);
+		request.onerror = () => reject(request.error || new Error("Could not read local Fog chunk"));
+		transaction.oncomplete = () => db.close();
+	});
+}
+
+async function storeLocalChunkBatch(entries) {
+	const db = await openLocalChunkDb();
+	return new Promise((resolve, reject) => {
+		const transaction = db.transaction(LOCAL_STORE_NAME, "readwrite");
+		const store = transaction.objectStore(LOCAL_STORE_NAME);
+		for (const entry of entries) store.put(entry.buffer, entry.name);
+		transaction.oncomplete = () => { db.close(); resolve(); };
+		transaction.onerror = () => { db.close(); reject(transaction.error); };
+	});
+}
 
 function loadDropboxSession() {
 	try { return JSON.parse(GM_getValue(CFG.FOW_DROPBOX_SESSION_KEY, "{}")) || {}; }
@@ -438,7 +479,10 @@ class DropboxFogSource {
 			if (map.getZoom() < FOW_CHUNK_ZOOM || this.loadedCount) return;
 			const session = loadDropboxSession();
 			if (!session.brokerAt || Date.now() - session.brokerAt > 10000) {
-				this._setStatus("error", "Dropbox tab not connected; reload and leave the Sync folder open");
+				const localCount = Number(GM_getValue(CFG.FOW_LOCAL_COUNT_KEY, 0));
+				this._setStatus("error", localCount
+					? "Dropbox tab offline; " + localCount + " imported chunks available"
+					: "Dropbox tab offline; use Tampermonkey > Import Fog of World Sync folder");
 			}
 		}, 2000);
 		if (map.getZoom() < FOW_CHUNK_ZOOM) this._onZoom();
@@ -459,6 +503,49 @@ class DropboxFogSource {
 		GM_registerMenuCommand("Set Fog of World Dropbox folder", () => {
 			this.configure();
 		});
+		GM_registerMenuCommand("Import Fog of World Sync folder", () => {
+			this.importLocalFolder();
+		});
+	}
+
+	importLocalFolder() {
+		const input = document.createElement("input");
+		input.type = "file";
+		input.multiple = true;
+		input.webkitdirectory = true;
+		input.style.display = "none";
+		input.addEventListener("change", async () => {
+			const files = Array.from(input.files || [])
+				.filter((file) => _fowDecodeFilename(file.name));
+			if (!files.length) {
+				this._setStatus("error", "selected folder contains no Fog of World chunks");
+				input.remove();
+				return;
+			}
+			this._setStatus("wait", "importing 0 of " + files.length + " local chunks...");
+			let imported = 0;
+			try {
+				for (let offset = 0; offset < files.length; offset += 50) {
+					const entries = await Promise.all(
+						files.slice(offset, offset + 50).map(async (file) => ({
+							name: file.name,
+							buffer: await file.arrayBuffer(),
+						})),
+					);
+					await storeLocalChunkBatch(entries);
+					imported += entries.length;
+					this._setStatus("wait", "importing " + imported + " of " + files.length + " local chunks...");
+				}
+				GM_setValue(CFG.FOW_LOCAL_COUNT_KEY, imported);
+				this.cache.clear();
+				this._setStatus("ok", imported + " local chunks imported; redrawing...");
+				if (this.layer?._map) this.layer.redraw();
+			} catch (error) {
+				this._setStatus("error", "local import failed: " + (error.message || error));
+			} finally { input.remove(); }
+		}, { once: true });
+		document.body.appendChild(input);
+		input.click();
 	}
 
 	configure() {
@@ -501,6 +588,19 @@ class DropboxFogSource {
 	async _downloadChunk(id) {
 		const filename = _fowFilenameForId(id);
 		const path = this.folder + "/" + filename;
+		try {
+			const local = await getLocalChunk(filename);
+			if (local) {
+				this._setStatus("wait", "decoding local " + filename + "...");
+				const chunk = _fowParseInflated(filename, await inflateZlib(local));
+				this.loadedCount++;
+				this._setStatus("ok", "loaded local " + filename + " (" + chunk.blocks.size +
+					" blocks; " + this.loadedCount + " chunks ready)");
+				return chunk;
+			}
+		} catch (error) {
+			console.warn("[CustomTiles] Local Fog chunk:", error);
+		}
 		const session = loadDropboxSession();
 		if (!session.brokerAt || Date.now() - session.brokerAt > 10000) {
 			throw new Error("Dropbox tab not connected; reload and leave the Sync folder open");
