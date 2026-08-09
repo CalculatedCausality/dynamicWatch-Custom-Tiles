@@ -30,6 +30,7 @@ import {
 	GarminHeatmapLayerProvider,
 	StravaHeatmapLayerProvider,
 } from "../providers/heatmaps.js";
+import { FogOfWorldLayerProvider } from "../providers/fog-of-world.js";
 import { LightPollutionLayerProvider } from "../providers/light-pollution.js";
 import {
 	_ensureSalesHook,
@@ -285,6 +286,7 @@ export class CustomTilesApp {
 
 			addOverlay(CFG.LAYER_STRAVA,     new StravaHeatmapLayerProvider());
 			addOverlay(CFG.LAYER_GARMIN,     new GarminHeatmapLayerProvider());
+			addOverlay(CFG.LAYER_FOG_OF_WORLD, new FogOfWorldLayerProvider());
 			addOverlay(CFG.LAYER_WATER,      new WaterLayerProvider());
 			addOverlay(CFG.LAYER_FLIGHTS,    new FlightsLayerProvider());
 			addOverlay(CFG.LAYER_MARINE,     new MarineTrafficLayerProvider());

@@ -83,6 +83,7 @@ import {
 	prepareLayers,
 } from './utils/mvt.js';
 import { tileToBBox4326, tileToBBox3857, utfGridCellToLatLng } from './utils/tile-geometry.js';
+import { _fowDecodeFilename, _fowFilenameForId, _fowParseInflated, _fowVisited } from './providers/fog-of-world.js';
 
 export function bootUserscript() {
 	// When this script instance is running inside the hidden
@@ -135,6 +136,7 @@ export function bootUserscript() {
 			_vexcelIsCredString,
 			LayerProvider, tileProvider, tokenTileProvider,
 			arcgisExportProvider, pollingDataLayer, oimIcon,
+			_fowDecodeFilename, _fowFilenameForId, _fowParseInflated, _fowVisited,
 		};
 	}
 

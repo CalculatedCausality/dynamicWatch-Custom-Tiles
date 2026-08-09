@@ -167,6 +167,51 @@ t("readVarint two-byte (4096)", () => {
 	eq(r.v, 4096); eq(r.end, 2);
 });
 
+// ---- Fog of World Dropbox chunk format ----
+
+t("_fowDecodeFilename decodes known Fog of World chunks", () => {
+	eq(dw._fowFilenameForId(117660), "23e4lltkkoke");
+	eq(dw._fowFilenameForId(117659), "cd36lltksiwo");
+	eq(dw._fowFilenameForId(-1), "");
+	deepEq(dw._fowDecodeFilename("23e4lltkkoke"), {
+		id: 117660, x: 412, y: 229,
+	});
+	deepEq(dw._fowDecodeFilename("cd36lltksiwo"), {
+		id: 117659, x: 411, y: 229,
+	});
+	eq(dw._fowDecodeFilename("not-a-fow-file"), null);
+	eq(dw._fowDecodeFilename("23e4lltkkoki"), null, "rejects bad suffix");
+});
+
+t("_fowParseInflated reads sparse block indexes and bitmaps", () => {
+	const headerSize = 128 * 128 * 2;
+	const bytes = new Uint8Array(headerSize + 515);
+	const view = new DataView(bytes.buffer);
+	view.setUint16((7 * 128 + 5) * 2, 1, true);
+	bytes[headerSize] = 0x81;
+	bytes[headerSize + 8] = 0x40;
+	const tile = dw._fowParseInflated("23e4lltkkoke", bytes);
+	eq(tile.x, 412); eq(tile.y, 229); eq(tile.blocks.size, 1);
+	const bitmap = tile.blocks.get(7 * 128 + 5);
+	assert(dw._fowVisited(bitmap, 0, 0), "high bit is x=0");
+	assert(dw._fowVisited(bitmap, 7, 0), "low bit is x=7");
+	assert(dw._fowVisited(bitmap, 1, 1), "second row decoded");
+	assert(!dw._fowVisited(bitmap, 2, 1), "unset bit stays clear");
+});
+
+t("_fowParseInflated rejects truncated and out-of-range blocks", () => {
+	let threw = false;
+	try { dw._fowParseInflated("23e4lltkkoke", new Uint8Array(10)); }
+	catch (_) { threw = true; }
+	assert(threw, "truncated header rejected");
+	const bytes = new Uint8Array(128 * 128 * 2);
+	new DataView(bytes.buffer).setUint16(0, 2, true);
+	threw = false;
+	try { dw._fowParseInflated("23e4lltkkoke", bytes); }
+	catch (_) { threw = true; }
+	assert(threw, "block past eof rejected");
+});
+
 // ---- MVT geometry ----
 
 t("decodeGeometry decodes triangle MoveTo+LineTo+ClosePath", () => {
@@ -1455,6 +1500,7 @@ t("@connect covers every host the providers GM-fetch from", () => {
 		"lsa4.geohub.sa.gov.au",            // SA parcel + suburb identify
 		"services1.arcgis.com",             // ACT block identify
 		"gis.environment.gov.au",           // national cadastre (WA/NT identify)
+		"www.dropbox.com",                  // private Fog of World chunk downloads
 	];
 	for (const host of required) {
 		assert(declared.has(host), `@connect missing for GM-fetched host: ${host}`);

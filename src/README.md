@@ -21,6 +21,7 @@ Current modules:
 - `src/layers/polling-data-layer.js` — shared timer/view-refresh layer scaffold for live data overlays.
 - `src/layers/vector-tile-layer.js` — shared Leaflet vector-tile overlay factory for MVT-backed providers.
 - `src/providers/geocaching.js` — Geocaching.com raster/UTFGrid overlay and lazy cache-details enrichment.
+- `src/providers/fog-of-world.js` — session-backed Dropbox downloader, Fog of World sync-chunk decoder, and lazy fog tile renderer.
 - `src/providers/heatmaps.js` — Strava and Garmin heatmap providers.
 - `src/providers/intvl-global.js` — INTVL Global Map MVT renderer and hover identify.
 - `src/providers/light-pollution.js` — Light Pollution WMS overlay.
