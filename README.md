@@ -205,7 +205,7 @@ The overlay reads Fog of World's reverse-engineered sync chunks directly. Data s
 3. Open `/Apps/Fog of World/Sync` on Dropbox, reload that tab once, and leave it open while using the layer.
 4. Enable **Fog of World** in the layer switcher. The map asks the Dropbox tab for visible chunks through Tampermonkey's shared local storage; downloads therefore remain same-origin with Dropbox.
 
-The default folder is `/Apps/Fog of World/Sync`. Use Tampermonkey's **Set Fog of World Dropbox folder** menu command if your folder differs. The provider derives filenames from visible zoom-9 tile IDs; the open Dropbox tab calls its cookie-authenticated web download route, returns compressed bytes through local extension storage, and the map caches 16 decoded chunks for five minutes. The overlay starts at zoom 9 and works in both 2D and 3D modes. A red diagnostic tile appears instead of failing silently when the Dropbox tab is unavailable.
+The default folder is `/Apps/Fog of World/Sync`. Use Tampermonkey's **Set Fog of World Dropbox folder** menu command if your folder differs. The provider derives filenames from visible zoom-9 tile IDs; the open Dropbox tab calls its cookie-authenticated web download route, returns compressed bytes through local extension storage, and the map caches 16 decoded chunks for five minutes. The overlay starts at zoom 9 and works in both 2D and 3D modes. While active, a bottom-centre status panel always reports the current zoom requirement, Dropbox-tab connection, requested filename, HTTP/bridge error, missing chunk, or successfully decoded block count.
 
 ---
 

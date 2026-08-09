@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.10.2
+// @version      7.10.3
 // @description  Multi-source basemaps and overlays for dynamicWatch, including Dropbox-backed Fog of World data, QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, and 3D terrain.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -7083,6 +7083,9 @@
   }
   function startDropboxSessionBroker() {
     const page = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+    const heartbeat = () => saveDropboxSession({ brokerAt: Date.now() });
+    heartbeat();
+    setInterval(heartbeat, 3e3);
     const captureCookie = () => {
       const match = document.cookie.match(/(?:^|;\s*)__Host-js_csrf=([^;]+)/);
       if (match) saveDropboxSession({ csrf: decodeURIComponent(match[1]) });
@@ -7428,7 +7431,72 @@
       this.folder = GM_getValue(CFG.FOW_DROPBOX_FOLDER_KEY, CFG.FOW_DROPBOX_DEFAULT_FOLDER);
       this.cache = /* @__PURE__ */ new Map();
       this.layer = null;
+      this.statusEl = null;
+      this.loadedCount = 0;
+      this.missingCount = 0;
       this._registerConfigMenu();
+    }
+    _setStatus(kind, message) {
+      if (!this.statusEl) return;
+      const colours = {
+        ok: ["#e8f5e9", "#1b5e20", "#81c784"],
+        wait: ["#fff8e1", "#6d4c00", "#ffca28"],
+        error: ["#ffebee", "#8e1621", "#ef5350"]
+      };
+      const colour = colours[kind] || colours.wait;
+      this.statusEl.style.background = colour[0];
+      this.statusEl.style.color = colour[1];
+      this.statusEl.style.borderColor = colour[2];
+      this.statusEl.textContent = "Fog of World: " + message;
+      this.statusEl.title = message;
+    }
+    attachStatus(map) {
+      if (this.statusEl) return;
+      const el = document.createElement("div");
+      el.className = "dw-fow-status";
+      Object.assign(el.style, {
+        position: "absolute",
+        left: "50%",
+        bottom: "28px",
+        transform: "translateX(-50%)",
+        zIndex: "1200",
+        maxWidth: "min(560px, calc(100% - 32px))",
+        padding: "7px 12px",
+        border: "1px solid",
+        borderRadius: "6px",
+        boxShadow: "0 1px 5px rgba(0,0,0,.3)",
+        font: "600 12px/1.35 sans-serif",
+        textAlign: "center",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        pointerEvents: "none"
+      });
+      map.getContainer().appendChild(el);
+      this.statusEl = el;
+      this._onZoom = () => {
+        if (map.getZoom() < FOW_CHUNK_ZOOM) {
+          this._setStatus("wait", "zoom to level 9 or closer (currently " + map.getZoom() + ")");
+        }
+      };
+      map.on("zoomend", this._onZoom);
+      this._statusTimer = setInterval(() => {
+        if (map.getZoom() < FOW_CHUNK_ZOOM || this.loadedCount) return;
+        const session = loadDropboxSession();
+        if (!session.brokerAt || Date.now() - session.brokerAt > 1e4) {
+          this._setStatus("error", "Dropbox tab not connected; reload and leave the Sync folder open");
+        }
+      }, 2e3);
+      if (map.getZoom() < FOW_CHUNK_ZOOM) this._onZoom();
+      else this._setStatus("wait", "checking the Dropbox tab...");
+    }
+    detachStatus(map) {
+      if (this._onZoom) map.off("zoomend", this._onZoom);
+      clearInterval(this._statusTimer);
+      this._onZoom = null;
+      this._statusTimer = null;
+      this.statusEl?.remove();
+      this.statusEl = null;
     }
     _registerConfigMenu() {
       if (typeof GM_registerMenuCommand !== "function") return;
@@ -7463,6 +7531,7 @@
       }
       const pending = this._downloadChunk(id).catch((error) => {
         this.cache.delete(id);
+        this._setStatus("error", error.message || String(error));
         throw error;
       });
       this.cache.set(id, { expires: now + CACHE_TTL, promise: pending });
@@ -7472,9 +7541,21 @@
     async _downloadChunk(id) {
       const filename = _fowFilenameForId(id);
       const path = this.folder + "/" + filename;
+      const session = loadDropboxSession();
+      if (!session.brokerAt || Date.now() - session.brokerAt > 1e4) {
+        throw new Error("Dropbox tab not connected; reload and leave the Sync folder open");
+      }
+      this._setStatus("wait", "requesting " + filename + "...");
       const compressed = await dropboxSessionGet(path);
-      if (!compressed) return null;
-      return _fowParseInflated(filename, await inflateZlib(compressed));
+      if (!compressed) {
+        this.missingCount++;
+        this._setStatus("wait", "no chunk " + filename + " (loaded " + this.loadedCount + ", absent " + this.missingCount + ")");
+        return null;
+      }
+      const chunk = _fowParseInflated(filename, await inflateZlib(compressed));
+      this.loadedCount++;
+      this._setStatus("ok", "loaded " + filename + " (" + chunk.blocks.size + " blocks; " + this.loadedCount + " chunks ready)");
+      return chunk;
     }
     async paint(canvas, z, rawX, y) {
       if (z < FOW_CHUNK_ZOOM) return;
@@ -7548,10 +7629,12 @@
           return canvas;
         },
         onAdd(map) {
-          L.GridLayer.prototype.onAdd.call(this, map);
           source.layer = this;
+          source.attachStatus(map);
+          L.GridLayer.prototype.onAdd.call(this, map);
         },
         onRemove(map) {
+          source.detachStatus(map);
           L.GridLayer.prototype.onRemove.call(this, map);
         }
       });
