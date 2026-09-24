@@ -1,6 +1,7 @@
 import { CFG } from "../config.js";
 import { LayerProvider } from "../layers/provider-factories.js";
 import { tileToBBox3857 } from "../utils/tile-geometry.js";
+import { lightPollutionToken } from "../utils/lightpoll-token.js";
 
 export class LightPollutionLayerProvider extends LayerProvider {
 	create() {
@@ -31,7 +32,8 @@ export class LightPollutionLayerProvider extends LayerProvider {
 					"," +
 					bb.east +
 					"," +
-					bb.north
+					bb.north +
+					"&token=" + encodeURIComponent(lightPollutionToken())
 				);
 			},
 		});
@@ -45,8 +47,10 @@ export class LightPollutionLayerProvider extends LayerProvider {
 			attribution:
 				'Light pollution © <a href="https://www.lightpollutionmap.info/" target="_blank" rel="noreferrer">lightpollutionmap.info</a>',
 		});
-		layer._dwMb3DUrl =
-			CFG.LIGHTPOL_WMS_BASE + wmsParams + "&BBOX={bbox-epsg-3857}";
+		Object.defineProperty(layer, "_dwMb3DUrl", {
+			get: () => CFG.LIGHTPOL_WMS_BASE + wmsParams +
+				"&BBOX={bbox-epsg-3857}&token=" + encodeURIComponent(lightPollutionToken()),
+		});
 		return layer;
 	}
 }

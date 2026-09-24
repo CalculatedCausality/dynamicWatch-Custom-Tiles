@@ -13,6 +13,7 @@
 // is served with image/png Content-Type.
 
 import { loadHelpers } from "./_loader.mjs";
+import { lightPollutionToken } from "../src/utils/lightpoll-token.js";
 
 const dw = loadHelpers();
 
@@ -116,7 +117,7 @@ await test("OpenSeaMap → PNG (transparent overlay)", async () => {
 });
 
 await test("Strava heatmap → highest anonymous native tile", async () => {
-	const r = await fetchBuffer(`https://content-a.strava.com/anon/globalheat/all/blue/11/${TILE.z11.x}/${TILE.z11.y}.png?v=19`);
+	const r = await fetchBuffer(`https://heatmap-external-a.strava.com/tiles/all/blue/11/${TILE.z11.x}/${TILE.z11.y}.png`);
 	assertEq(r.status, 200);
 	assertEq(sniffImage(r.body), "png");
 	// PNG IHDR width/height are at bytes 16-23 (big-endian uint32). Strava's
@@ -130,7 +131,7 @@ await test("Strava heatmap → highest anonymous native tile", async () => {
 });
 
 await test("Strava heatmap → anonymous resolution ceiling", async () => {
-	const r = await fetchBuffer(`https://content-a.strava.com/anon/globalheat/all/blue/12/${TILE.z12.x}/${TILE.z12.y}.png?v=19`);
+	const r = await fetchBuffer(`https://heatmap-external-a.strava.com/tiles/all/blue/12/${TILE.z12.x}/${TILE.z12.y}.png`);
 	assertEq(r.status, 403,
 		"anonymous z12 status (if this becomes 200, raise STRAVA_HEATMAP_MAX_NATIVE_Z)");
 	assert(sniffImage(r.body) === "unknown",
@@ -145,7 +146,7 @@ await test("Strava heatmap → NO CORS for arbitrary origin (why we bridge it)",
 	// CORS-exempt). If this assertion ever FAILS (ACAO present), Strava
 	// re-opened CORS and we could drop the bridge + restore a plain raster.
 	const r = await fetch(
-		`https://content-a.strava.com/anon/globalheat/all/blue/11/${TILE.z11.x}/${TILE.z11.y}.png?v=19`,
+		`https://heatmap-external-a.strava.com/tiles/all/blue/11/${TILE.z11.x}/${TILE.z11.y}.png`,
 		{ headers: { Origin: "https://dynamic.watch" } });
 	assertEq(r.status, 200);
 	const acao = r.headers.get("access-control-allow-origin");
@@ -322,7 +323,7 @@ await test("QLD Cadastre → PNG", async () => {
 });
 
 await test("Light Pollution WMS → PNG (grid-aligned bbox)", async () => {
-	const r = await fetchBuffer("https://www2.lightpollutionmap.info/geoserver/gwc/service/wms?REQUEST=GetMap&SERVICE=WMS&VERSION=1.3.0&FORMAT=image%2Fpng&STYLES=WA&TRANSPARENT=TRUE&LAYERS=PostGIS%3ASB_2025&TILED=true&SRS=EPSG%3A3857&CRS=EPSG%3A3857&WIDTH=256&HEIGHT=256&BBOX=17024054.939683594,-3209132.195526562,17063190.698165625,-3169996.437044531");
+	const r = await fetchBuffer("https://www.lightpollutionmap.info/tiles/wms?REQUEST=GetMap&SERVICE=WMS&VERSION=1.3.0&FORMAT=image%2Fpng&STYLES=WA&TRANSPARENT=TRUE&LAYERS=PostGIS%3ASB_2025&TILED=true&SRS=EPSG%3A3857&CRS=EPSG%3A3857&WIDTH=256&HEIGHT=256&BBOX=17024054.939683594,-3209132.195526562,17063190.698165625,-3169996.437044531&token=" + encodeURIComponent(lightPollutionToken()));
 	assertEq(r.status, 200);
 	assertEq(sniffImage(r.body), "png");
 });

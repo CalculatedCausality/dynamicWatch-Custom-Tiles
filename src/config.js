@@ -34,22 +34,25 @@ export const CFG = {
 	LAYER_LABELS: "QLD Labels",
 	LAYER_ROADS: "QLD Roads",
 	// Vexcel high-res aerial (ANZ program, "urban" ortho mosaic) via
-	// their WMTS. Needs a user-supplied JWT (expires ~daily) — pasted
-	// once per day via prompt, stored in GM. CORS is open so tiles are
-	// plain <img> loads in 2D and direct raster sources in 3D.
+	// their WMTS. Needs a user-supplied viewer login or JWT (~daily);
+	// both can be entered via prompt and stored in GM. Imagery requests
+	// use GM fetches with the viewer Origin, including in 2D and 3D.
 	LAYER_VEXCEL: "Vexcel Aerial",
 	VEXCEL_API_BASE: "https://api.vexcelgroup.com",
 	VEXCEL_WMTS_BASE: "https://api.vexcelgroup.com/v2/ortho/wmts",
 	VEXCEL_TOKEN_KEY: "dw_vexcel_token",
 	VEXCEL_VIEWER_URL: "https://anz-viewer.vexcelgroup.com",
-	// Auto-login (opt-in): the viewer mints its ~24 h JWT via
+	// Auto-login with user-provided credentials: the viewer mints its
+	// ~24 h JWT via
 	// POST admin.vexcelgroup.com/api/auth/authenticate {username,password,
 	// application} → {data:{token}}. Credentials live in GM storage on the
-	// user's own machine ONLY (same trust model as the token) — never in
-	// the script or git. Lets the daily token refresh silently.
+	// user's own machine (same trust model as the token); none are
+	// embedded in the current source. The daily token refreshes silently;
+	// rejected credentials remain stored but are not retried automatically.
 	VEXCEL_ADMIN_BASE: "https://admin.vexcelgroup.com",
 	VEXCEL_USER_KEY: "dw_vexcel_user",
 	VEXCEL_PASS_KEY: "dw_vexcel_pass",
+	VEXCEL_REJECTED_KEY: "dw_vexcel_creds_rejected",
 	VEXCEL_APP_KEY: "anz",
 	VEXCEL_APP_HDR: "viewer-app",
 	// The viewer's proper tile credential is the `session` minted by
@@ -345,19 +348,20 @@ export const CFG = {
 	GOOGLE_HYBRID_TILE:
 		"https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
 	// Strava's logged-out map currently serves 512px tiles through URL z11.
+	// (content-a.strava.com/anon returned CloudFront 502s from Sept 2026.)
 	STRAVA_HEATMAP_TILE:
-		"https://content-a.strava.com/anon/globalheat/all/blue/{z}/{x}/{y}.png?v=19",
+		"https://heatmap-external-a.strava.com/tiles/all/blue/{z}/{x}/{y}.png",
 	STRAVA_HEATMAP_MAX_NATIVE_Z: 11,
 	OPENSEAMAP_TILE:
 		"https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
 	ACCC_MOBILE_COVERAGE_SERVICE:
 		"https://spatial.infrastructure.gov.au/server/rest/services/ACCC_Mobile_Sites_and_Coverages/MapServer",
 
-	// lightpollutionmap.info GeoServer (WMS via GWC tile cache).
+	// lightpollutionmap.info public tokenized WMS proxy (GeoServer direct is 403).
 	// LAYERS=PostGIS:SB_2025 = sky brightness, latest published edition.
 	// STYLES=WA = "World Atlas" colour ramp matching the official site.
 	LIGHTPOL_WMS_BASE:
-		"https://www2.lightpollutionmap.info/geoserver/gwc/service/wms",
+		"https://www.lightpollutionmap.info/tiles/wms",
 	LIGHTPOL_WMS_LAYER: "PostGIS:SB_2025",
 	LIGHTPOL_WMS_STYLE: "WA",
 };

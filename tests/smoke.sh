@@ -125,7 +125,7 @@ probe "OpenSeaMap seamarks"  "image/png"   60  \
 	"https://tiles.openseamap.org/seamark/10/947/593.png"
 
 probe "Strava heatmap (anon)" "image/png"  60  \
-	"https://content-a.strava.com/anon/globalheat/all/blue/11/1894/1186.png?v=19"
+	"https://heatmap-external-a.strava.com/tiles/all/blue/11/1894/1186.png"
 
 # Garmin fans 5 requests per tile (one per activity). All must work
 # or the heatmap composite is wrong. Test each activity.
@@ -200,8 +200,9 @@ echo "--- WMS ---"
 # with "No SRS specified" (a misleading error). This bbox = z=10 tile
 # (947, 593) which is Brisbane. The script computes equivalent bboxes
 # via tileToBBox3857, so any URL the script generates lines up.
+LIGHTPOL_TOKEN="$(node --input-type=module -e 'import { lightPollutionToken } from "./src/utils/lightpoll-token.js"; process.stdout.write(encodeURIComponent(lightPollutionToken()))')"
 probe "Light Pollution WMS"   "image/png" 100 \
-	"https://www2.lightpollutionmap.info/geoserver/gwc/service/wms?REQUEST=GetMap&SERVICE=WMS&VERSION=1.3.0&FORMAT=image%2Fpng&STYLES=WA&TRANSPARENT=TRUE&LAYERS=PostGIS%3ASB_2025&TILED=true&SRS=EPSG%3A3857&CRS=EPSG%3A3857&WIDTH=256&HEIGHT=256&BBOX=17024054.939683594,-3209132.195526562,17063190.698165625,-3169996.437044531"
+	"https://www.lightpollutionmap.info/tiles/wms?REQUEST=GetMap&SERVICE=WMS&VERSION=1.3.0&FORMAT=image%2Fpng&STYLES=WA&TRANSPARENT=TRUE&LAYERS=PostGIS%3ASB_2025&TILED=true&SRS=EPSG%3A3857&CRS=EPSG%3A3857&WIDTH=256&HEIGHT=256&BBOX=17024054.939683594,-3209132.195526562,17063190.698165625,-3169996.437044531&token=${LIGHTPOL_TOKEN}"
 
 echo ""
 echo "--- JSON APIs ---"
