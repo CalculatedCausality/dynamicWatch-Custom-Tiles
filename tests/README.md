@@ -5,22 +5,40 @@ Regression coverage for `dynamicwatch-custom-tiles.user.js`.
 ## Run
 
 ```bash
-npm test                 # rebuild bundle, then run all suites
-bash tests/run.sh        # all three suites, coloured output
-bash tests/run.sh --ci   # plain text, log-scrapable, same exit code
+npm test                 # rebuild + offline unit/source checks + local report in Chromium
+npm run test:live        # rebuild + endpoint smoke/shape + auth-gated 3D/raster checks
+npm run test:all         # offline and live in one run
+bash tests/run.sh --ci   # offline suite, plain CI output
+bash tests/run.sh --live -c  # live suite, plain CI output
+bash tests/run.sh --all --ci # both suites, plain CI output
 ```
 
-Exits with the sum of failures. Run individual suites:
+`npm test` never contacts external services, requires no credentials, and
+rebuilds the userscript before checking it. `bash tests/run.sh` uses the
+currently built bundle without rebuilding. The source regressions
+read current source directly. The synthetic report opens a generated local
+HTML file with synthetic image tiles; it is skipped only when Playwright or
+its Chromium binary is unavailable (`npm install && npm run e2e:install`).
+An available browser that fails the check makes the suite fail.
+
+`test:live` needs network access. Its 3D/raster browser checks also need
+`.auth/storage.json` from `npm run e2e:auth`; absent auth skips those checks
+while still running smoke/shape. Live endpoint probes may be affected by
+remote outages. Each runner exits with the sum of component exit codes
+(subject to the shell's 0–255 exit-code limit). Run individual checks:
 
 ```bash
-node tests/unit.mjs        # 111 tests, no network, ~200 ms
-bash tests/smoke.sh         # 34 tests + 7 skips, ~15 s
-node tests/shape.mjs        # 42 tests + 2 skips, ~15 s
+node tests/unit.mjs
+node --test tests/polling-data-layer.mjs tests/viewport-layers.mjs tests/vexcel-capture.mjs tests/vexcel-tile-batch.mjs tests/vexcel-http.mjs tests/vexcel-protocol-report.mjs tests/vexcel-cache.mjs tests/vexcel-csv.mjs tests/lightpoll-token.mjs
+node tests/check-secrets.mjs
+node tests/e2e/verify-vexcel-report.mjs
+bash tests/smoke.sh        # live endpoint liveness
+node tests/shape.mjs       # live structural validation
 ```
 
-## Three layers, increasing depth
+## Layers of increasing depth
 
-### `unit.mjs` — pure helpers (111 tests, no network)
+### `unit.mjs` — pure helpers (115 tests, no network)
 
 Loads the bundled userscript via `_loader.mjs` in a `vm.createContext`
 sandbox (Leaflet + GM + browser globals stubbed; boot disabled by test
@@ -38,6 +56,23 @@ pure code paths the script relies on every frame:
 - `intvlAgo` — today / yesterday / N days ago
 - `intvlArea` — m² under 0.1 km², km² with magnitude-aware precision
 - layer-provider factories and overlay group registration
+
+### Source-level regressions (no network)
+
+`polling-data-layer.mjs` tests mocked live-data responses across panning,
+zooming, polls, and layer removal; `viewport-layers.mjs` checks ArcGIS retries
+and vector-tile caps. `vexcel-capture.mjs`, `vexcel-tile-batch.mjs`,
+`vexcel-http.mjs`, `vexcel-protocol-report.mjs`, `vexcel-cache.mjs` and
+`vexcel-csv.mjs` cover Vexcel capture, tile batching, HTTP handling, pruning,
+batch input and report/protocol behavior against synthetic
+responses. `check-secrets.mjs` checks the repository for accidentally included
+credentials; `lightpoll-token.mjs` checks public WMS URL construction. These checks are part of the default `npm test` run.
+
+### Synthetic report browser check (local only)
+
+`verify-vexcel-report.mjs` opens a generated report with synthetic local tiles
+and checks modal navigation, native resolution, fit and reopen in Chromium.
+No dynamic.watch session or Vexcel token is needed.
 
 ### `smoke.sh` — endpoint liveness (34 tests, 7 skips)
 

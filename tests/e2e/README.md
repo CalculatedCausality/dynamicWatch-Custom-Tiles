@@ -22,7 +22,19 @@ re-run when the headless run reports "redirected to sign_in".
 
 ## Running
 
-Two scripts, two purposes.
+Use the focused checks below alongside the main 3D suite and snapshot debugger.
+
+### `verify-vexcel-report.mjs` — offline capture viewer
+
+```bash
+npm run e2e:vexcel-report
+```
+
+Uses synthetic local images and no Vexcel account. Opens the generated report
+in Chromium and verifies the result modal opens automatically at native 1:1
+resolution, switches compass directions, fits the viewport, closes and
+reopens. Real-image downloads require your own Vexcel login or token via
+`npm run vexcel:capture -- --max-zoom "34 Cottman St, Buderim QLD"`.
 
 ### `run-3d-asserts.mjs` — the test suite (use this for CI)
 
@@ -54,6 +66,25 @@ Exits non-zero on any failure. Tests cover:
    icon, run a sync, verify `_markerCache` shrunk by one.
 
 Reports go to `test-results/3d-asserts-<timestamp>.json`.
+
+### `verify-raster-security.mjs` — 2D/3D raster under normal browser security
+
+```bash
+npm run e2e:raster-security                     # headless
+HEADED=1 npm run e2e:raster-security            # watch it
+PLAN=/plan/2344645 npm run e2e:raster-security  # optional saved plan
+```
+
+Requires `.auth/storage.json` (`npm run e2e:auth`) and the existing
+`dynamicwatch-custom-tiles.user.js` bundle. Runs Chromium without
+`--disable-web-security` or site-isolation overrides. In Brisbane, selects
+the public QLD Topo base, checks that its actual 2D Leaflet raster images
+decode, then enables 3D and requires the matching Mapbox raster source to
+load with successful tile responses and no tile-request/CORS failures.
+Exits non-zero on missing auth, failed loading, or missing tiles. This
+catches browser-security regressions masked by the main 3D harness; the
+fetch-based GM shim still cannot emulate Tampermonkey's cross-origin GM
+requests, so this check uses a direct public raster layer.
 
 ### `verify-geocaches.mjs` — Geocaches layer end-to-end
 

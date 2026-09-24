@@ -111,6 +111,29 @@ When **QLD Historical** is active, a horizontal scrubber bar appears at the top 
 
 When **Vexcel Aerial** is the active base, a compass control docks on the map. Its centre button shows the flat vertical mosaic; the four cardinal buttons swap in the matching **oblique** (45°) aerial photo, warped in perspective directly on the primary map — panning, zooming, and the planner all keep working, and your route is re-projected onto the photo's own pixels so it hugs the terrain in the oblique view. The shared date scrubber steps through captures for whichever view is active, and an **IR** toggle switches the mosaic to near-infrared.
 
+#### Save four oblique photos for an address
+
+With Node.js 20+ and Vexcel ANZ viewer access, set **either** `VEXCEL_TOKEN` (a JWT or viewer URL containing `token=`) **or** both `VEXCEL_EMAIL` and `VEXCEL_PASSWORD` in your environment. Alternatively, save `{"email":"you@example.com","password":"your-password"}` in `~/.config/dynamicwatch-custom-tiles/vexcel-cli.json` on your device (outside the repository); the CLI will log in and mint its own token each run. Environment credentials take precedence. For example:
+
+```bash
+VEXCEL_TOKEN='your-viewer-jwt' npm run vexcel:capture -- "123 Example St, Brisbane QLD"
+# For the sharpest house view, open a native-resolution crop at the matched address:
+npm run vexcel:capture -- --max-zoom "34 Cottman St, Buderim QLD 4556"
+# Inspect the geocoded point first, or supply a corrected point without geocoding:
+npm run vexcel:capture -- --preview-location --max-zoom "34 Cottman St, Buderim QLD 4556"
+npm run vexcel:capture -- --lat -26.688606 --lon 153.040973 --max-zoom "34 Cottman St, Buderim QLD 4556"
+# or, with credentials already exported in your shell:
+npm run vexcel:capture -- --output ./my-capture.html --no-open "123 Example St, Brisbane QLD"
+```
+
+Omit the address to enter it at the interactive prompt. The CLI checks OpenStreetMap Nominatim first; if a numbered address has no matching house number, it tries ArcGIS address geocoding and accepts only a high-confidence match with the same number. If neither can verify the number, it stops instead of using a street centre. The report shows the matched address and geocoder. It finds the newest RGB collection with all four directions (or the newest available photo per direction), downloads each full frame at a bounded pyramid resolution (up to 1600 pixels along its longest edge), and writes a self-contained HTML report with capture dates and an optional location marker. The report opens in your browser when an opener is available; otherwise its path is printed. Default output is under the ignored `captures/` directory. Imagery is embedded as JPEG data; no Vexcel token or session URL is saved in the report. Coverage and access depend on your account and address.
+
+The report opens directly into a photo viewer. Select **N/E/S/W**, and **Top** where Vexcel has a straight-down frame; use **Fit** or **1:1 pixels** to inspect it, or **Save image** to download a self-contained SVG with the embedded JPEG tiles. With `--max-zoom`, the CLI uses Vexcel's camera projection to crop a 1536×1536 region centred on the address at native image resolution; if that projection is unavailable, it stops rather than capture the wrong area. This can require many more tile requests than the full-frame preview.
+
+If the address match is off, use `--preview-location` to inspect the mapped point before downloading imagery, or give both `--lat` and `--lon` to use a corrected WGS84 point. Completed image tiles are cached under `.vexcel-tile-cache/` beside the report, so rerunning an interrupted capture downloads only missing tiles. The CLI prunes cache entries older than 30 days and caps remaining tiles at 512 MiB. Both the report and cache are ignored when the default `captures/` output is used.
+
+To process several addresses, create a UTF-8 CSV with an `address` header and optional `lat,lon` columns (both values per row or neither). Run `npm run vexcel:capture -- --csv addresses.csv --max-zoom --output captures/my-batch`. Each address gets a separate HTML report, and `index.html` lists successes and failures. The batch respects Nominatim's one-request-per-second limit; manually specified coordinates skip geocoding.
+
 ### Hover identify
 
 A few layers show inline tooltips on hover:
@@ -122,9 +145,9 @@ A few layers show inline tooltips on hover:
 - **Historic Mining Leases** — permit number, type, status, minerals, and holder
 - **INTVL Global Map** — territory size, the owner's colour swatch, and the precise recording time decoded from the activity's cuid
 
-### Street View from any click
+### Google Maps from any click
 
-Right-clicking the map (or placing a waypoint) shows a popup with the usual dynamicWatch actions. The script adds a **Street View** button to the same row; opens Google Street View at that exact coordinate in a new tab.
+Right-clicking the map (or placing a waypoint) shows a popup with the usual dynamicWatch actions. The script adds a **Google Maps** button to the same row; it opens a pin at that coordinate in a new tab. From there, use Google Maps' pegman to enter Street View where available.
 
 The coordinate at the top of the popup is also click-to-copy — one tap puts `lat,lng` on your clipboard.
 
@@ -189,6 +212,7 @@ Quick-reference table — what you need to log in to for each layer to render.
 
 **Auto-token implementation details:**
 
+- **Vexcel Aerial** — requires your own [ANZ viewer](https://anz-viewer.vexcelgroup.com) login or a one-off token; no account is included in the script. The prompt accepts `email:password` for on-device GM storage and automatic token refresh, or a token/URL for use until it expires. Rejected credentials remain stored, but automatic login stops until you enter credentials again; an existing token is retained.
 - **QLD Globe / QLD Roads / QLD Historical** — uses QLD Government's public bearer-token endpoint. The script bootstraps a CSRF cookie + POSTs for a token on first load, caches it via Tampermonkey storage, and refreshes a few minutes before expiry. No QLD account needed.
 - **Apple Maps** — uses a short-lived JWT from DuckDuckGo's MapKit proxy, then exchanges it at Apple's bootstrap endpoint for an `accessKey` (30 min TTL). Refreshes are auto-scheduled.
 - **Stamen Terrain** — Stadia Maps' keyless endpoint accepts requests from a `localhost` Origin; the script spoofs that header via Tampermonkey's privileged XHR.
@@ -224,14 +248,26 @@ To work on it locally:
 A multi-layer regression suite lives under [`tests/`](tests/) — see [tests/README.md](tests/README.md) for the full coverage manifest. Run from the repo root:
 
 ```bash
-npm test                 # rebuild + run all suites
-bash tests/run.sh        # run suites against current bundle
+npm test                 # rebuild + offline checks (no network)
+npm run test:live        # rebuild + network and authenticated browser checks
+npm run test:all         # rebuild + both suites
+bash tests/run.sh        # offline checks against current bundle
 bash tests/run.sh --ci   # plain text output
 ```
 
-- **`unit.mjs`** (111 tests, no network, ~200 ms) — pure helpers: tile geometry, MVT/protobuf decode, Cadastre formatters, OnTheHouse URL builders, INTVL date utilities, layer-provider factories, and layer-group registration. Loaded into a sandboxed `vm.createContext` via [`_loader.mjs`](tests/_loader.mjs) so the production code itself is what gets exercised.
+- **`unit.mjs`** (115 tests, no network) — pure helpers: tile geometry, MVT/protobuf decode, Cadastre formatters, historical-map URLs, OnTheHouse URL builders, INTVL date utilities, layer-provider factories, and layer-group registration. Loaded into a sandboxed `vm.createContext` via [`_loader.mjs`](tests/_loader.mjs) so the production code itself is what gets exercised.
+- **Source-level regressions** (`polling-data-layer.mjs`, `viewport-layers.mjs`, `vexcel-capture.mjs`, `vexcel-tile-batch.mjs`, `vexcel-http.mjs`, `vexcel-protocol-report.mjs`; no network) — async overlay freshness/retries and the Vexcel capture CLI with mocked services. `check-secrets.mjs` checks shipped source and bundle for embedded credentials.
 - **`smoke.sh`** (34 tests + 7 skips, ~15 s) — HTTP probe every public layer endpoint over Brisbane CBD: HTTP 200 + content-type + minimum body size. Mapbox Terrain-DEM is skipped unless `MAPBOX_TOKEN` is set.
 - **`shape.mjs`** (42 tests + 2 skips, ~15 s) — deep structural validation: PNG/JPEG magic-byte sniff, PBF decoded via the userscript's own `mvtDecode`, JSON field walks asserting every field the script reads. Also runs the full QLD CSRF token bootstrap, Apple DuckDuckGo → bootstrap chain, and the Esri Wayback catalog → release → tile pipeline end-to-end. Mapbox terrain probes are opt-in via `MAPBOX_TOKEN`.
 - **`e2e/run-3d-asserts.mjs`** (8 tests, ~60 s) — Playwright-driven assertions on a real Chromium against a saved plan. Covers 3D enable, marker reprojection under rotation, waypoint drag, the rapid-toggle stress path, heatmap persistence, overlay-above-base layer order, and the 3D → 2D → 3D cycle. Needs `npm install` + `npm run e2e:install` + `npm run e2e:auth` once; see [`tests/e2e/README.md`](tests/e2e/README.md).
+- **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
+- **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.12.0
+
+- Vexcel now prompts for each user's own viewer account (or token) instead of using a bundled account. Existing on-device logins continue to refresh automatically.
+- Live overlays discard obsolete responses; ArcGIS and vector-tile overlays recover from failed or oversized queries. Historical scan links are validated.
+- Strava uses its working external heatmap CDN; Light Pollution follows the current public tokenized WMS endpoint.
+- The local capture CLI accepts address or exact coordinates, supports batch CSV, native house crops, cache resume/pruning, and five-view reports with image downloads. Offline and live tests can be run separately.
 
 The suite exits with the sum of failures so it can drop into any pre-push hook.

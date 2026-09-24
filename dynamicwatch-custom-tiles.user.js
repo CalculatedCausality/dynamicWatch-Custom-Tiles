@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.11.1
+// @version      7.12.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, and 3D terrain.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
@@ -28,7 +28,7 @@
 // @connect      admin.vexcelgroup.com
 // @connect      connecttile.garmin.com
 // @connect      strava.com
-// @connect      content-a.strava.com
+// @connect      heatmap-external-a.strava.com
 // @connect      cdn.apple-mapkit.com
 // @connect      duckduckgo.com
 // @connect      tiles.stadiamaps.com
@@ -40,7 +40,7 @@
 // @connect      openinframap.org
 // @connect      spatial.infrastructure.gov.au
 // @connect      tiles.openseamap.org
-// @connect      www2.lightpollutionmap.info
+// @connect      www.lightpollutionmap.info
 // @connect      www.onthehouse.com.au
 // @connect      d1yalngj9nsyl4.cloudfront.net
 // @connect      www.geocaching.com
@@ -81,22 +81,25 @@
     LAYER_LABELS: "QLD Labels",
     LAYER_ROADS: "QLD Roads",
     // Vexcel high-res aerial (ANZ program, "urban" ortho mosaic) via
-    // their WMTS. Needs a user-supplied JWT (expires ~daily) — pasted
-    // once per day via prompt, stored in GM. CORS is open so tiles are
-    // plain <img> loads in 2D and direct raster sources in 3D.
+    // their WMTS. Needs a user-supplied viewer login or JWT (~daily);
+    // both can be entered via prompt and stored in GM. Imagery requests
+    // use GM fetches with the viewer Origin, including in 2D and 3D.
     LAYER_VEXCEL: "Vexcel Aerial",
     VEXCEL_API_BASE: "https://api.vexcelgroup.com",
     VEXCEL_WMTS_BASE: "https://api.vexcelgroup.com/v2/ortho/wmts",
     VEXCEL_TOKEN_KEY: "dw_vexcel_token",
     VEXCEL_VIEWER_URL: "https://anz-viewer.vexcelgroup.com",
-    // Auto-login (opt-in): the viewer mints its ~24 h JWT via
+    // Auto-login with user-provided credentials: the viewer mints its
+    // ~24 h JWT via
     // POST admin.vexcelgroup.com/api/auth/authenticate {username,password,
     // application} → {data:{token}}. Credentials live in GM storage on the
-    // user's own machine ONLY (same trust model as the token) — never in
-    // the script or git. Lets the daily token refresh silently.
+    // user's own machine (same trust model as the token); none are
+    // embedded in the current source. The daily token refreshes silently;
+    // rejected credentials remain stored but are not retried automatically.
     VEXCEL_ADMIN_BASE: "https://admin.vexcelgroup.com",
     VEXCEL_USER_KEY: "dw_vexcel_user",
     VEXCEL_PASS_KEY: "dw_vexcel_pass",
+    VEXCEL_REJECTED_KEY: "dw_vexcel_creds_rejected",
     VEXCEL_APP_KEY: "anz",
     VEXCEL_APP_HDR: "viewer-app",
     // The viewer's proper tile credential is the `session` minted by
@@ -323,14 +326,15 @@
     // changes happen in one place.
     GOOGLE_HYBRID_TILE: "https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
     // Strava's logged-out map currently serves 512px tiles through URL z11.
-    STRAVA_HEATMAP_TILE: "https://content-a.strava.com/anon/globalheat/all/blue/{z}/{x}/{y}.png?v=19",
+    // (content-a.strava.com/anon returned CloudFront 502s from Sept 2026.)
+    STRAVA_HEATMAP_TILE: "https://heatmap-external-a.strava.com/tiles/all/blue/{z}/{x}/{y}.png",
     STRAVA_HEATMAP_MAX_NATIVE_Z: 11,
     OPENSEAMAP_TILE: "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
     ACCC_MOBILE_COVERAGE_SERVICE: "https://spatial.infrastructure.gov.au/server/rest/services/ACCC_Mobile_Sites_and_Coverages/MapServer",
-    // lightpollutionmap.info GeoServer (WMS via GWC tile cache).
+    // lightpollutionmap.info public tokenized WMS proxy (GeoServer direct is 403).
     // LAYERS=PostGIS:SB_2025 = sky brightness, latest published edition.
     // STYLES=WA = "World Atlas" colour ramp matching the official site.
-    LIGHTPOL_WMS_BASE: "https://www2.lightpollutionmap.info/geoserver/gwc/service/wms",
+    LIGHTPOL_WMS_BASE: "https://www.lightpollutionmap.info/tiles/wms",
     LIGHTPOL_WMS_LAYER: "PostGIS:SB_2025",
     LIGHTPOL_WMS_STYLE: "WA"
   };
@@ -3023,36 +3027,51 @@
       "X-App-Key": CFG.VEXCEL_APP_HDR
     }, extra || {});
   }
-  var VEXCEL_BAKED_USER = "szxc61qc8@mozmail.com";
-  var VEXCEL_BAKED_PASS = "4Bp6GoxdPzaZLAfhj@";
   function _getStoredCreds() {
     try {
       return {
-        user: GM_getValue(CFG.VEXCEL_USER_KEY, "") || VEXCEL_BAKED_USER,
-        pass: GM_getValue(CFG.VEXCEL_PASS_KEY, "") || VEXCEL_BAKED_PASS
+        user: GM_getValue(CFG.VEXCEL_USER_KEY, "") || "",
+        pass: GM_getValue(CFG.VEXCEL_PASS_KEY, "") || ""
       };
     } catch (_) {
-      return { user: VEXCEL_BAKED_USER, pass: VEXCEL_BAKED_PASS };
+      return { user: "", pass: "" };
+    }
+  }
+  var _loginInFlight = null;
+  var _loginCooldownUntil = 0;
+  function _credsRejected() {
+    try {
+      return !!GM_getValue(CFG.VEXCEL_REJECTED_KEY, false);
+    } catch (_) {
+      return false;
+    }
+  }
+  function _rejectCreds(creds) {
+    const current = _getStoredCreds();
+    if (current.user !== creds.user || current.pass !== creds.pass) return;
+    try {
+      GM_setValue(CFG.VEXCEL_REJECTED_KEY, true);
+    } catch (_) {
     }
   }
   function _storeCreds(user, pass) {
     try {
       GM_setValue(CFG.VEXCEL_USER_KEY, user || "");
       GM_setValue(CFG.VEXCEL_PASS_KEY, pass || "");
+      GM_setValue(CFG.VEXCEL_REJECTED_KEY, false);
+      _loginCooldownUntil = 0;
     } catch (_) {
     }
   }
   function _hasCreds() {
     const c = _getStoredCreds();
-    return !!(c.user && c.pass);
+    return !!(c.user && c.pass && !_credsRejected());
   }
   function _vexcelIsCredString(s) {
     s = String(s || "").trim();
     const i = s.indexOf(":");
     return i > 0 && s.slice(0, i).indexOf("@") > 0 && !/^https?:/i.test(s);
   }
-  var _loginInFlight = null;
-  var _loginCooldownUntil = 0;
   function _vexcelLogin(cb) {
     cb = cb || function() {
     };
@@ -3063,6 +3082,10 @@
     }
     if (_loginInFlight) {
       _loginInFlight.push(cb);
+      return;
+    }
+    if (_credsRejected()) {
+      cb(null, "badcreds");
       return;
     }
     const now = typeof Date !== "undefined" && Date.now ? Date.now() : 0;
@@ -3106,7 +3129,7 @@
       (err, data, raw) => {
         const status = raw ? raw.status : 0;
         if (status === 401 || status === 403) {
-          _storeCreds("", "");
+          _rejectCreds(creds);
           done(null, "badcreds");
           return;
         }
@@ -3116,7 +3139,7 @@
         }
         const tok = data.data && data.data.token;
         if (!acceptToken(tok)) {
-          _storeCreds("", "");
+          _rejectCreds(creds);
           done(null, "badcreds");
         }
       }
@@ -4699,11 +4722,7 @@
     return new PerspectiveLayer();
   }
 
-  // src/providers/vexcel.js
-  function _vexcelTileTpl(token, session) {
-    const base = CFG.VEXCEL_WMTS_BASE + "?service=wmts&request=getTile&layer=urban&Style=RGB&TileMatrixSet=urban&TileMatrix={z}&TileRow={y}&TileCol={x}&format=image/jpeg";
-    return session ? base + "&session=" + encodeURIComponent(session) + "&token=" + encodeURIComponent(token) : base + "&token=" + encodeURIComponent(token);
-  }
+  // src/providers/vexcel-protocol.js
   var VEXCEL_DIRECTIONS = [
     { key: "oblique-north", label: "N" },
     { key: "oblique-east", label: "E" },
@@ -4717,6 +4736,38 @@
   }
   function _vexcelBand(name) {
     return /_irg$/i.test(String(name || "")) ? "irg" : "rgb";
+  }
+  function vexcelPointWkt(lng, lat) {
+    return `POINT(${Number(lng)} ${Number(lat)})`;
+  }
+  function vexcelOrientedQueryBody(lat, lng) {
+    return {
+      wkt: vexcelPointWkt(lng, lat),
+      srid: "4326",
+      layer: "wide-area,urban",
+      "order-by": "image-center-distance-asc",
+      include: "collection,capture-date,product-type,image-name,source-layer,raster-size-width,raster-size-height,geometry"
+    };
+  }
+  function vexcelFrameQueryBody(lng, lat, collection, dir, band) {
+    const query = {
+      wkt: vexcelPointWkt(lng, lat),
+      srid: "4326",
+      layer: "wide-area,urban",
+      "product-type": dir,
+      bands: band || "rgb",
+      "order-by": "image-center-distance-asc",
+      "total-records": 1,
+      include: "image-name,source-layer,raster-size-width,raster-size-height,geometry"
+    };
+    if (collection) query.collection = collection;
+    return query;
+  }
+
+  // src/providers/vexcel.js
+  function _vexcelTileTpl(token, session) {
+    const base = CFG.VEXCEL_WMTS_BASE + "?service=wmts&request=getTile&layer=urban&Style=RGB&TileMatrixSet=urban&TileMatrix={z}&TileRow={y}&TileCol={x}&format=image/jpeg";
+    return session ? base + "&session=" + encodeURIComponent(session) + "&token=" + encodeURIComponent(token) : base + "&token=" + encodeURIComponent(token);
   }
   function _vexcelParseObliques(data) {
     const images = {};
@@ -4752,7 +4803,7 @@
   }
   function _vexcelObliqueExtractUrl(imageName, layer, lat, lng, token) {
     if (!imageName || !_vexcelTokenValid(token)) return "";
-    const wkt = `POINT(${Number(lng)} ${Number(lat)})`;
+    const wkt = vexcelPointWkt(lng, lat);
     return CFG.VEXCEL_API_BASE + "/v2/oriented/extract?wkt=" + encodeURIComponent(wkt) + "&srid=4326&layer=" + encodeURIComponent(layer || "urban") + "&image-name=" + encodeURIComponent(imageName) + "&token=" + encodeURIComponent(token);
   }
   function _vexcelObliqueTileBase(imageName, layer, token, session) {
@@ -4777,18 +4828,7 @@
       CFG.VEXCEL_API_BASE + "/v2/oriented/query?" + (session ? "session=" + encodeURIComponent(session) + "&" : "") + "token=" + encodeURIComponent(token),
       {
         method: "POST",
-        data: JSON.stringify({
-          wkt: `POINT(${Number(lng)} ${Number(lat)})`,
-          srid: "4326",
-          layer: "wide-area,urban",
-          // Both bands (rgb + irg) so the viewer can offer an IR
-          // toggle; parse buckets them by the image-name suffix.
-          // image-center-distance-asc → the first image per cell is
-          // the one whose frame is centred nearest the clicked point,
-          // so the user's spot sits near the middle of the oblique.
-          "order-by": "image-center-distance-asc",
-          include: "collection,capture-date,product-type,image-name,source-layer,raster-size-width,raster-size-height,geometry"
-        }),
+        data: JSON.stringify(vexcelOrientedQueryBody(lat, lng)),
         headers: _vexcelOriginHeaders({ "Content-Type": "application/json" })
       },
       (err, data, raw) => {
@@ -4823,17 +4863,7 @@
       cb(null);
       return;
     }
-    const query = {
-      wkt: `POINT(${Number(lng)} ${Number(lat)})`,
-      srid: "4326",
-      layer: "wide-area,urban",
-      "product-type": dir,
-      bands: band || "rgb",
-      "order-by": "image-center-distance-asc",
-      "total-records": 1,
-      include: "image-name,source-layer,raster-size-width,raster-size-height,geometry"
-    };
-    if (collection) query.collection = collection;
+    const query = vexcelFrameQueryBody(lng, lat, collection, dir, band);
     gmJsonGet(
       CFG.VEXCEL_API_BASE + "/v2/oriented/query?" + (session ? "session=" + encodeURIComponent(session) + "&" : "") + "token=" + encodeURIComponent(token),
       {
@@ -4960,7 +4990,7 @@
         return;
       }
       gmJsonGet(
-        CFG.VEXCEL_API_BASE + "/v2/ortho/collections?wkt=" + encodeURIComponent(`POINT(${Number(lng)} ${Number(lat)})`) + "&srid=4326&layer=urban,wide-area" + (session ? "&session=" + encodeURIComponent(session) : "") + "&token=" + encodeURIComponent(token),
+        CFG.VEXCEL_API_BASE + "/v2/ortho/collections?wkt=" + encodeURIComponent(vexcelPointWkt(lng, lat)) + "&srid=4326&layer=urban,wide-area" + (session ? "&session=" + encodeURIComponent(session) : "") + "&token=" + encodeURIComponent(token),
         { headers: _vexcelOriginHeaders() },
         (err, data, raw) => {
           if (raw && (raw.status === 401 || raw.status === 403)) {
@@ -6142,6 +6172,7 @@
         this._group = null;
         this._timer = null;
         this._debounce = null;
+        this._generation = 0;
       },
       onAdd(map) {
         if (!map.getPane(opts.pane)) {
@@ -6153,6 +6184,7 @@
         map.on("moveend zoomend", this._onViewChange, this);
       },
       onRemove(map) {
+        this._generation++;
         clearInterval(this._timer);
         clearTimeout(this._debounce);
         this._timer = this._debounce = null;
@@ -6170,19 +6202,24 @@
         }
       },
       _onViewChange() {
+        this._generation++;
         clearInterval(this._timer);
         clearTimeout(this._debounce);
         this._timer = null;
+        if (this._map.getZoom() < opts.minZoom) this._group.clearLayers();
         this._debounce = setTimeout(() => this._startPoll(), opts.debounceMs || 400);
       },
       _fetchGuarded() {
+        const generation = ++this._generation;
         const map = this._map;
         if (!map || !this._group) return;
         if (map.getZoom() < opts.minZoom) {
           this._group.clearLayers();
           return;
         }
-        opts.fetch(map, this._group, this);
+        const group = this._group;
+        const isCurrent = () => this._generation === generation && this._map === map && this._group === group && map.getZoom() >= opts.minZoom;
+        opts.fetch(map, group, this, isCurrent);
       },
       getAttribution() {
         return opts.attribution;
@@ -6424,11 +6461,11 @@
         minZoom: 6,
         pollMs: 1e4,
         attribution: 'Flights © <a href="https://opensky-network.org" target="_blank" rel="noreferrer">OpenSky Network</a>',
-        fetch: (map, group) => {
+        fetch: (map, group, _layer, isCurrent) => {
           const b = map.getBounds();
           const url = OPENSKY + "?lamin=" + b.getSouth().toFixed(3) + "&lomin=" + b.getWest().toFixed(3) + "&lamax=" + b.getNorth().toFixed(3) + "&lomax=" + b.getEast().toFixed(3);
           gmJsonGet(url, (err, data) => {
-            if (err || !data || !group._map) return;
+            if (err || !data || !isCurrent()) return;
             renderStates(group, data.states || []);
           });
         }
@@ -6695,19 +6732,19 @@
         minZoom: 9,
         pollMs: 3e4,
         attribution: 'Traffic © <a href="https://www.waze.com/live-map" target="_blank" rel="noreferrer">Waze</a>',
-        fetch: (map, group) => {
+        fetch: (map, group, _layer, isCurrent) => {
           const b = map.getBounds();
           const c = map.getCenter();
           const url = GEORSS + "?top=" + b.getNorth().toFixed(6) + "&bottom=" + b.getSouth().toFixed(6) + "&left=" + b.getWest().toFixed(6) + "&right=" + b.getEast().toFixed(6) + "&env=" + wazeEnv(c.lat, c.lng) + "&types=alerts,traffic,users";
           getWazeToken().then((token) => {
-            if (!token || !group._map) return;
+            if (!token || !isCurrent()) return;
             gmJsonGet(url, {
               headers: {
                 Referer: "https://www.waze.com/live-map",
                 "X-Recaptcha-Token": token
               }
             }, (err, data) => {
-              if (err || !data || !group._map) return;
+              if (err || !data || !isCurrent()) return;
               render(group, data);
             });
           });
@@ -6844,7 +6881,7 @@
         minZoom: 6,
         pollMs: 2e4,
         attribution: 'Vessels © <a href="https://www.marinetraffic.com" target="_blank" rel="noreferrer">MarineTraffic</a>',
-        fetch: (map, group) => {
+        fetch: (map, group, _layer, isCurrent) => {
           const tileZ = Math.max(4, Math.min(map.getZoom(), 8));
           const apiZ = tileZ + 1;
           const b = map.getBounds();
@@ -6862,7 +6899,7 @@
           let remaining = tiles.length;
           const referer = `https://www.marinetraffic.com/en/ais/home/centerx:${center.lng.toFixed(1)}/centery:${center.lat.toFixed(1)}/zoom:${tileZ}`;
           const done = () => {
-            if (--remaining === 0 && group._map) {
+            if (--remaining === 0 && isCurrent()) {
               renderRows(group, map, [...vessels.values()]);
             }
           };
@@ -6875,6 +6912,7 @@
                 "Referer": referer
               }
             }, (err, parsed) => {
+              if (!isCurrent()) return;
               if (err) {
                 done();
                 return;
@@ -7024,6 +7062,12 @@
     }
   };
 
+  // src/utils/lightpoll-token.js
+  var PUBLIC_CLIENT_HASH = "971c8ccc11150435bc555a975751b909";
+  function lightPollutionToken(now = Date.now()) {
+    return btoa(`${Math.floor(now / 1e3)}.${PUBLIC_CLIENT_HASH}`);
+  }
+
   // src/providers/light-pollution.js
   var LightPollutionLayerProvider = class extends LayerProvider {
     create() {
@@ -7032,7 +7076,7 @@
       const LightPolWmsLayer = L.TileLayer.extend({
         getTileUrl(coords) {
           const bb = tileToBBox3857(coords.z, coords.x, coords.y);
-          return CFG.LIGHTPOL_WMS_BASE + wmsParams + "&BBOX=" + bb.west + "," + bb.south + "," + bb.east + "," + bb.north;
+          return CFG.LIGHTPOL_WMS_BASE + wmsParams + "&BBOX=" + bb.west + "," + bb.south + "," + bb.east + "," + bb.north + "&token=" + encodeURIComponent(lightPollutionToken());
         }
       });
       const layer = new LightPolWmsLayer("", {
@@ -7043,7 +7087,9 @@
         opacity: 0.65,
         attribution: 'Light pollution © <a href="https://www.lightpollutionmap.info/" target="_blank" rel="noreferrer">lightpollutionmap.info</a>'
       });
-      layer._dwMb3DUrl = CFG.LIGHTPOL_WMS_BASE + wmsParams + "&BBOX={bbox-epsg-3857}";
+      Object.defineProperty(layer, "_dwMb3DUrl", {
+        get: () => CFG.LIGHTPOL_WMS_BASE + wmsParams + "&BBOX={bbox-epsg-3857}&token=" + encodeURIComponent(lightPollutionToken())
+      });
       return layer;
     }
   };
@@ -8519,6 +8565,7 @@
         clearTimeout(this._debounce);
         this._debounce = null;
         this._gen++;
+        this._lastBbox = null;
         map.off("moveend zoomend", this._onViewChange, this);
         if (this._group) {
           this._group.remove();
@@ -8528,6 +8575,10 @@
       },
       _onViewChange() {
         clearTimeout(this._debounce);
+        if (this._map && this._map.getZoom() < opts.minZoom) {
+          this._fetch();
+          return;
+        }
         this._debounce = setTimeout(() => this._fetch(), debounceMs);
       },
       _fetch() {
@@ -8535,6 +8586,7 @@
         if (!map || !this._group) return;
         const z = map.getZoom();
         if (z < opts.minZoom) {
+          this._gen++;
           this._group.clearLayers();
           this._byKey.clear();
           this._lastBbox = null;
@@ -8557,9 +8609,17 @@
           (opts.orderBy ? "&orderByFields=" + encodeURIComponent(opts.orderBy) : "");
         }
         gmJsonGet2(url, gmOpts, (err, raw) => {
-          const geojson = !err && opts.transform ? opts.transform(raw) : raw;
           if (myGen !== this._gen || !this._group) return;
+          let geojson = raw;
+          if (!err && opts.transform) {
+            try {
+              geojson = opts.transform(raw);
+            } catch (e) {
+              err = e;
+            }
+          }
           if (err || geojson && geojson.error) {
+            this._lastBbox = null;
             console.warn(
               `[CustomTiles] ${opts.label} request error`,
               err ? err.message : JSON.stringify(geojson.error)
@@ -9877,6 +9937,7 @@
         clearTimeout(this._debounce);
         this._debounce = null;
         this._gen++;
+        this._lastKey = null;
         this._cancel();
         map.off("moveend zoomend", this._onViewChange, this);
         if (this._group) {
@@ -9895,6 +9956,10 @@
       },
       _onViewChange() {
         clearTimeout(this._debounce);
+        if (this._map && this._map.getZoom() < opts.minZoom) {
+          this._fetch();
+          return;
+        }
         this._debounce = setTimeout(() => this._fetch(), debounceMs);
       },
       _cancel() {
@@ -9906,6 +9971,7 @@
         if (!map || !this._group) return;
         const vz = map.getZoom();
         if (vz < opts.minZoom) {
+          this._gen++;
           this._group.clearLayers();
           this._lastKey = null;
           this._cancel();
@@ -9927,15 +9993,19 @@
         const y1 = Math.min(n - 1, lat2t(b.getSouth()));
         const key = `${tz}:${x0},${y0},${x1},${y1}`;
         if (key === this._lastKey) return;
-        this._lastKey = key;
         const coords = [];
         for (let x = x0; x <= x1; x++)
           for (let y = y0; y <= y1; y++) coords.push([x, y]);
         if (coords.length > maxTiles) {
+          this._gen++;
+          this._cancel();
+          this._group.clearLayers();
+          this._lastKey = null;
           console.warn(`[CustomTiles] ${opts.label}: ${coords.length} tiles exceeds cap ${maxTiles}, skipping`);
           return;
         }
         const myGen = ++this._gen;
+        this._lastKey = key;
         this._cancel();
         const need = [];
         for (const [x, y] of coords) {
@@ -10725,6 +10795,8 @@
   var _CORNER_IDX = /* @__PURE__ */ new Set([0, 2, 6, 8]);
   var _activeOverlay = null;
   function makeDistortableMapOverlay(map, opts) {
+    const scanUrl = _histMapScanUrl(opts.url);
+    if (!scanUrl) return null;
     if (_activeOverlay) _activeOverlay.remove();
     if (!map.getPane(OVERLAY_PANE)) {
       map.createPane(OVERLAY_PANE);
@@ -10768,7 +10840,8 @@
       for (let r = 0; r <= _GRID; r++) for (let cc = 0; cc <= _GRID; cc++) srcPts.push([cc / _GRID * W, r / _GRID * H]);
       tris.forEach((t) => {
         const div = L.DomUtil.create("div", "dw-histmap-tri", wrap);
-        div.style.cssText = `position:absolute;left:0;top:0;width:${W}px;height:${H}px;transform-origin:0 0;background-image:url("${opts.url}");background-size:${W}px ${H}px;background-repeat:no-repeat;`;
+        div.style.cssText = `position:absolute;left:0;top:0;width:${W}px;height:${H}px;transform-origin:0 0;background-size:${W}px ${H}px;background-repeat:no-repeat;`;
+        div.style.backgroundImage = `url("${scanUrl.replace(/["\\]/g, "\\$&")}")`;
         const s = dilate([srcPts[t[0]], srcPts[t[1]], srcPts[t[2]]], 1);
         div.style.clipPath = `polygon(${s[0][0]}px ${s[0][1]}px, ${s[1][0]}px ${s[1][1]}px, ${s[2][0]}px ${s[2][1]}px)`;
         triDivs.push(div);
@@ -10794,7 +10867,7 @@
       update();
     });
     probe.addEventListener("error", () => setMsg("Couldn't load the map scan."));
-    probe.src = opts.url;
+    probe.src = scanUrl;
     markers.forEach((m) => m.on("drag", update));
     const onMove = () => update();
     map.on("move zoom viewreset zoomend moveend", onMove);
@@ -10840,12 +10913,24 @@
     const m = String(v || "").match(/\b(1[6-9]\d\d|20\d\d)\b/);
     return m ? m[1] : "";
   }
+  function _histMapScanUrl(value) {
+    if (typeof value !== "string") return "";
+    const raw = value.trim();
+    if (!/^https:\/\//i.test(raw) || /["\\\x00-\x1f\x7f]/.test(raw)) return "";
+    try {
+      const url = new URL(raw);
+      if (url.protocol !== "https:" || !(url.hostname === "qld.gov.au" || url.hostname.endsWith(".qld.gov.au")) || url.username || url.password || url.port) return "";
+      return url.href;
+    } catch (_) {
+      return "";
+    }
+  }
   function _histMapSheet(attrs) {
     const a = attrs || {};
     const title = _pick(a, ["Title", "title"]) || "Untitled sheet";
     const year = _yearOf(_pick(a, ["Publication date", "publication_date"]));
     const scale = _pick(a, ["Map scale", "map_scale"]);
-    const link = _pick(a, ["Download link", "download_link"]);
+    const link = _histMapScanUrl(_pick(a, ["Download link", "download_link"]));
     const preview = _pick(a, ["Map preview", "map_preview"]);
     const w = parseFloat(_pick(a, ["Bounding box west longitude", "boundingboxwestlongitude"]));
     const e = parseFloat(_pick(a, ["Bounding box east longitude", "boundingboxeastlongitude"]));
@@ -10855,7 +10940,7 @@
     return { title, year, scale, link, preview, bbox };
   }
   function _histMapsSectionHtml(sheets) {
-    const usable = sheets.filter((m) => m.link);
+    const usable = sheets.map((m) => ({ ...m, link: _histMapScanUrl(m.link) })).filter((m) => m.link);
     if (!usable.length) return "";
     const rows = usable.slice(0, 30).map((m) => {
       const meta = [m.year, m.scale ? "1:" + m.scale : ""].filter(Boolean).join(" · ");
@@ -10895,9 +10980,10 @@
       e.stopPropagation();
       const n = parseFloat(a.dataset.n), s = parseFloat(a.dataset.s);
       const w = parseFloat(a.dataset.w), ea = parseFloat(a.dataset.e);
-      if (![n, s, w, ea].every(Number.isFinite) || !a.dataset.url) return;
+      const url = _histMapScanUrl(a.dataset.url);
+      if (![n, s, w, ea].every(Number.isFinite) || !url) return;
       makeDistortableMapOverlay(map, {
-        url: a.dataset.url,
+        url,
         title: a.dataset.title || "",
         corners: [[n, w], [n, ea], [s, ea], [s, w]]
         // TL,TR,BR,BL

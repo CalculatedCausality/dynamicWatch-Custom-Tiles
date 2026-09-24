@@ -1,7 +1,8 @@
 node_modules/
+captures/
+.vexcel-tile-cache/
 .auth/
 .playwright-report/
 test-results/
 .smoke-tmp/
 *.log
-.smoke-tmp
