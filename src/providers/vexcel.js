@@ -18,6 +18,14 @@ import {
 	_vexcelFootprint,
 	createVexcelObliqueLayer,
 } from "./vexcel-oblique-layer.js";
+import {
+	_vexcelBand,
+	_vexcelCollectionYear,
+	VEXCEL_DIRECTIONS,
+	vexcelFrameQueryBody,
+	vexcelOrientedQueryBody,
+	vexcelPointWkt,
+} from "./vexcel-protocol.js";
 
 // Preserve the provider module's existing exports while app code can import
 // auth helpers from their owning module directly.
@@ -38,6 +46,7 @@ export {
 	_vexcelInvBilinear,
 	_vexcelMaxDownsample,
 } from "./vexcel-oblique-layer.js";
+export { _vexcelBand, _vexcelCollectionYear, VEXCEL_DIRECTIONS } from "./vexcel-protocol.js";
 
 /* -- Vexcel imagery integration -----------------------------------------
  * This module owns Vexcel imagery models and URLs, metadata requests, the
@@ -73,30 +82,6 @@ export function _vexcelTileTpl(token, session) {
  * So directional N/E/S/W views AND date selection live here, mirroring
  * the Vexcel viewer's oblique panel.
  */
-
-// product-type → compass label. Vexcel names an oblique by the side it
-// looks toward; the viewer surfaces these as N/E/S/W.
-export const VEXCEL_DIRECTIONS = [
-	{ key: "oblique-north", label: "N" },
-	{ key: "oblique-east",  label: "E" },
-	{ key: "oblique-south", label: "S" },
-	{ key: "oblique-west",  label: "W" },
-	{ key: "nadir",         label: "Top" },
-];
-
-// collection id → capture year for the date picker (au-qld-...-2019 →
-// "2019", au-qld-...r2-2021 → "2021"). Falls back to the raw id.
-export function _vexcelCollectionYear(collection) {
-	const m = String(collection || "").match(/(\d{4})(?!.*\d{4})/);
-	return m ? m[1] : String(collection || "");
-}
-
-// Band of an image from its name suffix — Vexcel serves each frame as
-// `..._rgb` (true colour) and sometimes `..._irg` (near-infrared, false-
-// colour: vegetation reads bright red). Only nadir has IR on SCC.
-export function _vexcelBand(name) {
-	return /_irg$/i.test(String(name || "")) ? "irg" : "rgb";
-}
 
 // oriented/query FeatureCollection → { directions, captures, images }.
 // images is keyed "<product-type>@<collection>" → { rgb?, irg? }, each
@@ -141,7 +126,7 @@ export function _vexcelParseObliques(data) {
 
 export function _vexcelObliqueExtractUrl(imageName, layer, lat, lng, token) {
 	if (!imageName || !_vexcelTokenValid(token)) return "";
-	const wkt = `POINT(${Number(lng)} ${Number(lat)})`;
+	const wkt = vexcelPointWkt(lng, lat);
 	return (
 		CFG.VEXCEL_API_BASE + "/v2/oriented/extract?" +
 		"wkt=" + encodeURIComponent(wkt) +
@@ -185,19 +170,7 @@ function _fetchVexcelObliques(lat, lng, token, session, cb) {
 			"token=" + encodeURIComponent(token),
 		{
 			method: "POST",
-			data: JSON.stringify({
-				wkt: `POINT(${Number(lng)} ${Number(lat)})`,
-				srid: "4326",
-				layer: "wide-area,urban",
-				// Both bands (rgb + irg) so the viewer can offer an IR
-				// toggle; parse buckets them by the image-name suffix.
-				// image-center-distance-asc → the first image per cell is
-				// the one whose frame is centred nearest the clicked point,
-				// so the user's spot sits near the middle of the oblique.
-				"order-by": "image-center-distance-asc",
-				include: "collection,capture-date,product-type,image-name," +
-					"source-layer,raster-size-width,raster-size-height,geometry",
-			}),
+			data: JSON.stringify(vexcelOrientedQueryBody(lat, lng)),
 			headers: _vexcelOriginHeaders({ "Content-Type": "application/json" }),
 		},
 		(err, data, raw) => {
@@ -233,15 +206,7 @@ export function fetchVexcelFrame(lng, lat, collection, dir, band, cb) {
 }
 function _fetchVexcelFrame(lng, lat, collection, dir, band, token, session, cb) {
 	if (!_vexcelTokenValid(token)) { cb(null); return; }
-	const query = {
-		wkt: `POINT(${Number(lng)} ${Number(lat)})`,
-		srid: "4326", layer: "wide-area,urban",
-		"product-type": dir, bands: band || "rgb",
-		"order-by": "image-center-distance-asc", "total-records": 1,
-		include: "image-name,source-layer,raster-size-width," +
-			"raster-size-height,geometry",
-	};
-	if (collection) query.collection = collection;
+	const query = vexcelFrameQueryBody(lng, lat, collection, dir, band);
 	gmJsonGet(
 		CFG.VEXCEL_API_BASE + "/v2/oriented/query?" +
 			(session ? "session=" + encodeURIComponent(session) + "&" : "") +
@@ -378,7 +343,7 @@ export function fetchVexcelOrthoDates(lat, lng, cb) {
 		if (!token) { cb(null); return; }
 		gmJsonGet(
 			CFG.VEXCEL_API_BASE + "/v2/ortho/collections?wkt=" +
-				encodeURIComponent(`POINT(${Number(lng)} ${Number(lat)})`) +
+				encodeURIComponent(vexcelPointWkt(lng, lat)) +
 				"&srid=4326&layer=urban,wide-area" +
 				(session ? "&session=" + encodeURIComponent(session) : "") +
 				"&token=" + encodeURIComponent(token),
