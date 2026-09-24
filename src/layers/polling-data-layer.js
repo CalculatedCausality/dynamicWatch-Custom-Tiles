@@ -5,6 +5,7 @@ export function pollingDataLayer(opts) {
 			this._group = null;
 			this._timer = null;
 			this._debounce = null;
+			this._generation = 0;
 		},
 		onAdd(map) {
 			if (!map.getPane(opts.pane)) {
@@ -16,6 +17,7 @@ export function pollingDataLayer(opts) {
 			map.on("moveend zoomend", this._onViewChange, this);
 		},
 		onRemove(map) {
+			this._generation++;
 			clearInterval(this._timer);
 			clearTimeout(this._debounce);
 			this._timer = this._debounce = null;
@@ -30,19 +32,26 @@ export function pollingDataLayer(opts) {
 			}
 		},
 		_onViewChange() {
+			this._generation++;
 			clearInterval(this._timer);
 			clearTimeout(this._debounce);
 			this._timer = null;
+			if (this._map.getZoom() < opts.minZoom) this._group.clearLayers();
 			this._debounce = setTimeout(() => this._startPoll(), opts.debounceMs || 400);
 		},
 		_fetchGuarded() {
+			const generation = ++this._generation;
 			const map = this._map;
 			if (!map || !this._group) return;
 			if (map.getZoom() < opts.minZoom) {
 				this._group.clearLayers();
 				return;
 			}
-			opts.fetch(map, this._group, this);
+			const group = this._group;
+			const isCurrent = () => this._generation === generation &&
+				this._map === map && this._group === group &&
+				map.getZoom() >= opts.minZoom;
+			opts.fetch(map, group, this, isCurrent);
 		},
 		getAttribution() { return opts.attribution; },
 	});

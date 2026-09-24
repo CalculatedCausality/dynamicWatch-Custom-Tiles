@@ -34,6 +34,7 @@ export function makeVectorTileLayer(opts) {
 			clearTimeout(this._debounce);
 			this._debounce = null;
 			this._gen++;
+			this._lastKey = null;
 			this._cancel();
 			map.off("moveend zoomend", this._onViewChange, this);
 			if (this._group) { this._group.remove(); this._group = null; }
@@ -51,6 +52,10 @@ export function makeVectorTileLayer(opts) {
 
 		_onViewChange() {
 			clearTimeout(this._debounce);
+			if (this._map && this._map.getZoom() < opts.minZoom) {
+				this._fetch();
+				return;
+			}
 			this._debounce = setTimeout(() => this._fetch(), debounceMs);
 		},
 
@@ -64,6 +69,7 @@ export function makeVectorTileLayer(opts) {
 			if (!map || !this._group) return;
 			const vz = map.getZoom();
 			if (vz < opts.minZoom) {
+				this._gen++;
 				this._group.clearLayers();
 				this._lastKey = null;
 				this._cancel();
@@ -86,18 +92,22 @@ export function makeVectorTileLayer(opts) {
 
 			const key = `${tz}:${x0},${y0},${x1},${y1}`;
 			if (key === this._lastKey) return;
-			this._lastKey = key;
 
 			const coords = [];
 			for (let x = x0; x <= x1; x++)
 				for (let y = y0; y <= y1; y++) coords.push([x, y]);
 			if (coords.length > maxTiles) {
+				this._gen++;
+				this._cancel();
+				this._group.clearLayers();
+				this._lastKey = null;
 				console.warn(`[CustomTiles] ${opts.label}: ${coords.length} ` +
 					`tiles exceeds cap ${maxTiles}, skipping`);
 				return;
 			}
 
 			const myGen = ++this._gen;
+			this._lastKey = key;
 			this._cancel();
 
 			const need = [];

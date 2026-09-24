@@ -30,6 +30,7 @@ export function makeArcgisQueryLayer(opts, gmJsonGet) {
 			clearTimeout(this._debounce);
 			this._debounce = null;
 			this._gen++;
+			this._lastBbox = null;
 			map.off("moveend zoomend", this._onViewChange, this);
 			if (this._group) { this._group.remove(); this._group = null; }
 			this._byKey.clear();
@@ -37,6 +38,10 @@ export function makeArcgisQueryLayer(opts, gmJsonGet) {
 
 		_onViewChange() {
 			clearTimeout(this._debounce);
+			if (this._map && this._map.getZoom() < opts.minZoom) {
+				this._fetch();
+				return;
+			}
 			this._debounce = setTimeout(() => this._fetch(), debounceMs);
 		},
 
@@ -45,6 +50,7 @@ export function makeArcgisQueryLayer(opts, gmJsonGet) {
 			if (!map || !this._group) return;
 			const z = map.getZoom();
 			if (z < opts.minZoom) {
+				this._gen++;
 				this._group.clearLayers();
 				this._byKey.clear();
 				this._lastBbox = null;
@@ -83,9 +89,14 @@ export function makeArcgisQueryLayer(opts, gmJsonGet) {
 			}
 
 			gmJsonGet(url, gmOpts, (err, raw) => {
-				const geojson = !err && opts.transform ? opts.transform(raw) : raw;
 				if (myGen !== this._gen || !this._group) return;
+				let geojson = raw;
+				if (!err && opts.transform) {
+					try { geojson = opts.transform(raw); }
+					catch (e) { err = e; }
+				}
 				if (err || (geojson && geojson.error)) {
+					this._lastBbox = null;
 					console.warn(`[CustomTiles] ${opts.label} request error`,
 						err ? err.message : JSON.stringify(geojson.error));
 					return;

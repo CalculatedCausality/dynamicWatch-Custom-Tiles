@@ -74,7 +74,7 @@ export class FlightsLayerProvider extends LayerProvider {
 			pane: "dwFlightsPane", paneZIndex: 450,
 			minZoom: 6, pollMs: 10000,
 			attribution: 'Flights © <a href="https://opensky-network.org" target="_blank" rel="noreferrer">OpenSky Network</a>',
-			fetch: (map, group) => {
+			fetch: (map, group, _layer, isCurrent) => {
 				const b = map.getBounds();
 				const url = OPENSKY +
 					"?lamin=" + b.getSouth().toFixed(3) +
@@ -82,7 +82,7 @@ export class FlightsLayerProvider extends LayerProvider {
 					"&lamax=" + b.getNorth().toFixed(3) +
 					"&lomax=" + b.getEast().toFixed(3);
 				gmJsonGet(url, (err, data) => {
-					if (err || !data || !group._map) return;
+					if (err || !data || !isCurrent()) return;
 					renderStates(group, data.states || []);
 				});
 			},
@@ -339,7 +339,7 @@ export class WazeLayerProvider extends LayerProvider {
 			pane: "dwWazePane", paneZIndex: 445,
 			minZoom: 9, pollMs: 30000,
 			attribution: 'Traffic © <a href="https://www.waze.com/live-map" target="_blank" rel="noreferrer">Waze</a>',
-			fetch: (map, group) => {
+			fetch: (map, group, _layer, isCurrent) => {
 				const b = map.getBounds();
 				const c = map.getCenter();
 				const url = GEORSS +
@@ -352,14 +352,14 @@ export class WazeLayerProvider extends LayerProvider {
 				// Waze answers 403 without a valid reCAPTCHA token, so
 				// mint one first and bail quietly if unavailable.
 				getWazeToken().then((token) => {
-					if (!token || !group._map) return;
+					if (!token || !isCurrent()) return;
 					gmJsonGet(url, {
 						headers: {
 							Referer: "https://www.waze.com/live-map",
 							"X-Recaptcha-Token": token,
 						},
 					}, (err, data) => {
-						if (err || !data || !group._map) return;
+						if (err || !data || !isCurrent()) return;
 						render(group, data);
 					});
 				});
@@ -498,7 +498,7 @@ export class MarineTrafficLayerProvider extends LayerProvider {
 			pane: "dwMarinePane", paneZIndex: 440,
 			minZoom: 6, pollMs: 20000,
 			attribution: 'Vessels © <a href="https://www.marinetraffic.com" target="_blank" rel="noreferrer">MarineTraffic</a>',
-			fetch: (map, group) => {
+			fetch: (map, group, _layer, isCurrent) => {
 				const tileZ = Math.max(4, Math.min(map.getZoom(), 8));
 				const apiZ = tileZ + 1;
 				const b = map.getBounds();
@@ -516,7 +516,7 @@ export class MarineTrafficLayerProvider extends LayerProvider {
 				let remaining = tiles.length;
 				const referer = `https://www.marinetraffic.com/en/ais/home/centerx:${center.lng.toFixed(1)}/centery:${center.lat.toFixed(1)}/zoom:${tileZ}`;
 				const done = () => {
-					if (--remaining === 0 && group._map) {
+					if (--remaining === 0 && isCurrent()) {
 						renderRows(group, map, [...vessels.values()]);
 					}
 				};
@@ -529,6 +529,7 @@ export class MarineTrafficLayerProvider extends LayerProvider {
 							"Referer": referer,
 						},
 					}, (err, parsed) => {
+						if (!isCurrent()) return;
 						if (err) { done(); return; }
 						const raw =
 							(parsed.data && parsed.data.rows) ||
