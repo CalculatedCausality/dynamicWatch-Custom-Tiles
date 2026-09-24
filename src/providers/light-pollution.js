@@ -51,6 +51,19 @@ export class LightPollutionLayerProvider extends LayerProvider {
 			get: () => CFG.LIGHTPOL_WMS_BASE + wmsParams +
 				"&BBOX={bbox-epsg-3857}&token=" + encodeURIComponent(lightPollutionToken()),
 		});
+		// Mapbox stores a source's URL when it is registered. Refresh its 3D
+		// mirror before the public viewer's five-minute token rotation while
+		// this overlay remains active; 2D requests mint tokens per tile.
+		layer._dwMb3DReloadOn = ["lightpolltokenrefresh"];
+		let refreshTimer;
+		layer.on("add", () => {
+			clearInterval(refreshTimer);
+			refreshTimer = setInterval(() => layer.fire("lightpolltokenrefresh"), 4 * 60 * 1000);
+		});
+		layer.on("remove", () => {
+			clearInterval(refreshTimer);
+			refreshTimer = null;
+		});
 		return layer;
 	}
 }

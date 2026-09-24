@@ -7090,6 +7090,16 @@
       Object.defineProperty(layer, "_dwMb3DUrl", {
         get: () => CFG.LIGHTPOL_WMS_BASE + wmsParams + "&BBOX={bbox-epsg-3857}&token=" + encodeURIComponent(lightPollutionToken())
       });
+      layer._dwMb3DReloadOn = ["lightpolltokenrefresh"];
+      let refreshTimer;
+      layer.on("add", () => {
+        clearInterval(refreshTimer);
+        refreshTimer = setInterval(() => layer.fire("lightpolltokenrefresh"), 4 * 60 * 1e3);
+      });
+      layer.on("remove", () => {
+        clearInterval(refreshTimer);
+        refreshTimer = null;
+      });
       return layer;
     }
   };
