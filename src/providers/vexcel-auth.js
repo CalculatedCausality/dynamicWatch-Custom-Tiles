@@ -52,7 +52,7 @@ export function _storeToken(t) {
  * gated by hash = sha256(`${APP_NAME}_${timestamp}`) -- reverse-engineered
  * from the viewer bundle, no secret salt. We reproduce that flow so tiles
  * carry whatever credential the account actually issues; accounts that
- * return session:null (this one currently) transparently use the JWT.
+ * return session:null transparently use the JWT.
  * The session is bound to the token it was minted with, so a token refresh
  * re-mints it and we never re-POST init for an unchanged token.
  */
@@ -154,30 +154,41 @@ export function _vexcelOriginHeaders(extra) {
 	}, extra || {});
 }
 
-// Baked-in account used only when this device has no stored credentials.
-// These values are shipped in plaintext and must be rotated if exposed.
-const VEXCEL_BAKED_USER = "szxc61qc8@mozmail.com";
-const VEXCEL_BAKED_PASS = "4Bp6GoxdPzaZLAfhj@";
-
 function _getStoredCreds() {
 	try {
 		return {
-			user: GM_getValue(CFG.VEXCEL_USER_KEY, "") || VEXCEL_BAKED_USER,
-			pass: GM_getValue(CFG.VEXCEL_PASS_KEY, "") || VEXCEL_BAKED_PASS,
+			user: GM_getValue(CFG.VEXCEL_USER_KEY, "") || "",
+			pass: GM_getValue(CFG.VEXCEL_PASS_KEY, "") || "",
 		};
-	} catch (_) { return { user: VEXCEL_BAKED_USER, pass: VEXCEL_BAKED_PASS }; }
+	} catch (_) { return { user: "", pass: "" }; }
+}
+
+// Keep rejected credentials in GM storage without retrying them on reload.
+let _loginInFlight = null;
+let _loginCooldownUntil = 0;
+function _credsRejected() {
+	try { return !!GM_getValue(CFG.VEXCEL_REJECTED_KEY, false); }
+	catch (_) { return false; }
+}
+
+function _rejectCreds(creds) {
+	const current = _getStoredCreds();
+	if (current.user !== creds.user || current.pass !== creds.pass) return;
+	try { GM_setValue(CFG.VEXCEL_REJECTED_KEY, true); } catch (_) {}
 }
 
 function _storeCreds(user, pass) {
 	try {
 		GM_setValue(CFG.VEXCEL_USER_KEY, user || "");
 		GM_setValue(CFG.VEXCEL_PASS_KEY, pass || "");
+		GM_setValue(CFG.VEXCEL_REJECTED_KEY, false);
+		_loginCooldownUntil = 0;
 	} catch (_) {}
 }
 
 export function _hasCreds() {
 	const c = _getStoredCreds();
-	return !!(c.user && c.pass);
+	return !!(c.user && c.pass && !_credsRejected());
 }
 
 // Detect a "user:password" login string vs a pasted token/URL.
@@ -188,13 +199,12 @@ export function _vexcelIsCredString(s) {
 }
 
 // Parallel login attempts share one request, and retries observe a cooldown.
-let _loginInFlight = null;
-let _loginCooldownUntil = 0;
 export function _vexcelLogin(cb) {
 	cb = cb || function () {};
 	const creds = _getStoredCreds();
 	if (!creds.user || !creds.pass) { cb(null, "nocreds"); return; }
 	if (_loginInFlight) { _loginInFlight.push(cb); return; }
+	if (_credsRejected()) { cb(null, "badcreds"); return; }
 	const now = (typeof Date !== "undefined" && Date.now) ? Date.now() : 0;
 	if (now && now < _loginCooldownUntil) { cb(null, "cooldown"); return; }
 	_loginCooldownUntil = now + 15000;
@@ -228,14 +238,14 @@ export function _vexcelLogin(cb) {
 		(err, data, raw) => {
 			const status = raw ? raw.status : 0;
 			if (status === 401 || status === 403) {
-				_storeCreds("", "");
+				_rejectCreds(creds);
 				done(null, "badcreds");
 				return;
 			}
 			if (err || !data) { done(null, "neterr"); return; }
 			const tok = data.data && data.data.token;
 			if (!acceptToken(tok)) {
-				_storeCreds("", "");
+				_rejectCreds(creds);
 				done(null, "badcreds");
 			}
 		},

@@ -114,7 +114,10 @@ export function loadHelpers() {
 		isFinite, isNaN, parseInt, parseFloat,
 		Infinity, NaN, undefined,
 		Image: function () {}, Blob: function () {},
-		URL: { createObjectURL: () => "blob:fake", revokeObjectURL: noop },
+		URL: class SandboxURL extends URL {
+			static createObjectURL() { return "blob:fake"; }
+			static revokeObjectURL() {}
+		},
 		DataView: globalThis.DataView,
 		Uint8Array: globalThis.Uint8Array,
 		Float32Array: globalThis.Float32Array,

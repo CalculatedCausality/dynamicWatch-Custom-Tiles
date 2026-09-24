@@ -103,6 +103,8 @@ let _activeOverlay = null;                        // only one warped sheet at a 
 // Superimpose `url` on the map, initially filling the geographic bbox
 // corners [[N,W],[N,E],[S,E],[S,W]] (TL,TR,BR,BL), with a draggable mesh.
 export function makeDistortableMapOverlay(map, opts) {
+	const scanUrl = _histMapScanUrl(opts.url);
+	if (!scanUrl) return null;
 	if (_activeOverlay) _activeOverlay.remove();
 
 	if (!map.getPane(OVERLAY_PANE)) {
@@ -154,7 +156,8 @@ export function makeDistortableMapOverlay(map, opts) {
 			const div = L.DomUtil.create("div", "dw-histmap-tri", wrap);
 			div.style.cssText =
 				`position:absolute;left:0;top:0;width:${W}px;height:${H}px;transform-origin:0 0;` +
-				`background-image:url("${opts.url}");background-size:${W}px ${H}px;background-repeat:no-repeat;`;
+				`background-size:${W}px ${H}px;background-repeat:no-repeat;`;
+			div.style.backgroundImage = `url("${scanUrl.replace(/["\\]/g, "\\$&")}")`;
 			const s = dilate([srcPts[t[0]], srcPts[t[1]], srcPts[t[2]]], 1);
 			div.style.clipPath = `polygon(${s[0][0]}px ${s[0][1]}px, ${s[1][0]}px ${s[1][1]}px, ${s[2][0]}px ${s[2][1]}px)`;
 			triDivs.push(div);
@@ -174,7 +177,7 @@ export function makeDistortableMapOverlay(map, opts) {
 	const probe = new Image();
 	probe.addEventListener("load", () => { W = probe.naturalWidth; H = probe.naturalHeight; buildTris(); update(); });
 	probe.addEventListener("error", () => setMsg("Couldn't load the map scan."));
-	probe.src = opts.url;
+	probe.src = scanUrl;
 
 	markers.forEach((m) => m.on("drag", update));
 	const onMove = () => update();
@@ -235,13 +238,30 @@ function _yearOf(v) {
 	return m ? m[1] : "";
 }
 
+// ArcGIS attributes are untrusted: only QLD government HTTPS scan links
+// belong in popup URLs or the overlay image/CSS.
+export function _histMapScanUrl(value) {
+	if (typeof value !== "string") return "";
+	const raw = value.trim();
+	if (!/^https:\/\//i.test(raw) || /["\\\x00-\x1f\x7f]/.test(raw)) return "";
+	try {
+		const url = new URL(raw);
+		if (url.protocol !== "https:" ||
+			!(url.hostname === "qld.gov.au" || url.hostname.endsWith(".qld.gov.au")) ||
+			url.username || url.password || url.port) return "";
+		return url.href;
+	} catch (_) {
+		return "";
+	}
+}
+
 // Model each identify result into the fields the popup + overlay need.
 export function _histMapSheet(attrs) {
 	const a = attrs || {};
 	const title = _pick(a, ["Title", "title"]) || "Untitled sheet";
 	const year = _yearOf(_pick(a, ["Publication date", "publication_date"]));
 	const scale = _pick(a, ["Map scale", "map_scale"]);
-	const link = _pick(a, ["Download link", "download_link"]);
+	const link = _histMapScanUrl(_pick(a, ["Download link", "download_link"]));
 	const preview = _pick(a, ["Map preview", "map_preview"]);
 	const w = parseFloat(_pick(a, ["Bounding box west longitude", "boundingboxwestlongitude"]));
 	const e = parseFloat(_pick(a, ["Bounding box east longitude", "boundingboxeastlongitude"]));
@@ -254,7 +274,7 @@ export function _histMapSheet(attrs) {
 // Build the "historical maps here" popup section. Only sheets with both a
 // scan link and a bbox get an Overlay button; scan link alone gets Open.
 export function _histMapsSectionHtml(sheets) {
-	const usable = sheets.filter((m) => m.link);
+	const usable = sheets.map((m) => ({ ...m, link: _histMapScanUrl(m.link) })).filter((m) => m.link);
 	if (!usable.length) return "";
 	const rows = usable.slice(0, 30).map((m) => {
 		const meta = [m.year, m.scale ? "1:" + m.scale : ""].filter(Boolean).join(" · ");
@@ -318,9 +338,10 @@ export function _ensureHistMapHook(map) {
 		e.stopPropagation();
 		const n = parseFloat(a.dataset.n), s = parseFloat(a.dataset.s);
 		const w = parseFloat(a.dataset.w), ea = parseFloat(a.dataset.e);
-		if (![n, s, w, ea].every(Number.isFinite) || !a.dataset.url) return;
+		const url = _histMapScanUrl(a.dataset.url);
+		if (![n, s, w, ea].every(Number.isFinite) || !url) return;
 		makeDistortableMapOverlay(map, {
-			url: a.dataset.url,
+			url,
 			title: a.dataset.title || "",
 			corners: [[n, w], [n, ea], [s, ea], [s, w]], // TL,TR,BR,BL
 		});

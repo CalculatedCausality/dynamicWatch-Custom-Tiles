@@ -5,9 +5,28 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import vm from "node:vm";
 import { loadHelpers } from "./_loader.mjs";
 
 const dw = loadHelpers();
+
+// The regular helper loader reads the prebuilt userscript. Exercise this
+// provider's current source directly so these tests need no bundle rebuild.
+const HIST_MAP_SOURCE = readFileSync(
+	resolve(dirname(fileURLToPath(import.meta.url)), "..", "src", "providers", "qld-historical-maps.js"),
+	"utf8",
+).replace(/^import .*;\n/gm, "").replace(/^export /gm, "");
+function loadHistMaps(overrides = {}) {
+	const context = {
+		CFG: {}, arcgisExportProvider: () => null, arcgisIdentify: () => {},
+		_escHtml: dw._escHtml, esc: dw.esc, URL, ...overrides,
+	};
+	vm.runInNewContext(HIST_MAP_SOURCE +
+		"\n globalThis.hist = { _histMapScanUrl, _histMapSheet, _histMapsSectionHtml, makeDistortableMapOverlay };",
+		context);
+	return context.hist;
+}
+const histMaps = loadHistMaps();
 
 const _BUILT_SCRIPT = readFileSync(
 	resolve(dirname(fileURLToPath(import.meta.url)), "..", "dynamicwatch-custom-tiles.user.js"),
@@ -1160,11 +1179,85 @@ t("_histMapSheet + _histMapsSectionHtml model + render historical sheets", () =>
 	assert(html.includes("Open scan"), "scan link missing");
 	assert(html.includes("dw-histmap-overlay-link"), "overlay action missing (has bbox)");
 	// A sheet with a link but no bbox: Open only, no Overlay
-	const noBbox = dw._histMapsSectionHtml([{ title: "X", link: "https://y/z", year: "", scale: "", preview: "", bbox: null }]);
+	const noBbox = dw._histMapsSectionHtml([{ title: "X", link: "https://apps.information.qld.gov.au/scan", year: "", scale: "", preview: "", bbox: null }]);
 	assert(noBbox.includes("Open scan") && !noBbox.includes("dw-histmap-overlay-link"),
 		"no-bbox sheet should not offer Overlay: " + noBbox);
 	// No usable sheets → empty section
 	eq(dw._histMapsSectionHtml([{ title: "X", link: "" }]), "");
+});
+
+t("historical scan URL accepts real QLD HTTPS links and safe query strings", () => {
+	const scan = "https://apps.information.qld.gov.au/data/v2/HistoricalMaps/StaticMap/cadastral/cad-map-2mile-wide-bay-dg2-sh3-1894/original";
+	eq(histMaps._histMapScanUrl(scan), scan);
+	const queried = scan + "?size=large&format=jpg%22extra";
+	eq(histMaps._histMapScanUrl(queried), queried);
+	const sheet = histMaps._histMapSheet({ "Download link": scan, Title: "Wide Bay" });
+	eq(sheet.link, scan);
+	const html = histMaps._histMapsSectionHtml([{ ...sheet, link: queried, bbox: { w: 1, e: 2, n: 3, s: 0 } }]);
+	assert(html.includes(`href="${queried.replace("&", "&amp;")}"`), "scan href escaped");
+	assert(html.includes(`data-url="${queried.replace("&", "&amp;")}"`), "overlay URL escaped");
+});
+
+t("historical scan URL rejects unsafe schemes, foreign hosts and CSS escapes", () => {
+	const bad = [
+		"javascript:alert(1)", "data:image/svg+xml,<svg onload=alert(1)>",
+		"http://apps.information.qld.gov.au/scan", "//apps.information.qld.gov.au/scan",
+		"https://apps.information.qld.gov.au.evil.test/scan",
+		"https://apps.information.qld.gov.au@evil.test/scan",
+		"https://evil.test@apps.information.qld.gov.au/scan",
+		'https://apps.information.qld.gov.au/scan");background:red;/*',
+		"https://apps.information.qld.gov.au/scan\\');background:red;/*",
+		"https://apps.information.qld.gov.au/scan\nbackground:red",
+		"https://apps.information.qld.gov.au:8443/scan",
+	];
+	for (const link of bad) {
+		eq(histMaps._histMapScanUrl(link), "", `unsafe URL: ${link}`);
+		eq(histMaps._histMapSheet({ "Download link": link }).link, "", "model rejects unsafe URL");
+		eq(histMaps._histMapsSectionHtml([{ title: "Bad", link }]), "", "popup rejects unsafe URL");
+	}
+	eq(histMaps._histMapScanUrl(null), "");
+	eq(histMaps._histMapScanUrl("not a URL"), "");
+});
+
+t("historical overlay checks URL before use and keeps scan CSS in backgroundImage", () => {
+	const triangles = [], probes = [];
+	const element = () => ({ style: {}, addEventListener: () => {},
+		querySelector: () => element(), appendChild: () => {}, remove: () => {} });
+	const pane = element();
+	const L = {
+		DomUtil: { create: (_tag, className) => {
+			const el = element();
+			if (className === "dw-histmap-tri") triangles.push(el);
+			return el;
+		} },
+		divIcon: () => ({}),
+		marker: (ll) => ({ addTo() { return this; }, on() {}, remove() {},
+			getLatLng: () => ({ lat: ll[0], lng: ll[1] }) }),
+		DomEvent: { disableClickPropagation() {}, disableScrollPropagation() {} },
+	};
+	class ImageProbe {
+		constructor() { this.naturalWidth = 100; this.naturalHeight = 100; this.handlers = {}; probes.push(this); }
+		addEventListener(name, fn) { this.handlers[name] = fn; }
+		set src(value) { this.url = value; this.handlers.load(); }
+	}
+	const hist = loadHistMaps({ L, Image: ImageProbe });
+	const map = { getPane: () => pane, getContainer: () => element(),
+		latLngToLayerPoint: ({ lat, lng }) => ({ x: lng, y: lat }), on() {}, off() {} };
+	const corners = [[0, 0], [0, 10], [-10, 10], [-10, 0]];
+	eq(hist.makeDistortableMapOverlay(map, { url: "javascript:alert(1)", corners }), null);
+	eq(probes.length, 0, "unsafe scan was not loaded");
+	const scan = "https://apps.information.qld.gov.au/data/v2/HistoricalMaps/StaticMap/cadastral/test/original?x=%22);background:red;/*";
+	const overlay = hist.makeDistortableMapOverlay(map, { url: scan, corners });
+	eq(probes[0].url, scan, "safe scan loaded");
+	eq(triangles.length, 8, "mesh generated");
+	for (const tri of triangles) {
+		eq(tri.style.backgroundImage, `url("${scan}")`);
+		assert(!tri.style.cssText.includes(scan) && !tri.style.cssText.includes("background-image"),
+			"scan URL must not enter cssText");
+	}
+	eq(hist.makeDistortableMapOverlay(map, { url: "data:image/png;base64,AAAA", corners }), null);
+	eq(probes.length, 1, "rejected scan must not replace the active overlay");
+	overlay.remove();
 });
 
 t("_formatLeaseTooltip renders permit number, type, minerals, holder; escapes", () => {
