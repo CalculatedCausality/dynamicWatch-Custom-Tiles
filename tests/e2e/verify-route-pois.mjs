@@ -2,7 +2,8 @@
 // Verify "POIs along route" on a saved plan: the planner-toolbar button finds
 // POIs from OpenFreeMap vector tiles, pins them in route order, filters by
 // category, reports and highlights the longest stretch without water, adds a
-// POI as a planner waypoint, estimates arrival times with daylight and the
+// POI as a planner waypoint, finds course features (climbs, creek crossings,
+// track sections), estimates arrival times with daylight and the
 // forecast, follows route edits, and never leaks clicks to the planner
 // (which would add route points). Nothing is saved.
 //
@@ -28,11 +29,12 @@ const check = (ok, label, detail = "") => {
 };
 
 const browser = await chromium.launch({ headless: !process.env.HEADED });
+let page = null;
 try {
 	const context = await browser.newContext({ storageState: auth, viewport: { width: 1400, height: 900 } });
 	await context.addInitScript({ content: readFileSync(resolve(root, "tests/e2e/lib/bootstrap.js"), "utf8") });
 	await context.addInitScript({ content: readFileSync(resolve(root, "dynamicwatch-custom-tiles.user.js"), "utf8") });
-	const page = await context.newPage();
+	page = await context.newPage();
 	const pageErrors = [];
 	page.on("pageerror", (error) => pageErrors.push(error.message));
 	console.log(`→ ${url}`);
@@ -81,6 +83,17 @@ try {
 	const waterChip = found.chips.find((c) => c.id === "water");
 	check(waterChip ? /Longest stretch without water: [\d.]+ (km|mi)/.test(found.gaps)
 		: /No drinking water within/.test(found.gaps), "panel reports the water situation", found.gaps);
+	const counts = Object.fromEntries(found.chips.map((c) => [c.id, c.count]));
+	check(counts.climb > 0 && counts.climbtop === counts.climb, "climbs and their tops come from elevation data",
+		`${counts.climb || 0} climbs`);
+	check(counts.creek > 0, "creek crossings are found on the route", `${counts.creek || 0}`);
+	check(counts.track > 0, "named track and road sections are found", `${counts.track || 0}`);
+	check(/ · \d+ course points?/.test(found.status), "the status counts course points separately", found.status);
+	await page.locator(".dw-poi-row", { hasText: /^Climb \d+m/ }).first().click();
+	const climbPopup = await page.waitForSelector(".dw-poi-pop", { timeout: 5_000 }).then((el) => el.textContent()).catch(() => "");
+	check(/average \d+% · steepest \d+%.*to the top/.test(climbPopup) && /Top at [\d.]+ km/.test(climbPopup),
+		"a climb's popup shows its gradient, time to the top and where it ends", climbPopup.replace(/\s+/g, " ").slice(0, 160));
+	await page.evaluate(() => window.leafletPlan.map.closePopup());
 
 	// Timing: a flat estimate at once, refined with elevation, then the forecast.
 	const timingText = () => page.evaluate(() => document.querySelector(".dw-poi-timing-out")?.textContent || "");
@@ -98,7 +111,10 @@ try {
 	const timedPanel = await page.evaluate(() => ({
 		gaps: document.querySelector(".dw-poi-gaps")?.textContent || "",
 		rowsTimed: [...document.querySelectorAll(".dw-poi-row .dw-poi-km")].every((el) => /· \d\d:\d\d$/.test(el.textContent)),
+		listHeight: document.querySelector(".dw-poi-list")?.clientHeight || 0,
 	}));
+	check(timedPanel.listHeight >= 100, "the list keeps room for several rows with every section open",
+		`${timedPanel.listHeight}px`);
 	check(/about \d+ (h|min).*rough guide [\d.–]+ L/.test(timedPanel.gaps), "water gap shows time and a drinking guide", timedPanel.gaps);
 	check(timedPanel.rowsTimed, "list rows show arrival times");
 	const movingMinutes = (text) => {
@@ -151,8 +167,20 @@ try {
 	check(await routeMarkers() === startMarkers, "pin and panel clicks never add route points");
 
 	const before = await page.evaluate(() => window.leafletPlan.waypoints.length);
-	await page.locator(".dw-poi-row").first().click();
+	// Close the pin's popup so the row's own popup is the one read below.
+	await page.evaluate(() => window.leafletPlan.map.closePopup());
+	const firstRow = page.locator(".dw-poi-row").first();
+	const rowName = (await firstRow.locator(".dw-poi-name").textContent()).trim();
+	await firstRow.click();
+	await page.waitForFunction((name) => document.querySelector(".dw-poi-pop b")?.textContent.trim() === name,
+		rowName, { timeout: 5_000 });
 	await page.waitForSelector(".dw-poi-pop .dw-poi-add-btn:not([disabled])", { timeout: 5_000 });
+	const besidePanel = await page.evaluate(() => {
+		const a = document.querySelector(".leaflet-popup").getBoundingClientRect();
+		const b = document.querySelector(".dw-poi-panel").getBoundingClientRect();
+		return a.left >= b.right || a.top >= b.bottom || a.bottom <= b.top;
+	});
+	check(besidePanel, "a list click opens its popup beside the panel, not under it");
 	const expected = await page.evaluate(() => document.querySelector(".dw-poi-pop b").textContent.trim().slice(0, 16).trim());
 	await page.click(".dw-poi-pop .dw-poi-add-btn");
 	const added = await page.evaluate(() => ({
@@ -262,6 +290,11 @@ try {
 } catch (error) {
 	console.error(`✗ Route POIs: ${error.message}`);
 	results.push(false);
+	if (page) {
+		mkdirSync(reportDir, { recursive: true });
+		const failShot = resolve(reportDir, `route-pois-failure-${new Date().toISOString().replace(/[:.]/g, "-")}.png`);
+		await page.screenshot({ path: failShot }).then(() => console.error(`  failure screenshot: ${failShot}`), () => {});
+	}
 } finally {
 	await browser.close();
 }

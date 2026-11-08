@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.15.0
+// @version      7.16.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -11105,6 +11105,297 @@
     return h ? `${h} h ${String(m).padStart(2, "0")}` : `${m} min`;
   }
 
+  // src/utils/route-features.js
+  var M_PER_DEG = 63710088e-1 * Math.PI / 180;
+  var ABBREVIATIONS = [
+    ["National Park", "NP"],
+    ["Conservation Park", "CP"],
+    ["Creek", "Ck"],
+    ["Track", "Trk"],
+    ["Trail", "Trl"],
+    ["Road", "Rd"],
+    ["Street", "St"],
+    ["Mountain", "Mtn"],
+    ["Mount", "Mt"],
+    ["Drive", "Dr"],
+    ["Avenue", "Ave"],
+    ["Highway", "Hwy"],
+    ["Lane", "Ln"],
+    ["Parade", "Pde"],
+    ["Crescent", "Cres"],
+    ["Terrace", "Tce"],
+    ["Esplanade", "Esp"],
+    ["Boulevard", "Bvd"],
+    ["Lookout", "Lkt"]
+  ].map(([word, short]) => [new RegExp("\\b" + word + "\\b", "g"), short]);
+  function abbreviate(name) {
+    return ABBREVIATIONS.reduce((text, [re, short]) => text.replace(re, short), String(name || ""));
+  }
+  function segmentGrid(segments, cell) {
+    const grid = /* @__PURE__ */ new Map();
+    segments.forEach((s, i) => {
+      const x0 = Math.floor(Math.min(s.a[0], s.b[0]) / cell), x1 = Math.floor(Math.max(s.a[0], s.b[0]) / cell);
+      const y0 = Math.floor(Math.min(s.a[1], s.b[1]) / cell), y1 = Math.floor(Math.max(s.a[1], s.b[1]) / cell);
+      for (let x = x0; x <= x1; x++) {
+        for (let y = y0; y <= y1; y++) {
+          const key = x + "," + y;
+          if (!grid.has(key)) grid.set(key, []);
+          grid.get(key).push(i);
+        }
+      }
+    });
+    return {
+      near(minLng, minLat, maxLng, maxLat) {
+        const found = /* @__PURE__ */ new Set();
+        for (let x = Math.floor(minLng / cell); x <= Math.floor(maxLng / cell); x++) {
+          for (let y = Math.floor(minLat / cell); y <= Math.floor(maxLat / cell); y++) {
+            for (const i of grid.get(x + "," + y) || []) found.add(i);
+          }
+        }
+        return found;
+      }
+    };
+  }
+  function routeSegments(route) {
+    const segments = [];
+    for (const { points, cum } of route.parts) {
+      for (let i = 1; i < points.length; i++) {
+        segments.push({ a: points[i - 1], b: points[i], from: cum[i - 1], to: cum[i] });
+      }
+    }
+    return segments;
+  }
+  function crossAt(p, q, a, b) {
+    const rx = q[0] - p[0], ry = q[1] - p[1], sx = b[0] - a[0], sy = b[1] - a[1];
+    const d = rx * sy - ry * sx;
+    if (!d) return null;
+    const t = ((a[0] - p[0]) * sy - (a[1] - p[1]) * sx) / d;
+    const u = ((a[0] - p[0]) * ry - (a[1] - p[1]) * rx) / d;
+    return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? t : null;
+  }
+  var metresBetween = (p, q) => {
+    const k = Math.cos((p[1] + q[1]) / 2 * Math.PI / 180);
+    return Math.hypot((q[0] - p[0]) * k, q[1] - p[1]) * M_PER_DEG;
+  };
+  function creekCrossings(route, waterways, { mergeM = 150 } = {}) {
+    const segments = routeSegments(route);
+    if (!segments.length) return [];
+    const grid = segmentGrid(segments, 0.01);
+    const hits = [];
+    for (const w of waterways || []) {
+      const line = w.line || [];
+      for (let i = 1; i < line.length; i++) {
+        const p = line[i - 1], q = line[i];
+        for (const k of grid.near(Math.min(p[0], q[0]), Math.min(p[1], q[1]), Math.max(p[0], q[0]), Math.max(p[1], q[1]))) {
+          const s = segments[k];
+          const t = crossAt(s.a, s.b, p, q);
+          if (t == null) continue;
+          hits.push({
+            along: s.from + (s.to - s.from) * t,
+            name: w.name || "",
+            cls: w.cls || "",
+            lng: s.a[0] + (s.b[0] - s.a[0]) * t,
+            lat: s.a[1] + (s.b[1] - s.a[1]) * t
+          });
+        }
+      }
+    }
+    hits.sort((x, y) => x.along - y.along);
+    const merged = [];
+    for (const hit of hits) {
+      const last = merged[merged.length - 1];
+      if (last && hit.along - last.along <= mergeM) {
+        if (!last.name && hit.name) Object.assign(last, { name: hit.name, cls: hit.cls });
+        continue;
+      }
+      merged.push({ ...hit });
+    }
+    const features = [];
+    for (const hit of merged) {
+      const same = features.find((f) => metresBetween([f.lng, f.lat], [hit.lng, hit.lat]) < 30);
+      if (same) {
+        same.passes.push(hit.along);
+        if (!same.name) same.name = hit.name;
+        continue;
+      }
+      features.push({ lng: hit.lng, lat: hit.lat, name: hit.name, cls: hit.cls, passes: [hit.along] });
+    }
+    return features;
+  }
+  function trackSections(samples, roads, { snapM = 15, minM = 300, gapM = 100, briefM = 150, skipStartM = 100 } = {}) {
+    const segments = [];
+    for (const r of roads || []) {
+      if (!r.name) continue;
+      for (let i = 1; i < (r.line || []).length; i++) segments.push({ a: r.line[i - 1], b: r.line[i], name: r.name, cls: r.cls || "" });
+    }
+    if (!segments.length || !samples.length) return [];
+    const grid = segmentGrid(segments, 2e-3);
+    const pad = snapM / M_PER_DEG;
+    const nearest = (s) => {
+      const k = Math.cos(s.lat * Math.PI / 180);
+      let best = null, bestD = snapM;
+      for (const i of grid.near(s.lng - pad / k, s.lat - pad, s.lng + pad / k, s.lat + pad)) {
+        const g = segments[i];
+        const ax = (g.a[0] - s.lng) * k, ay = g.a[1] - s.lat, bx = (g.b[0] - s.lng) * k, by = g.b[1] - s.lat;
+        const dx = bx - ax, dy = by - ay, len = dx * dx + dy * dy;
+        const t = len ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len)) : 0;
+        const d = Math.hypot(ax + t * dx, ay + t * dy) * M_PER_DEG;
+        if (d <= bestD) {
+          best = g;
+          bestD = d;
+        }
+      }
+      return best;
+    };
+    const runs = [];
+    let run = null;
+    for (const s of samples) {
+      if (s.partStart && run) {
+        runs.push(run);
+        run = null;
+      }
+      const road = nearest(s);
+      if (!road) {
+        if (run && s.along - run.to > gapM) {
+          runs.push(run);
+          run = null;
+        }
+        continue;
+      }
+      if (run && run.name === road.name) {
+        run.to = s.along;
+        continue;
+      }
+      if (run) runs.push(run);
+      run = { name: road.name, cls: road.cls, from: s.along, to: s.along, lng: s.lng, lat: s.lat };
+    }
+    if (run) runs.push(run);
+    const merged = [];
+    for (const r of runs) {
+      if (r.to - r.from < briefM) continue;
+      const last = merged[merged.length - 1];
+      if (last && last.name === r.name) last.to = r.to;
+      else merged.push({ ...r });
+    }
+    const sections = [];
+    let lastName = null;
+    for (const r of merged) {
+      if (r.to - r.from < minM) continue;
+      if (r.name !== lastName && r.from >= skipStartM) sections.push({ along: r.from, to: r.to, name: r.name, cls: r.cls, lng: r.lng, lat: r.lat });
+      lastName = r.name;
+    }
+    return sections;
+  }
+  function turningPoints(values, hysteresis) {
+    const points = [{ i: 0, v: values[0] }];
+    let dir = 0, hi = { i: 0, v: values[0] }, lo = { i: 0, v: values[0] };
+    for (let i = 1; i < values.length; i++) {
+      const v = values[i];
+      if (v > hi.v) hi = { i, v };
+      if (v < lo.v) lo = { i, v };
+      if (dir >= 0 && hi.v - v > hysteresis) {
+        if (hi.i > points[points.length - 1].i) points.push(hi);
+        dir = -1;
+        lo = { i, v };
+      } else if (dir <= 0 && v - lo.v > hysteresis) {
+        if (lo.i > points[points.length - 1].i) points.push(lo);
+        dir = 1;
+        hi = { i, v };
+      }
+    }
+    const end = dir > 0 ? hi : dir < 0 ? lo : { i: values.length - 1, v: values[values.length - 1] };
+    if (end.i > points[points.length - 1].i) points.push(end);
+    return points;
+  }
+  function climbPieces(samples, ele, ia, ib, flatM, flatGrade) {
+    const flat = new Uint8Array(ib - ia + 1);
+    for (let j = ia, k = ia; j <= ib; j++) {
+      while (k < ib && samples[k].along - samples[j].along < flatM) k++;
+      const run = samples[k].along - samples[j].along;
+      if (run >= flatM && ele[k] - ele[j] < flatGrade * run) flat.fill(1, j - ia, k - ia + 1);
+    }
+    const pieces = [];
+    for (let j = ia; j <= ib; j++) {
+      if (flat[j - ia]) continue;
+      let end = j;
+      while (end < ib && !flat[end + 1 - ia]) end++;
+      let s = j, e = end;
+      while (s > ia && ele[s - 1] < ele[s]) s--;
+      while (e < ib && ele[e + 1] > ele[e]) e++;
+      let low = s, high = s;
+      for (let m = s; m <= e; m++) if (ele[m] > ele[high]) high = m;
+      for (let m = s; m <= high; m++) if (ele[m] <= ele[low]) low = m;
+      const tol = Math.max(1, 0.03 * (ele[high] - ele[low]));
+      let start = low, top = high;
+      while (start < top && ele[start + 1] <= ele[low] + tol) start++;
+      while (top > start && ele[top - 1] >= ele[high] - tol) top--;
+      if (top > start) pieces.push([start, top, ele[low], ele[high]]);
+      j = end;
+    }
+    return pieces;
+  }
+  function findClimbs(samples, elevations, {
+    minGain = 40,
+    minGrade = 0.03,
+    hysteresis = 12,
+    steepM = 200,
+    flatM = 400,
+    flatGrade = 0.01
+  } = {}) {
+    if (!elevations || elevations.length !== samples.length) return [];
+    const ele = smoothElevations(elevations, 5);
+    const climbs = [];
+    let start = 0;
+    for (let i = 1; i <= samples.length; i++) {
+      const breaks = i === samples.length || samples[i].partStart || !Number.isFinite(ele[i]) || !Number.isFinite(ele[start]);
+      if (!breaks) continue;
+      if (Number.isFinite(ele[start]) && i - start > 2) {
+        const offset = start;
+        const values = Array.from(ele.subarray ? ele.subarray(start, i) : ele.slice(start, i));
+        const points = turningPoints(values, hysteresis);
+        for (let k = 1; k < points.length; k++) {
+          const a = points[k - 1], b = points[k];
+          if (b.v <= a.v) continue;
+          for (const [ia, ib, base, top] of climbPieces(samples, ele, a.i + offset, b.i + offset, flatM, flatGrade)) {
+            const gain = top - base, length = samples[ib].along - samples[ia].along;
+            if (gain < minGain || !(length > 0) || gain / length < minGrade) continue;
+            let steepest = gain / length;
+            for (let j = ia, m = ia; j < ib; j++) {
+              while (m < ib && samples[m].along - samples[j].along < steepM) m++;
+              const run = samples[m].along - samples[j].along;
+              if (run >= steepM * 0.75) steepest = Math.max(steepest, (ele[m] - ele[j]) / run);
+            }
+            climbs.push({
+              from: samples[ia].along,
+              to: samples[ib].along,
+              gain,
+              length,
+              grade: gain / length,
+              steepest,
+              base,
+              top,
+              startIndex: ia,
+              endIndex: ib
+            });
+          }
+        }
+      }
+      start = i;
+    }
+    return climbs;
+  }
+  var gainText = (metres, metric) => metric ? Math.round(metres) + "m" : Math.round(metres * 3.28084) + "ft";
+  var firstFitting = (candidates, maxLength) => candidates.find((text) => text.length <= maxLength) || candidates[candidates.length - 1];
+  function climbLabel(climb, metric = true, maxLength = 16) {
+    const gain = gainText(climb.gain, metric);
+    const d = climb.length / (metric ? 1e3 : 1609.344);
+    return firstFitting([`Climb ${gain} ${d.toFixed(1)}${metric ? "k" : "mi"}`, `Climb ${gain}`, `+${gain}`], maxLength);
+  }
+  function climbTopLabel(climb, metric = true, maxLength = 16) {
+    const gain = gainText(climb.gain, metric);
+    return firstFitting([`Top ${gain} climb`, `Top ${gain}`, "Top"], maxLength);
+  }
+
   // src/utils/sun.js
   var RAD2 = Math.PI / 180;
   var DAY_MS = 864e5;
@@ -11417,6 +11708,10 @@
 
   // src/providers/route-pois.js
   var POI_CATEGORIES = [
+    { id: "climb", label: "Climbs", icon: "fa-line-chart", color: "#d84315", types: ["climb"] },
+    { id: "climbtop", label: "Climb tops", icon: "fa-flag", color: "#6a1b9a", types: ["climb_top"] },
+    { id: "creek", label: "Creek crossings", glyph: "≈", color: "#0277bd", types: ["creek_crossing"] },
+    { id: "track", label: "Track sections", icon: "fa-road", color: "#6d4c41", types: ["track_section"] },
     {
       id: "water",
       label: "Water",
@@ -11458,6 +11753,13 @@
       icon: "fa-home",
       color: "#455a64",
       types: ["shelter", "alpine_hut", "wilderness_hut", "camp_site"]
+    },
+    {
+      id: "parking",
+      label: "Car parks & picnic",
+      glyph: "P",
+      color: "#546e7a",
+      types: ["parking", "picnic_site"]
     },
     {
       id: "medical",
@@ -11509,9 +11811,27 @@
     hospital: "Hospital",
     defibrillator: "Defibrillator",
     bicycle_repair_station: "Bike repair",
-    bicycle: "Bike shop"
+    bicycle: "Bike shop",
+    parking: "Car park",
+    picnic_site: "Picnic area",
+    climb: "Climb",
+    climb_top: "Top of climb",
+    creek_crossing: "Creek crossing",
+    track_section: "Track or road"
   };
   var TYPE_GLYPHS = { peak: "▲", volcano: "▲" };
+  var COURSE_TYPES = /* @__PURE__ */ new Set(["climb", "climb_top", "creek_crossing", "track_section"]);
+  var TRACK_KINDS = {
+    path: "path",
+    track: "track",
+    minor: "road",
+    service: "road",
+    tertiary: "road",
+    secondary: "main road",
+    primary: "main road",
+    trunk: "highway",
+    motorway: "motorway"
+  };
   var POI_RADIUS_OPTIONS = [50, 100, 250, 500];
   function classifyPoi(layerName, props) {
     if (layerName === "mountain_peak") {
@@ -11526,16 +11846,26 @@
   function cleanName(value) {
     return String(value == null ? "" : value).replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 120);
   }
+  var LINE_WATERWAYS = /* @__PURE__ */ new Set(["river", "stream", "canal"]);
   function decodePoiTile(buffer, z, x, y) {
     const n = 2 ** z;
-    const pois = [], busStops = [];
+    const pois = [], busStops = [], lines = [];
     for (const layer of mvtDecode(buffer)) {
-      if (layer.name !== "poi" && layer.name !== "mountain_peak") continue;
+      const water = layer.name === "waterway", road = layer.name === "transportation_name";
+      if (layer.name !== "poi" && layer.name !== "mountain_peak" && !water && !road) continue;
       const ext = layer.extent || 4096;
       for (const f of layer.features) {
         const props = {};
         for (let i = 0; i + 1 < f.tags.length; i += 2) {
           props[layer.keys[f.tags[i]]] = layer.values[f.tags[i + 1]];
+        }
+        if (water || road) {
+          const name = cleanName(props.name);
+          if (f.type !== 2 || water && !LINE_WATERWAYS.has(String(props.class)) || road && !name) continue;
+          for (const line of decodeGeometry(f.geom)) {
+            if (line.length > 1) lines.push({ kind: water ? "water" : "road", name, cls: String(props.class || ""), ext, xy: Int16Array.from(line.flat()) });
+          }
+          continue;
         }
         const busStop = layer.name === "poi" && props.subclass === "bus_stop";
         const kind = busStop ? null : classifyPoi(layer.name, props);
@@ -11558,7 +11888,49 @@
         });
       }
     }
-    return { pois, busStops };
+    return { pois, busStops, lines, z, x, y };
+  }
+  function tileLines(tile) {
+    const n = 2 ** tile.z;
+    return (tile.lines || []).map(({ kind, name, cls, ext, xy }) => {
+      const line = [];
+      for (let i = 0; i + 1 < xy.length; i += 2) {
+        line.push([
+          (tile.x + xy[i] / ext) / n * 360 - 180,
+          Math.atan(Math.sinh(Math.PI * (1 - 2 * (tile.y + xy[i + 1] / ext) / n))) * 180 / Math.PI
+        ]);
+      }
+      return { kind, name, cls, line };
+    });
+  }
+  function courseFeatures({ route, samples, elevations, lines, metric = true }) {
+    const items = [];
+    const id = (type, lng, lat) => type + ":" + lat.toFixed(5) + "," + lng.toFixed(5);
+    const item = (type, category, at, name, passes, extra) => ({
+      id: id(type, at.lng, at.lat),
+      category,
+      type,
+      name,
+      ele: null,
+      lng: at.lng,
+      lat: at.lat,
+      passes: passes.map((along) => ({ along, offset: 0 })),
+      along: passes[0],
+      offset: 0,
+      ...extra
+    });
+    for (const c of creekCrossings(route, lines.filter((l) => l.kind === "water"))) {
+      items.push(item("creek_crossing", "creek", c, c.name, c.passes, { cls: c.cls }));
+    }
+    for (const t of trackSections(samples, lines.filter((l) => l.kind === "road"))) {
+      items.push(item("track_section", "track", t, t.name, [t.along], { cls: t.cls, until: t.to }));
+    }
+    for (const c of findClimbs(samples, elevations)) {
+      const base = samples[c.startIndex], top = samples[c.endIndex];
+      items.push(item("climb", "climb", base, climbLabel(c, metric), [c.from], { climb: c, ele: Math.round(c.base) }));
+      items.push(item("climb_top", "climbtop", top, climbTopLabel(c, metric), [c.to], { climb: c, ele: Math.round(c.top) }));
+    }
+    return items;
   }
   function selectRoutePois(tiles, route, radius) {
     const index = createRouteIndex(route, radius);
@@ -11627,12 +11999,18 @@
   }
   function waypointLabel(poi, { mode = "name", along = poi.along, eta = null, metric = true, maxLength = 16 } = {}) {
     const max = Math.max(1, maxLength);
-    const base = (poi.name || poiTypeLabel(poi)).replace(/\s+/g, " ").trim();
-    if (mode === "name" || !Number.isFinite(along)) return base.slice(0, max).trim();
-    const d = along / (metric ? 1e3 : 1609.344);
-    const dist = (d < 10 ? d.toFixed(1) : String(Math.round(d))) + (metric ? "k" : "mi");
-    const time = mode === "km-time" && eta != null ? " " + clock(eta) : "";
-    return (dist + time + " " + base).slice(0, max).trim();
+    let prefix = "";
+    if (mode !== "name" && Number.isFinite(along)) {
+      const d = along / (metric ? 1e3 : 1609.344);
+      prefix = (d < 10 ? d.toFixed(1) : String(Math.round(d))) + (metric ? "k" : "mi") + (mode === "km-time" && eta != null ? " " + clock(eta) : "") + " ";
+    }
+    const room = Math.max(1, max - prefix.length);
+    let base;
+    if (poi.climb && poi.type === "climb") base = climbLabel(poi.climb, metric, room);
+    else if (poi.climb && poi.type === "climb_top") base = climbTopLabel(poi.climb, metric, room);
+    else base = (poi.name || poiTypeLabel(poi)).replace(/\s+/g, " ").trim();
+    if (base.length > room) base = abbreviate(base);
+    return (prefix + base.slice(0, room)).slice(0, max).trim();
   }
   function waterGuideLitres(hours, feels) {
     if (!(hours >= 0.5)) return null;
@@ -11656,6 +12034,38 @@
     if (!Number.isFinite(d.getTime())) return defaultStart(now);
     while (d.getTime() < now - 6 * 36e5) d.setDate(d.getDate() + 1);
     return toLocalInput(d.getTime());
+  }
+  var CATEGORY_PRIORITY = {
+    water: 0,
+    toilets: 1,
+    food: 2,
+    shop: 2,
+    medical: 3,
+    climb: 4,
+    climbtop: 4,
+    creek: 5,
+    track: 6,
+    views: 7,
+    shelter: 7,
+    bike: 7
+  };
+  var TYPE_PRIORITY = { picnic_site: 8, parking: 9 };
+  function waypointPriority(poi) {
+    return TYPE_PRIORITY[poi.type] ?? CATEGORY_PRIORITY[poi.category] ?? 7;
+  }
+  function thinClusters(candidates, taken = [], windowM = 100) {
+    const all = candidates.map((poi) => ({ poi, taken: false })).concat(taken.map((poi) => ({ poi, taken: true }))).sort((a, b) => a.poi.along - b.poi.along);
+    const keep = [];
+    for (let i = 0; i < all.length; ) {
+      let j = i;
+      while (j + 1 < all.length && all[j + 1].poi.along - all[i].poi.along <= windowM) j++;
+      const group = all.slice(i, j + 1);
+      if (!group.some((g) => g.taken)) {
+        keep.push(group.reduce((best, g) => waypointPriority(g.poi) < waypointPriority(best.poi) ? g : best).poi);
+      }
+      i = j + 1;
+    }
+    return keep;
   }
   function formatRouteDistance(metres, metric = true) {
     return metric ? (metres / 1e3).toFixed(1) + " km" : (metres / 1609.344).toFixed(1) + " mi";
@@ -11794,11 +12204,48 @@
       return { cancel() {
       } };
     }
-    let cancelled = false, inner = null;
+    const samples = resampleRoute(route);
+    let cancelled = false, inner = null, elevationJob = null, tileResult = null, elevation = null;
+    const stop = () => {
+      cancelled = true;
+      if (inner) inner.cancel();
+      if (elevationJob && elevationJob.cancel) elevationJob.cancel();
+    };
+    const fail = (error) => {
+      if (!cancelled) {
+        stop();
+        cb(error);
+      }
+    };
+    const finish = () => {
+      if (cancelled || !tileResult || !elevation) return;
+      cancelled = true;
+      const lines = tileResult.tiles.flatMap(tileLines);
+      const features = courseFeatures({ route, samples, elevations: elevation.values, lines, metric: opts.metric !== false });
+      const pois = selectRoutePois(tileResult.tiles, route, radius).concat(features).sort((a, b) => a.along - b.along || a.offset - b.offset);
+      cb(null, {
+        pois,
+        route,
+        samples,
+        elevations: elevation.values,
+        elevationError: elevation.err || null,
+        tileCount: tiles.length,
+        failedTiles: tileResult.failed
+      });
+    };
+    const fetchElevations = opts.fetchElevations || ((points, done) => fetchRouteElevations(points, {}, done));
+    try {
+      elevationJob = fetchElevations(samples, (err, values) => {
+        elevation = { err: err || null, values: err ? null : values };
+        finish();
+      });
+    } catch (e) {
+      elevation = { err: e, values: null };
+    }
     (opts.resolveTemplate || resolveTileTemplate)((err, template) => {
       if (cancelled) return;
       if (err || !template) {
-        cb(poiError("tiles", "Couldn't reach the OpenFreeMap map-data index. Try again shortly."));
+        fail(poiError("tiles", "Couldn't reach the OpenFreeMap map-data index. Try again shortly."));
         return;
       }
       inner = loadPoiTiles(tiles, {
@@ -11809,21 +12256,14 @@
       }, (_err, result) => {
         if (cancelled) return;
         if (tiles.length && result.failed === tiles.length) {
-          cb(poiError("tiles", "Couldn't load map data for this route. Try again shortly."));
+          fail(poiError("tiles", "Couldn't load map data for this route. Try again shortly."));
           return;
         }
-        cb(null, {
-          pois: selectRoutePois(result.tiles, route, radius),
-          route,
-          tileCount: tiles.length,
-          failedTiles: result.failed
-        });
+        tileResult = result;
+        finish();
       });
     });
-    return { cancel() {
-      cancelled = true;
-      if (inner) inner.cancel();
-    } };
+    return { cancel: stop };
   }
   function pageWindow() {
     return typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
@@ -11898,7 +12338,6 @@
       this._scrollReset = false;
       this._timing = null;
       this._timingGen = 0;
-      this._timingJobs = [];
       this._inputTimer = null;
       this._onMapLayers = () => {
         clearTimeout(this._syncTimer);
@@ -11934,6 +12373,7 @@
       this._pendingSig = null;
       this._startWatching();
       this._handle = findRoutePois(paths, this._prefs.radius, {
+        metric: this._metric(),
         onProgress: (done, total) => {
           if (gen === this._gen) this._setStatus(`Reading map data… ${done}/${total} tiles`);
         }
@@ -11949,18 +12389,20 @@
         this._scrollReset = true;
         this._setState("active");
         if (err) this._stopTiming();
-        else this._startTiming();
+        else this._startTiming(result);
         if (err) {
           this._summary = { text: err.message, error: true };
           this._setStatus(err.message, true);
           return;
         }
         const metric = this._metric();
-        const found = this._pois.length ? `${this._pois.length} POI${this._pois.length === 1 ? "" : "s"}` : "No POIs";
-        const failed = result.failedTiles ? ` · ${result.failedTiles} of ${result.tileCount} map tiles didn't load` : "";
+        const course = this._pois.filter((poi) => COURSE_TYPES.has(poi.type)).length;
+        const nearby = this._pois.length - course;
+        const found = nearby ? `${nearby} POI${nearby === 1 ? "" : "s"}` : "No POIs";
+        const failed = (result.failedTiles ? ` · ${result.failedTiles} of ${result.tileCount} map tiles didn't load` : "") + (result.elevationError ? " · no climbs (elevation data didn't load)" : "");
         this._summary = {
-          text: `${found} within ${formatOffset(this._prefs.radius, metric)} of the ${formatRouteDistance(result.route.total, metric)} route${failed}`,
-          error: !!result.failedTiles
+          text: `${found} within ${formatOffset(this._prefs.radius, metric)} of the ${formatRouteDistance(result.route.total, metric)} route` + (course ? ` · ${course} course point${course === 1 ? "" : "s"}` : "") + failed,
+          error: !!(result.failedTiles || result.elevationError)
         };
         this._setStatus(this._summary.text, this._summary.error);
       });
@@ -12026,31 +12468,24 @@
     }
     _stopTiming() {
       this._timingGen++;
-      for (const job of this._timingJobs) {
-        try {
-          job && job.cancel && job.cancel();
-        } catch (_) {
-        }
-      }
-      this._timingJobs = [];
       clearTimeout(this._inputTimer);
       this._timing = null;
     }
-    // New route: sample it, show a flat estimate at once, then refine with
-    // elevation and fetch the forecast for the refined arrival times.
-    _startTiming() {
+    // New search result: time the route with its elevation profile (flat when
+    // that didn't load) and fetch the forecast for the arrival times.
+    _startTiming(result) {
       this._stopTiming();
       if (!this._route) return;
-      const gen = this._timingGen;
-      const samples = resampleRoute(this._route);
-      this._timing = { gen, samples, elevations: null, elevationStatus: "loading", weather: { status: "idle" } };
-      this._recomputeTiming(false);
-      this._timingJobs.push(fetchRouteElevations(samples, {}, (err, values) => {
-        if (gen !== this._timingGen || !this._timing) return;
-        this._timing.elevations = err ? null : values;
-        this._timing.elevationStatus = err ? "failed" : "ok";
-        this._recomputeTiming(true);
-      }));
+      const samples = result && result.samples ? result.samples : resampleRoute(this._route);
+      const elevations = result && result.elevations ? result.elevations : null;
+      this._timing = {
+        gen: this._timingGen,
+        samples,
+        elevations,
+        elevationStatus: elevations ? "ok" : "failed",
+        weather: { status: "idle" }
+      };
+      this._recomputeTiming(true);
     }
     _recomputeTiming(withWeather) {
       const t = this._timing;
@@ -12064,7 +12499,7 @@
     }
     _fetchWeather() {
       const t = this._timing;
-      if (!t || t.elevationStatus === "loading") return;
+      if (!t) return;
       const gen = this._timingGen;
       const key = t.weatherSeq = (t.weatherSeq || 0) + 1;
       t.weather = { status: "loading" };
@@ -12114,8 +12549,7 @@
       const lines = [];
       const finish = t.startMs + t.model.total * 1e3;
       let climb = "";
-      if (t.elevationStatus === "loading") climb = " · estimating climbs…";
-      else if (t.elevationStatus === "failed") climb = " · flat estimate (elevation unavailable)";
+      if (t.elevationStatus === "failed") climb = " · flat estimate (elevation unavailable)";
       else if (t.model.ascent != null) {
         const f = (m) => metric ? Math.round(m) + " m" : Math.round(m * 3.28084) + " ft";
         climb = ` · ↑ ${f(t.model.ascent)} ↓ ${f(t.model.descent)}`;
@@ -12322,13 +12756,36 @@
       const label = poiTypeLabel(poi);
       return esc`<b>${poi.name || label}</b><br>${label} · ${this._passesText(poi)}`;
     }
+    // Extra popup lines for climbs and track sections.
+    _featureHtml(poi) {
+      const metric = this._metric();
+      const c = poi.climb;
+      if (c) {
+        const dist = formatRouteDistance(c.length, metric);
+        const pct = (g) => Math.round(g * 100) + "%";
+        let line = esc`↑ ${formatOffset(c.gain, metric)} over ${dist} · average ${pct(c.grade)} · steepest ${pct(c.steepest)}`;
+        const t = this._timing;
+        if (t && t.model) {
+          const minutes = (timeAt(t.model, c.to) - timeAt(t.model, c.from)) / 60;
+          line += esc` · about ${formatDuration(minutes * 60)} to the top`;
+        }
+        const span = poi.type === "climb_top" ? esc`From ${formatRouteDistance(c.from, metric)} (${formatOffset(c.base, metric)})` : esc`Top at ${formatRouteDistance(c.to, metric)} (${formatOffset(c.top, metric)})`;
+        return `<div>${line}</div><div>${span}</div>`;
+      }
+      if (poi.type === "track_section" && poi.until != null) {
+        const kind = TRACK_KINDS[poi.cls] || "";
+        return esc`<div>Until about ${formatRouteDistance(poi.until, metric)}${kind ? " · " + kind : ""}</div>`;
+      }
+      return "";
+    }
     _popupHtml(poi) {
       const label = poiTypeLabel(poi);
       const metric = this._metric();
       const ele = poi.ele != null ? ` · ${formatOffset(poi.ele, metric)}` : "";
       const added = this._added.has(poi.id);
       const maps = "https://www.google.com/maps/search/?api=1&query=" + poi.lat.toFixed(6) + "," + poi.lng.toFixed(6);
-      return `<div class="dw-poi-pop">` + esc`<b>${poi.name || label}</b>` + esc`<div class="dw-poi-pop-sub">${label}${ele}</div>` + esc`<div>At ${this._passesText(poi)} · ${formatOffset(poi.offset, metric)} off route</div>` + `<div class="dw-poi-pop-actions">` + esc`<button type="button" class="dw-poi-add-btn" data-poi-id="${poi.id}"` + (added ? " disabled>Waypoint added" : ">Add as waypoint") + `</button>` + esc`<a href="${maps}" target="_blank" rel="noreferrer">Google Maps ↗</a>` + `</div></div>`;
+      const onRoute = COURSE_TYPES.has(poi.type);
+      return `<div class="dw-poi-pop">` + esc`<b>${poi.name || label}</b>` + esc`<div class="dw-poi-pop-sub">${label}${ele}</div>` + this._featureHtml(poi) + esc`<div>At ${this._passesText(poi)}${onRoute ? "" : ` · ${formatOffset(poi.offset, metric)} off route`}</div>` + `<div class="dw-poi-pop-actions">` + esc`<button type="button" class="dw-poi-add-btn" data-poi-id="${poi.id}"` + (added ? " disabled>Waypoint added" : ">Add as waypoint") + `</button>` + esc`<a href="${maps}" target="_blank" rel="noreferrer">Google Maps ↗</a>` + `</div></div>`;
     }
     _onPopupOpen(poi, e) {
       const plan = this._plan();
@@ -12349,7 +12806,11 @@
     }
     _focusPoi(poi) {
       const marker = this._markers.get(poi.id);
-      this._map.setView([poi.lat, poi.lng], Math.max(this._map.getZoom(), 16));
+      const zoom = Math.max(this._map.getZoom(), 16);
+      const panel = this._panel && !this._panel.classList.contains("dw-poi-panel--collapsed") ? this._panel : null;
+      const shift = panel ? (panel.offsetWidth + 12) / 2 : 0;
+      const centre = this._map.unproject(this._map.project([poi.lat, poi.lng], zoom).subtract([shift, 0]), zoom);
+      this._map.setView(centre, zoom, { animate: false });
       if (marker) marker.openPopup();
     }
     // -- Waypoints ----------------------------------------------------------
@@ -12425,14 +12886,21 @@
         this._note("Every POI shown is already a waypoint.");
         return;
       }
-      if (pending.length > CONFIRM_ADD_ALL_OVER && !window.confirm(`Add ${pending.length} waypoints to this route?`)) return;
+      const chosen = thinClusters(pending, this._pois.filter((poi) => this._added.has(poi.id)));
+      const left = pending.length - chosen.length;
+      if (!chosen.length) {
+        this._note("Every stretch shown already has a waypoint.");
+        return;
+      }
+      if (chosen.length > CONFIRM_ADD_ALL_OVER && !window.confirm(`Add ${chosen.length} waypoints to this route?`)) return;
       let count = 0;
       this._status = { text: "", error: false, note: true };
-      for (const poi of pending) {
+      for (const poi of chosen) {
         if (this._addWaypoint(poi, true)) count++;
         else if (this._status.error) return;
       }
-      this._note(count ? `Added ${count} waypoint${count === 1 ? "" : "s"} — save the route to keep them.` : "Those POIs already have waypoints.");
+      const skipped = left ? ` (${left} next to a more useful one left out)` : "";
+      this._note(count ? `Added ${count} waypoint${count === 1 ? "" : "s"}${skipped} — save the route to keep them.` : "Those POIs already have waypoints.");
     }
     // -- Panel --------------------------------------------------------------
     _ensurePanel() {
@@ -14004,11 +14472,11 @@
         ".dw-poi-pop-actions { display: flex; align-items: center; gap: 10px; margin-top: 6px; }",
         ".dw-poi-add-btn { padding: 2px 8px; border: 1px solid #1565c0; border-radius: 4px; background: #1e88e5; color: #fff; cursor: pointer; font-size: 11px; }",
         ".dw-poi-add-btn:disabled { background: #e3f2fd; color: #1565c0; cursor: default; }",
-        ".dw-poi-panel { position: absolute; left: 12px; top: 90px; z-index: 1150; width: min(300px, calc(100% - 24px)); max-height: min(60vh, 520px); display: flex; flex-direction: column; background: rgba(255,255,255,.97); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,.35); font: 12px/1.4 sans-serif; color: #222; }",
+        ".dw-poi-panel { position: absolute; left: 12px; top: 90px; z-index: 1150; width: min(300px, calc(100% - 24px)); max-height: min(calc(100% - 110px), 760px); display: flex; flex-direction: column; background: rgba(255,255,255,.97); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,.35); font: 12px/1.4 sans-serif; color: #222; }",
         ".dw-poi-hd { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 4px 10px; border-bottom: 1px solid #e5e5e5; }",
         ".dw-poi-hd-btns button { border: 0; background: none; font-size: 16px; line-height: 1; padding: 0 4px; cursor: pointer; color: #555; }",
         ".dw-poi-hd-btns button:hover { color: #000; }",
-        ".dw-poi-body { display: flex; flex-direction: column; gap: 6px; padding: 6px 10px 8px; overflow: hidden; min-height: 0; }",
+        ".dw-poi-body { display: flex; flex-direction: column; gap: 6px; padding: 6px 10px 8px; overflow-y: auto; min-height: 0; }",
         ".dw-poi-panel--collapsed .dw-poi-body { display: none; }",
         ".dw-poi-status { color: #374151; }",
         ".dw-poi-status--error { color: #b91c1c; }",
@@ -14042,7 +14510,7 @@
         ".dw-poi-chip--off { opacity: .45; text-decoration: line-through; }",
         ".dw-poi-count { color: #6b7280; }",
         ".dw-poi-dot { display: inline-block; flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; }",
-        ".dw-poi-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; min-height: 0; flex: 1 1 auto; border-top: 1px solid #eee; }",
+        ".dw-poi-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; min-height: 110px; flex: 1 1 auto; border-top: 1px solid #eee; }",
         ".dw-poi-row { display: flex; align-items: center; gap: 6px; padding: 3px 2px; border-bottom: 1px solid #f2f2f2; cursor: pointer; }",
         ".dw-poi-row:hover { background: #f5f8ff; }",
         ".dw-poi-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",

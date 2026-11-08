@@ -18,6 +18,9 @@ import { _dwGetRouteModel } from "../utils/route-model.js";
 import {
 	alongAt, formatDuration, formatPace, parsePace, resampleRoute, routeTiming, timeAt,
 } from "../utils/route-timing.js";
+import {
+	abbreviate, climbLabel, climbTopLabel, creekCrossings, findClimbs, trackSections,
+} from "../utils/route-features.js";
 import { darkIntervals, sunTimes } from "../utils/sun.js";
 import { fetchRouteElevations } from "./route-elevation.js";
 import { fetchRouteWeather, maxFeelsBetween, summarizeWeather, weatherPoints } from "./route-weather.js";
@@ -26,12 +29,18 @@ import { fetchRouteWeather, maxFeelsBetween, summarizeWeather, weatherPoints } f
  * The planner-toolbar button reads dynamic.watch's route, loads the z14
  * OpenMapTiles vector tiles (OpenFreeMap: keyless, CDN-cached) covering a
  * corridor around it, and pins useful stops — water, toilets, food, shops,
- * views, shelter — with their distance along the route. Each POI can be
- * added to the plan as a named waypoint, which dynamic.watch exports to
- * the watch once the route is saved.
+ * views, shelter — with their distance along the route. The same tiles and
+ * an elevation profile give course features on the route itself (climbs,
+ * creek crossings, named track sections). Each can be added to the plan as a
+ * named waypoint, which dynamic.watch exports to the watch's Up Ahead list
+ * once the route is saved.
  */
 
 export const POI_CATEGORIES = [
+	{ id: "climb", label: "Climbs", icon: "fa-line-chart", color: "#d84315", types: ["climb"] },
+	{ id: "climbtop", label: "Climb tops", icon: "fa-flag", color: "#6a1b9a", types: ["climb_top"] },
+	{ id: "creek", label: "Creek crossings", glyph: "≈", color: "#0277bd", types: ["creek_crossing"] },
+	{ id: "track", label: "Track sections", icon: "fa-road", color: "#6d4c41", types: ["track_section"] },
 	{ id: "water", label: "Water", icon: "fa-tint", color: "#1e88e5",
 		types: ["drinking_water", "water_point", "water_tap", "spring"] },
 	{ id: "toilets", label: "Toilets", glyph: "WC", color: "#5d4037",
@@ -44,6 +53,8 @@ export const POI_CATEGORIES = [
 		types: ["viewpoint", "peak", "volcano"] },
 	{ id: "shelter", label: "Shelter & camping", icon: "fa-home", color: "#455a64",
 		types: ["shelter", "alpine_hut", "wilderness_hut", "camp_site"] },
+	{ id: "parking", label: "Car parks & picnic", glyph: "P", color: "#546e7a",
+		types: ["parking", "picnic_site"] },
 	{ id: "medical", label: "Medical", icon: "fa-medkit", color: "#c62828",
 		types: ["pharmacy", "hospital", "defibrillator"] },
 	{ id: "bike", label: "Bike", icon: "fa-wrench", color: "#00838f",
@@ -64,9 +75,17 @@ const TYPE_LABELS = {
 	volcano: "Volcano", shelter: "Shelter", alpine_hut: "Hut", wilderness_hut: "Hut",
 	camp_site: "Campsite", pharmacy: "Pharmacy", hospital: "Hospital",
 	defibrillator: "Defibrillator", bicycle_repair_station: "Bike repair",
-	bicycle: "Bike shop",
+	bicycle: "Bike shop", parking: "Car park", picnic_site: "Picnic area",
+	climb: "Climb", climb_top: "Top of climb", creek_crossing: "Creek crossing",
+	track_section: "Track or road",
 };
 const TYPE_GLYPHS = { peak: "▲", volcano: "▲" };
+const COURSE_TYPES = new Set(["climb", "climb_top", "creek_crossing", "track_section"]);
+// OpenMapTiles transportation classes in plain words.
+const TRACK_KINDS = {
+	path: "path", track: "track", minor: "road", service: "road", tertiary: "road",
+	secondary: "main road", primary: "main road", trunk: "highway", motorway: "motorway",
+};
 
 export const POI_RADIUS_OPTIONS = [50, 100, 250, 500];
 
@@ -86,18 +105,31 @@ function cleanName(value) {
 	return String(value == null ? "" : value).replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 120);
 }
 
-// Decode one z/x/y vector tile into category POIs plus bus-stop positions
-// (used to drop the many bus shelters tagged amenity=shelter).
+const LINE_WATERWAYS = new Set(["river", "stream", "canal"]);
+
+// Decode one z/x/y vector tile into category POIs, bus-stop positions (used
+// to drop the many bus shelters tagged amenity=shelter), and waterway and
+// named road lines. Lines stay in tile pixels (Int16) so the tile cache stays
+// small; tileLines() turns them into [lng, lat].
 export function decodePoiTile(buffer, z, x, y) {
 	const n = 2 ** z;
-	const pois = [], busStops = [];
+	const pois = [], busStops = [], lines = [];
 	for (const layer of mvtDecode(buffer)) {
-		if (layer.name !== "poi" && layer.name !== "mountain_peak") continue;
+		const water = layer.name === "waterway", road = layer.name === "transportation_name";
+		if (layer.name !== "poi" && layer.name !== "mountain_peak" && !water && !road) continue;
 		const ext = layer.extent || 4096;
 		for (const f of layer.features) {
 			const props = {};
 			for (let i = 0; i + 1 < f.tags.length; i += 2) {
 				props[layer.keys[f.tags[i]]] = layer.values[f.tags[i + 1]];
+			}
+			if (water || road) {
+				const name = cleanName(props.name);
+				if (f.type !== 2 || (water && !LINE_WATERWAYS.has(String(props.class))) || (road && !name)) continue;
+				for (const line of decodeGeometry(f.geom)) {
+					if (line.length > 1) lines.push({ kind: water ? "water" : "road", name, cls: String(props.class || ""), ext, xy: Int16Array.from(line.flat()) });
+				}
+				continue;
 			}
 			const busStop = layer.name === "poi" && props.subclass === "bus_stop";
 			const kind = busStop ? null : classifyPoi(layer.name, props);
@@ -115,7 +147,41 @@ export function decodePoiTile(buffer, z, x, y) {
 			});
 		}
 	}
-	return { pois, busStops };
+	return { pois, busStops, lines, z, x, y };
+}
+
+export function tileLines(tile) {
+	const n = 2 ** tile.z;
+	return (tile.lines || []).map(({ kind, name, cls, ext, xy }) => {
+		const line = [];
+		for (let i = 0; i + 1 < xy.length; i += 2) {
+			line.push([(tile.x + xy[i] / ext) / n * 360 - 180,
+				Math.atan(Math.sinh(Math.PI * (1 - 2 * (tile.y + xy[i + 1] / ext) / n))) * 180 / Math.PI]);
+		}
+		return { kind, name, cls, line };
+	});
+}
+
+// Course features as list items shaped like POIs (on the route: offset 0).
+export function courseFeatures({ route, samples, elevations, lines, metric = true }) {
+	const items = [];
+	const id = (type, lng, lat) => type + ":" + lat.toFixed(5) + "," + lng.toFixed(5);
+	const item = (type, category, at, name, passes, extra) => ({
+		id: id(type, at.lng, at.lat), category, type, name, ele: null, lng: at.lng, lat: at.lat,
+		passes: passes.map((along) => ({ along, offset: 0 })), along: passes[0], offset: 0, ...extra,
+	});
+	for (const c of creekCrossings(route, lines.filter((l) => l.kind === "water"))) {
+		items.push(item("creek_crossing", "creek", c, c.name, c.passes, { cls: c.cls }));
+	}
+	for (const t of trackSections(samples, lines.filter((l) => l.kind === "road"))) {
+		items.push(item("track_section", "track", t, t.name, [t.along], { cls: t.cls, until: t.to }));
+	}
+	for (const c of findClimbs(samples, elevations)) {
+		const base = samples[c.startIndex], top = samples[c.endIndex];
+		items.push(item("climb", "climb", base, climbLabel(c, metric), [c.from], { climb: c, ele: Math.round(c.base) }));
+		items.push(item("climb_top", "climbtop", top, climbTopLabel(c, metric), [c.to], { climb: c, ele: Math.round(c.top) }));
+	}
+	return items;
 }
 
 // Keep POIs within `radius` of the route, merge the copies that appear in
@@ -199,12 +265,19 @@ export function formatClock(ms, refMs) {
 
 export function waypointLabel(poi, { mode = "name", along = poi.along, eta = null, metric = true, maxLength = 16 } = {}) {
 	const max = Math.max(1, maxLength);
-	const base = (poi.name || poiTypeLabel(poi)).replace(/\s+/g, " ").trim();
-	if (mode === "name" || !Number.isFinite(along)) return base.slice(0, max).trim();
-	const d = along / (metric ? 1000 : 1609.344);
-	const dist = (d < 10 ? d.toFixed(1) : String(Math.round(d))) + (metric ? "k" : "mi");
-	const time = mode === "km-time" && eta != null ? " " + clock(eta) : "";
-	return (dist + time + " " + base).slice(0, max).trim();
+	let prefix = "";
+	if (mode !== "name" && Number.isFinite(along)) {
+		const d = along / (metric ? 1000 : 1609.344);
+		prefix = (d < 10 ? d.toFixed(1) : String(Math.round(d))) + (metric ? "k" : "mi") +
+			(mode === "km-time" && eta != null ? " " + clock(eta) : "") + " ";
+	}
+	const room = Math.max(1, max - prefix.length);
+	let base;
+	if (poi.climb && poi.type === "climb") base = climbLabel(poi.climb, metric, room);
+	else if (poi.climb && poi.type === "climb_top") base = climbTopLabel(poi.climb, metric, room);
+	else base = (poi.name || poiTypeLabel(poi)).replace(/\s+/g, " ").trim();
+	if (base.length > room) base = abbreviate(base);
+	return (prefix + base.slice(0, room)).slice(0, max).trim();
 }
 
 // Rough drinking guide for a stretch without water: about 0.4–0.8 L an hour,
@@ -239,6 +312,37 @@ export function normaliseStart(value, now = Date.now()) {
 	if (!Number.isFinite(d.getTime())) return defaultStart(now);
 	while (d.getTime() < now - 6 * 3600e3) d.setDate(d.getDate() + 1);
 	return toLocalInput(d.getTime());
+}
+
+// Up Ahead shows only the next few entries, so several waypoints at one spot
+// waste them. When adding in bulk, each stretch of `windowM` metres along the
+// route gets only its most useful item, and none if it already has a waypoint
+// from the list (`taken`).
+const CATEGORY_PRIORITY = {
+	water: 0, toilets: 1, food: 2, shop: 2, medical: 3, climb: 4, climbtop: 4, creek: 5, track: 6,
+	views: 7, shelter: 7, bike: 7,
+};
+const TYPE_PRIORITY = { picnic_site: 8, parking: 9 };
+
+export function waypointPriority(poi) {
+	return TYPE_PRIORITY[poi.type] ?? CATEGORY_PRIORITY[poi.category] ?? 7;
+}
+
+export function thinClusters(candidates, taken = [], windowM = 100) {
+	const all = candidates.map((poi) => ({ poi, taken: false }))
+		.concat(taken.map((poi) => ({ poi, taken: true })))
+		.sort((a, b) => a.poi.along - b.poi.along);
+	const keep = [];
+	for (let i = 0; i < all.length;) {
+		let j = i;
+		while (j + 1 < all.length && all[j + 1].poi.along - all[i].poi.along <= windowM) j++;
+		const group = all.slice(i, j + 1);
+		if (!group.some((g) => g.taken)) {
+			keep.push(group.reduce((best, g) => (waypointPriority(g.poi) < waypointPriority(best.poi) ? g : best)).poi);
+		}
+		i = j + 1;
+	}
+	return keep;
 }
 
 export function formatRouteDistance(metres, metric = true) {
@@ -364,7 +468,9 @@ function poiError(code, message) {
 	return error;
 }
 
-// Route paths ([lng, lat] arrays per planner segment) → POIs along the route.
+// Route paths ([lng, lat] arrays per planner segment) → POIs and course
+// features along the route. Map tiles and the elevation profile load in
+// parallel; without elevations the search still succeeds, minus climbs.
 export function findRoutePois(paths, radius, opts, cb) {
 	opts = opts || {};
 	const parts = routeParts(paths);
@@ -380,11 +486,39 @@ export function findRoutePois(paths, radius, opts, cb) {
 			"try a smaller corridor or split the route."));
 		return { cancel() {} };
 	}
-	let cancelled = false, inner = null;
+	const samples = resampleRoute(route);
+	let cancelled = false, inner = null, elevationJob = null, tileResult = null, elevation = null;
+	const stop = () => {
+		cancelled = true;
+		if (inner) inner.cancel();
+		if (elevationJob && elevationJob.cancel) elevationJob.cancel();
+	};
+	const fail = (error) => { if (!cancelled) { stop(); cb(error); } };
+	const finish = () => {
+		if (cancelled || !tileResult || !elevation) return;
+		cancelled = true;
+		const lines = tileResult.tiles.flatMap(tileLines);
+		const features = courseFeatures({ route, samples, elevations: elevation.values, lines, metric: opts.metric !== false });
+		const pois = selectRoutePois(tileResult.tiles, route, radius).concat(features)
+			.sort((a, b) => a.along - b.along || a.offset - b.offset);
+		cb(null, {
+			pois, route, samples, elevations: elevation.values, elevationError: elevation.err || null,
+			tileCount: tiles.length, failedTiles: tileResult.failed,
+		});
+	};
+	const fetchElevations = opts.fetchElevations || ((points, done) => fetchRouteElevations(points, {}, done));
+	try {
+		elevationJob = fetchElevations(samples, (err, values) => {
+			elevation = { err: err || null, values: err ? null : values };
+			finish();
+		});
+	} catch (e) {
+		elevation = { err: e, values: null };
+	}
 	(opts.resolveTemplate || resolveTileTemplate)((err, template) => {
 		if (cancelled) return;
 		if (err || !template) {
-			cb(poiError("tiles", "Couldn't reach the OpenFreeMap map-data index. Try again shortly."));
+			fail(poiError("tiles", "Couldn't reach the OpenFreeMap map-data index. Try again shortly."));
 			return;
 		}
 		inner = loadPoiTiles(tiles, {
@@ -392,16 +526,14 @@ export function findRoutePois(paths, radius, opts, cb) {
 		}, (_err, result) => {
 			if (cancelled) return;
 			if (tiles.length && result.failed === tiles.length) {
-				cb(poiError("tiles", "Couldn't load map data for this route. Try again shortly."));
+				fail(poiError("tiles", "Couldn't load map data for this route. Try again shortly."));
 				return;
 			}
-			cb(null, {
-				pois: selectRoutePois(result.tiles, route, radius),
-				route, tileCount: tiles.length, failedTiles: result.failed,
-			});
+			tileResult = result;
+			finish();
 		});
 	});
-	return { cancel() { cancelled = true; if (inner) inner.cancel(); } };
+	return { cancel: stop };
 }
 
 /* -- Map UI -------------------------------------------------------------- */
@@ -486,7 +618,6 @@ export class RoutePoiController {
 		this._scrollReset = false;
 		this._timing = null;
 		this._timingGen = 0;
-		this._timingJobs = [];
 		this._inputTimer = null;
 		// Undo, deleting a waypoint or reloading the plan swaps planner markers;
 		// re-derive which POIs are waypoints after any marker change.
@@ -524,6 +655,7 @@ export class RoutePoiController {
 		this._pendingSig = null;
 		this._startWatching();
 		this._handle = findRoutePois(paths, this._prefs.radius, {
+			metric: this._metric(),
 			onProgress: (done, total) => {
 				if (gen === this._gen) this._setStatus(`Reading map data… ${done}/${total} tiles`);
 			},
@@ -539,22 +671,24 @@ export class RoutePoiController {
 			this._scrollReset = true;
 			this._setState("active");
 			if (err) this._stopTiming();
-			else this._startTiming();
+			else this._startTiming(result);
 			if (err) {
 				this._summary = { text: err.message, error: true };
 				this._setStatus(err.message, true);
 				return;
 			}
 			const metric = this._metric();
-			const found = this._pois.length
-				? `${this._pois.length} POI${this._pois.length === 1 ? "" : "s"}`
-				: "No POIs";
-			const failed = result.failedTiles
-				? ` · ${result.failedTiles} of ${result.tileCount} map tiles didn't load` : "";
+			const course = this._pois.filter((poi) => COURSE_TYPES.has(poi.type)).length;
+			const nearby = this._pois.length - course;
+			const found = nearby ? `${nearby} POI${nearby === 1 ? "" : "s"}` : "No POIs";
+			const failed = (result.failedTiles
+				? ` · ${result.failedTiles} of ${result.tileCount} map tiles didn't load` : "") +
+				(result.elevationError ? " · no climbs (elevation data didn't load)" : "");
 			this._summary = {
 				text: `${found} within ${formatOffset(this._prefs.radius, metric)} of the ` +
-					`${formatRouteDistance(result.route.total, metric)} route${failed}`,
-				error: !!result.failedTiles,
+					`${formatRouteDistance(result.route.total, metric)} route` +
+					(course ? ` · ${course} course point${course === 1 ? "" : "s"}` : "") + failed,
+				error: !!(result.failedTiles || result.elevationError),
 			};
 			this._setStatus(this._summary.text, this._summary.error);
 		});
@@ -615,27 +749,22 @@ export class RoutePoiController {
 
 	_stopTiming() {
 		this._timingGen++;
-		for (const job of this._timingJobs) { try { job && job.cancel && job.cancel(); } catch (_) {} }
-		this._timingJobs = [];
 		clearTimeout(this._inputTimer);
 		this._timing = null;
 	}
 
-	// New route: sample it, show a flat estimate at once, then refine with
-	// elevation and fetch the forecast for the refined arrival times.
-	_startTiming() {
+	// New search result: time the route with its elevation profile (flat when
+	// that didn't load) and fetch the forecast for the arrival times.
+	_startTiming(result) {
 		this._stopTiming();
 		if (!this._route) return;
-		const gen = this._timingGen;
-		const samples = resampleRoute(this._route);
-		this._timing = { gen, samples, elevations: null, elevationStatus: "loading", weather: { status: "idle" } };
-		this._recomputeTiming(false);
-		this._timingJobs.push(fetchRouteElevations(samples, {}, (err, values) => {
-			if (gen !== this._timingGen || !this._timing) return;
-			this._timing.elevations = err ? null : values;
-			this._timing.elevationStatus = err ? "failed" : "ok";
-			this._recomputeTiming(true);
-		}));
+		const samples = result && result.samples ? result.samples : resampleRoute(this._route);
+		const elevations = result && result.elevations ? result.elevations : null;
+		this._timing = {
+			gen: this._timingGen, samples, elevations,
+			elevationStatus: elevations ? "ok" : "failed", weather: { status: "idle" },
+		};
+		this._recomputeTiming(true);
 	}
 
 	_recomputeTiming(withWeather) {
@@ -651,7 +780,7 @@ export class RoutePoiController {
 
 	_fetchWeather() {
 		const t = this._timing;
-		if (!t || t.elevationStatus === "loading") return;
+		if (!t) return;
 		const gen = this._timingGen;
 		const key = t.weatherSeq = (t.weatherSeq || 0) + 1;
 		t.weather = { status: "loading" };
@@ -710,8 +839,7 @@ export class RoutePoiController {
 		const lines = [];
 		const finish = t.startMs + t.model.total * 1000;
 		let climb = "";
-		if (t.elevationStatus === "loading") climb = " · estimating climbs…";
-		else if (t.elevationStatus === "failed") climb = " · flat estimate (elevation unavailable)";
+		if (t.elevationStatus === "failed") climb = " · flat estimate (elevation unavailable)";
 		else if (t.model.ascent != null) {
 			const f = (m) => metric ? Math.round(m) + "\u00a0m" : Math.round(m * 3.28084) + "\u00a0ft";
 			climb = ` · ↑\u00a0${f(t.model.ascent)} ↓\u00a0${f(t.model.descent)}`;
@@ -931,6 +1059,31 @@ export class RoutePoiController {
 		return esc`<b>${poi.name || label}</b><br>${label} · ${this._passesText(poi)}`;
 	}
 
+	// Extra popup lines for climbs and track sections.
+	_featureHtml(poi) {
+		const metric = this._metric();
+		const c = poi.climb;
+		if (c) {
+			const dist = formatRouteDistance(c.length, metric);
+			const pct = (g) => Math.round(g * 100) + "%";
+			let line = esc`↑ ${formatOffset(c.gain, metric)} over ${dist} · average ${pct(c.grade)} · steepest ${pct(c.steepest)}`;
+			const t = this._timing;
+			if (t && t.model) {
+				const minutes = (timeAt(t.model, c.to) - timeAt(t.model, c.from)) / 60;
+				line += esc` · about ${formatDuration(minutes * 60)} to the top`;
+			}
+			const span = poi.type === "climb_top"
+				? esc`From ${formatRouteDistance(c.from, metric)} (${formatOffset(c.base, metric)})`
+				: esc`Top at ${formatRouteDistance(c.to, metric)} (${formatOffset(c.top, metric)})`;
+			return `<div>${line}</div><div>${span}</div>`;
+		}
+		if (poi.type === "track_section" && poi.until != null) {
+			const kind = TRACK_KINDS[poi.cls] || "";
+			return esc`<div>Until about ${formatRouteDistance(poi.until, metric)}${kind ? " · " + kind : ""}</div>`;
+		}
+		return "";
+	}
+
 	_popupHtml(poi) {
 		const label = poiTypeLabel(poi);
 		const metric = this._metric();
@@ -938,10 +1091,12 @@ export class RoutePoiController {
 		const added = this._added.has(poi.id);
 		const maps = "https://www.google.com/maps/search/?api=1&query=" +
 			poi.lat.toFixed(6) + "," + poi.lng.toFixed(6);
+		const onRoute = COURSE_TYPES.has(poi.type);
 		return `<div class="dw-poi-pop">` +
 			esc`<b>${poi.name || label}</b>` +
 			esc`<div class="dw-poi-pop-sub">${label}${ele}</div>` +
-			esc`<div>At ${this._passesText(poi)} · ${formatOffset(poi.offset, metric)} off route</div>` +
+			this._featureHtml(poi) +
+			esc`<div>At ${this._passesText(poi)}${onRoute ? "" : ` · ${formatOffset(poi.offset, metric)} off route`}</div>` +
 			`<div class="dw-poi-pop-actions">` +
 			esc`<button type="button" class="dw-poi-add-btn" data-poi-id="${poi.id}"` +
 			(added ? " disabled>Waypoint added" : ">Add as waypoint") + `</button>` +
@@ -972,7 +1127,13 @@ export class RoutePoiController {
 
 	_focusPoi(poi) {
 		const marker = this._markers.get(poi.id);
-		this._map.setView([poi.lat, poi.lng], Math.max(this._map.getZoom(), 16));
+		const zoom = Math.max(this._map.getZoom(), 16);
+		// Centre the POI in the map beside the panel. Without animation, so the
+		// popup's auto-pan can't cut the move short and leave it under the panel.
+		const panel = this._panel && !this._panel.classList.contains("dw-poi-panel--collapsed") ? this._panel : null;
+		const shift = panel ? (panel.offsetWidth + 12) / 2 : 0;
+		const centre = this._map.unproject(this._map.project([poi.lat, poi.lng], zoom).subtract([shift, 0]), zoom);
+		this._map.setView(centre, zoom, { animate: false });
 		if (marker) marker.openPopup();
 	}
 
@@ -1049,16 +1210,20 @@ export class RoutePoiController {
 		this._refreshAdded();
 		const pending = this._visiblePois().filter((poi) => !this._added.has(poi.id));
 		if (!pending.length) { this._note("Every POI shown is already a waypoint."); return; }
-		if (pending.length > CONFIRM_ADD_ALL_OVER &&
-			!window.confirm(`Add ${pending.length} waypoints to this route?`)) return;
+		const chosen = thinClusters(pending, this._pois.filter((poi) => this._added.has(poi.id)));
+		const left = pending.length - chosen.length;
+		if (!chosen.length) { this._note("Every stretch shown already has a waypoint."); return; }
+		if (chosen.length > CONFIRM_ADD_ALL_OVER &&
+			!window.confirm(`Add ${chosen.length} waypoints to this route?`)) return;
 		let count = 0;
 		this._status = { text: "", error: false, note: true };
-		for (const poi of pending) {
+		for (const poi of chosen) {
 			if (this._addWaypoint(poi, true)) count++;
 			else if (this._status.error) return;
 		}
+		const skipped = left ? ` (${left} next to a more useful one left out)` : "";
 		this._note(count
-			? `Added ${count} waypoint${count === 1 ? "" : "s"} — save the route to keep them.`
+			? `Added ${count} waypoint${count === 1 ? "" : "s"}${skipped} — save the route to keep them.`
 			: "Those POIs already have waypoints.");
 	}
 

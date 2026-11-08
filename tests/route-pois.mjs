@@ -6,7 +6,7 @@ import {
 	routeSignature, routeTiles, sliceRoute,
 } from "../src/utils/route-geometry.js";
 import {
-	RoutePoiController, SUPPLY_GAPS, classifyPoi, decodePoiTile, findRoutePois, formatRange,
+	RoutePoiController, SUPPLY_GAPS, classifyPoi, decodePoiTile, findRoutePois, formatRange, tileLines,
 	formatRouteDistance, selectRoutePois, supplyGap, waypointName,
 } from "../src/providers/route-pois.js";
 
@@ -67,7 +67,9 @@ test("OpenMapTiles classes map to POI categories", () => {
 	assert.deepEqual(classifyPoi("mountain_peak", { class: "peak", ele: 210 }),
 		{ category: "views", type: "peak" });
 	assert.equal(classifyPoi("mountain_peak", { class: "saddle" }), null);
-	assert.equal(classifyPoi("poi", { class: "parking", subclass: "parking" }), null);
+	assert.deepEqual(classifyPoi("poi", { class: "parking", subclass: "parking" }),
+		{ category: "parking", type: "parking" });
+	assert.equal(classifyPoi("poi", { class: "parking", subclass: "bicycle_parking" }), null);
 	assert.equal(classifyPoi("poi", { class: "fuel", subclass: "charging_station" }), null);
 	assert.equal(classifyPoi("transportation_name", { class: "toilets" }), null);
 });
@@ -80,7 +82,7 @@ const field = (num, wt, payload) => [...varint((num << 3) | wt), ...(wt === 2 ? 
 function encodeLayer(name, features) {
 	const keys = [], values = [], keyIdx = new Map(), valIdx = new Map();
 	const enc = [];
-	for (const { props, x, y } of features) {
+	for (const { props, x, y, line } of features) {
 		const tags = [];
 		for (const [k, v] of Object.entries(props)) {
 			if (!keyIdx.has(k)) { keyIdx.set(k, keys.length); keys.push(k); }
@@ -88,10 +90,15 @@ function encodeLayer(name, features) {
 			if (!valIdx.has(vk)) { valIdx.set(vk, values.length); values.push(v); }
 			tags.push(keyIdx.get(k), valIdx.get(vk));
 		}
+		// Points: MoveTo(1). Lines: MoveTo(1) then LineTo(n) with deltas.
+		const geom = line
+			? [9, zig(line[0][0]), zig(line[0][1]), ((line.length - 1) << 3) | 2,
+				...line.slice(1).flatMap((p, i) => [zig(p[0] - line[i][0]), zig(p[1] - line[i][1])])]
+			: [9, zig(x), zig(y)];
 		enc.push(field(2, 2, [
 			...field(2, 2, tags.flatMap(varint)),
-			...field(3, 0, varint(1)),
-			...field(4, 2, [9, zig(x), zig(y)].flatMap(varint)),
+			...field(3, 0, varint(line ? 2 : 1)),
+			...field(4, 2, geom.flatMap(varint)),
 		]));
 	}
 	return field(3, 2, [
@@ -114,10 +121,24 @@ test("vector tiles decode to located POIs and bus stops", () => {
 		]),
 		...encodeLayer("mountain_peak", [{ props: { class: "peak", name: "Mt Test", ele: 210 }, x: -50, y: 4100 }]),
 		...encodeLayer("water", [{ props: { class: "lake" }, x: 1, y: 1 }]),
+		...encodeLayer("waterway", [
+			{ props: { class: "stream", name: "Test Creek" }, line: [[0, 2048], [4096, 2048]] },
+			{ props: { class: "drain" }, line: [[0, 100], [4096, 100]] },
+		]),
+		...encodeLayer("transportation_name", [
+			{ props: { class: "track", name: "Ridge Track" }, line: [[2048, 0], [2048, 1024], [2100, 4096]] },
+			{ props: { class: "minor" }, line: [[0, 0], [10, 10]] },
+		]),
 	]).buffer;
-	const { pois, busStops } = decodePoiTile(buffer, 14, x, y);
+	const tile = decodePoiTile(buffer, 14, x, y);
+	const { pois, busStops } = tile;
 	assert.equal(busStops.length, 1);
-	assert.equal(pois.length, 2);
+	assert.equal(pois.length, 3);
+	assert.ok(pois.some((p) => p.category === "parking"));
+	const lines = tileLines(tile);
+	assert.deepEqual(lines.map((l) => [l.kind, l.name, l.cls, l.line.length]),
+		[["water", "Test Creek", "stream", 2], ["road", "Ridge Track", "track", 3]], "drains and unnamed roads skipped");
+	assert.ok(Math.abs(lines[0].line[0][0] - (x / 2 ** 14 * 360 - 180)) < 1e-9, "tile pixels → longitude");
 	const water = pois.find((p) => p.type === "drinking_water");
 	assert.equal(water.name, "Bubbler");
 	const n = 2 ** 14;

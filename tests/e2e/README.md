@@ -101,7 +101,9 @@ are listed in route order and pinned on the map, a category chip hides and
 restores its pins, a real click on a pin opens its popup, panel and pin clicks
 never add route points, **Add as waypoint** creates a named planner waypoint
 that the site's Undo removes, and pressing the button again clears everything.
-The timing section must show a finish time with climbing from elevation data,
+Climbs (each with a top), creek crossings and named track sections must be
+found on the route, and a climb's popup must show its gradient and time to the
+top. The timing section must show a finish time with climbing from elevation data,
 daylight and the live forecast; the water line and list rows must show times; a
 faster pace must scale the estimate while the pace field keeps focus, without
 moving the map; and the distance-and-time name mode must produce names such as
