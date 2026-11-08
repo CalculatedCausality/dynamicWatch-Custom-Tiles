@@ -69,3 +69,9 @@ test('clean code, public identifiers, placeholders and unscanned dummy fixtures 
     assert.match(run.stdout, /0 finding\(s\)/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('the repository itself has no findings', async () => {
+  const { files, findings } = await scan();
+  assert.ok(files > 10);
+  assert.deepEqual(findings.map(({ path, line, kind }) => `${path}:${line}: ${kind}`), []);
+});

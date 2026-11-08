@@ -215,6 +215,11 @@ export function _vexcelLogin(cb) {
 		for (const w of waiters) { try { w(tok, reason); } catch (_) {} }
 	};
 	const acceptToken = (tok) => {
+		const current = _getStoredCreds();
+		if (current.user !== creds.user || current.pass !== creds.pass) {
+			done(null, "cancelled");
+			return true;
+		}
 		if (!_vexcelTokenValid(tok)) return false;
 		_storeToken(tok);
 		_loginCooldownUntil = 0;
@@ -298,19 +303,40 @@ function _promptForVexcelAuth(lead, cb) {
 		"(log in at " + CFG.VEXCEL_VIEWER_URL + ").",
 		"",
 	);
-	if (raw == null) { cb(null); return; }
+	if (raw == null) { cb(null, "cancelled"); return; }
 	const s = raw.trim();
 	if (_vexcelIsCredString(s)) {
 		const i = s.indexOf(":");
 		_storeCreds(s.slice(0, i).trim(), s.slice(i + 1).trim());
-		_vexcelLogin((tok) => cb(_vexcelTokenValid(tok) ? tok : null));
+		_vexcelLogin((tok, reason) => {
+			const ok = _vexcelTokenValid(tok);
+			cb(ok ? tok : null, ok ? null : reason || "badcreds");
+		});
 		return;
 	}
 	const tok = _vexcelParseToken(s);
 	if (tok) _storeToken(tok);
-	cb(_vexcelTokenValid(tok) ? tok : null);
+	const ok = _vexcelTokenValid(tok);
+	cb(ok ? tok : null, ok ? null : "unreadable");
 }
 
 export function vexcelHasToken() {
 	return _vexcelTokenValid(_getStoredToken());
+}
+
+// cb(ok, reason): reason is "cancelled", "badcreds", "unreadable", "neterr" or
+// "cooldown" when ok is false.
+export function vexcelChangeLogin(cb) {
+	_promptForVexcelAuth("Change Vexcel login on this device.", (token, reason) => {
+		if (!token) { if (cb) cb(false, reason); return; }
+		_ensureSession(token, () => { if (cb) cb(_getStoredToken() === token); });
+	});
+}
+
+// Accept storage adapters so menu actions can be tested without browser globals.
+export function vexcelSignOut(gm = { GM_setValue }) {
+	for (const key of [CFG.VEXCEL_USER_KEY, CFG.VEXCEL_PASS_KEY,
+		CFG.VEXCEL_TOKEN_KEY, CFG.VEXCEL_SESSION_KEY]) gm.GM_setValue(key, "");
+	gm.GM_setValue(CFG.VEXCEL_REJECTED_KEY, false);
+	_loginCooldownUntil = 0;
 }

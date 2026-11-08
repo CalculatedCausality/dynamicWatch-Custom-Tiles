@@ -921,6 +921,12 @@ export class VexcelLayerProvider extends LayerProvider {
 				_vexCtl._warpLayer.refresh();
 			}
 		};
+		layer._dwRefreshAuth = () => {
+			layer._dwAuthTries = 0;
+			layer._dwAuthGaveUp = false;
+			if (_vexCtl) _vexCtl.atKey = "";
+			if (layer._map) refreshAuthenticatedLayers();
+		};
 		// Date (collection) + band state, driven by the docked control. ""
 		// collection = current-best (newest); a set collection scrubs to that
 		// capture date. Setters redraw only on a real change.

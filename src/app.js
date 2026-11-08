@@ -1,4 +1,5 @@
 import { CustomTilesApp } from './app/custom-tiles-app.js';
+import { captureUserscriptLogs, registerUserscriptMenu } from './ui/userscript-menu.js';
 import { isWazeTokenFrame, startWazeTokenBroker } from './providers/waze-token.js';
 import { CFG, DW_LAYER_GROUPS, DW_OVERLAY_GROUPS } from './config.js';
 import {
@@ -93,6 +94,7 @@ export function bootUserscript() {
 		startWazeTokenBroker();
 		return;
 	}
+	captureUserscriptLogs(console);
 
 	// Visible version banner — answers "did Tampermonkey actually update?"
 	// on every page load without grepping for symptoms.
@@ -138,5 +140,9 @@ export function bootUserscript() {
 		};
 	}
 
-	if (!globalThis.__DW_DISABLE_BOOT__) new CustomTilesApp().boot();
+	if (!globalThis.__DW_DISABLE_BOOT__) {
+		const app = new CustomTilesApp();
+		registerUserscriptMenu({ app });
+		app.boot();
+	}
 }
