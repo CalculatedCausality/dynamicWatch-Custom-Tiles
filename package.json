@@ -8,6 +8,7 @@
     "vexcel:capture": "node scripts/vexcel-capture.mjs",
     "build": "node scripts/build-userscript.mjs",
     "check": "npm run build && node --check dynamicwatch-custom-tiles.user.js",
+    "check:bundle": "node scripts/check-bundle.mjs",
     "test": "npm run build && bash tests/run.sh",
     "test:live": "npm run build && bash tests/run.sh --live",
     "test:all": "npm run build && bash tests/run.sh --all",

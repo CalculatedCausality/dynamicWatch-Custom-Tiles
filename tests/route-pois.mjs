@@ -2,11 +2,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-	createRouteIndex, lngLatToTile, measureRoute, routeParts, routePasses, routeTiles,
+	createRouteIndex, lngLatToTile, longestGap, measureRoute, routeParts, routePasses,
+	routeSignature, routeTiles, sliceRoute,
 } from "../src/utils/route-geometry.js";
 import {
-	RoutePoiController, classifyPoi, decodePoiTile, findRoutePois, formatRouteDistance,
-	selectRoutePois, waypointName,
+	RoutePoiController, SUPPLY_GAPS, classifyPoi, decodePoiTile, findRoutePois, formatRange,
+	formatRouteDistance, selectRoutePois, supplyGap, waypointName,
 } from "../src/providers/route-pois.js";
 
 // ~111 m per 0.001° of latitude; routes run north from the equator so
@@ -246,4 +247,73 @@ test("adding POIs creates named planner waypoints once, without duplicates or ov
 		assert.equal(plan.waypoints.length, 3);
 		assert.match(ctl._status.text, /maximum of 3 waypoints/);
 	} finally { delete globalThis.window; }
+});
+
+test("longest gap is bounded by the route's start and end", () => {
+	assert.deepEqual(longestGap([], 10000), { from: 0, to: 10000, length: 10000 });
+	assert.deepEqual(longestGap([2000, 9000, 3000], 10000), { from: 3000, to: 9000, length: 6000 });
+	assert.deepEqual(longestGap([1000], 10000), { from: 1000, to: 10000, length: 9000 });
+	assert.deepEqual(longestGap([-50, 12000, 9500], 10000), { from: 0, to: 9500, length: 9500 });
+	assert.equal(longestGap([1], 0), null);
+	assert.equal(formatRange(3100, 17300), "3.1–17.3 km");
+	assert.equal(formatRange(1609.344, 3218.688, false), "1.0–2.0 mi");
+});
+
+test("water gaps count every pass and cafés/shops only for resupply", () => {
+	const poi = (category, ...km) => ({ category, passes: km.map((k) => ({ along: k * 1000, offset: 0 })) });
+	// Out-and-back: the tap at 2 km is passed again at 18 km.
+	const pois = [poi("water", 2, 18), poi("food", 10), poi("toilets", 6), poi("shop", 14)];
+	const water = supplyGap(pois, 20000, SUPPLY_GAPS.water);
+	assert.deepEqual(water, { from: 2000, to: 18000, length: 16000, count: 1 });
+	const resupply = supplyGap(pois, 20000, SUPPLY_GAPS.resupply);
+	assert.deepEqual(resupply, { from: 2000, to: 10000, length: 8000, count: 3 });
+	assert.deepEqual(supplyGap([poi("toilets", 5)], 20000, SUPPLY_GAPS.water),
+		{ from: 0, to: 20000, length: 20000, count: 0 });
+});
+
+test("route slices interpolate the stretch, including across separate parts", () => {
+	const route = measureRoute(routeParts([[north(0), north(4)], [[1, 0], [1, north(2)[1]]]]));
+	const one = sliceRoute(route, 1000, 3000);
+	assert.equal(one.length, 1);
+	assert.ok(Math.abs(one[0][0][1] - north(1)[1]) < 1e-7 && Math.abs(one[0].at(-1)[1] - north(3)[1]) < 1e-7);
+	const across = sliceRoute(route, 3000, 5000);
+	assert.equal(across.length, 2, "one polyline per route part");
+	assert.ok(Math.abs(across[1][0][1]) < 1e-9 && Math.abs(across[1].at(-1)[1] - north(1)[1]) < 1e-7);
+	assert.deepEqual(sliceRoute(route, 7000, 9000), []);
+});
+
+test("route signature changes on edits but not when the same route is redrawn", () => {
+	const a = [[north(0), north(1)], [north(1), north(2)]];
+	const redrawn = a.map((path) => path.map((p) => [p[0], p[1]]));
+	assert.equal(routeSignature(a), routeSignature(redrawn));
+	assert.notEqual(routeSignature(a), routeSignature([[north(0), north(1)], [north(1), north(2.01)]]));
+	assert.notEqual(routeSignature(a), routeSignature([a.flat()]), "segmenting is part of the route");
+	assert.notEqual(routeSignature(a), routeSignature([a[1], a[0]]), "segment order matters");
+	assert.equal(routeSignature([[]]), routeSignature([[[NaN, 1]]]), "invalid points are ignored");
+});
+
+test("an edited route re-runs the search once it has settled, not while it is changing", () => {
+	const ctl = new RoutePoiController({});
+	let paths = [[north(0), north(1)]];
+	const searches = [];
+	ctl._currentPaths = () => paths;
+	ctl.search = (auto) => { searches.push(auto); ctl._searchedSig = routeSignature(paths); ctl._pendingSig = null; };
+	ctl._state = "active";
+	ctl._searchedSig = routeSignature(paths);
+	ctl._checkRoute();
+	assert.deepEqual(searches, [], "unchanged route");
+	paths = [[north(0), north(1.5)]];
+	ctl._checkRoute();
+	paths = [[north(0), north(2)]];
+	ctl._checkRoute();
+	assert.deepEqual(searches, [], "still changing");
+	ctl._checkRoute();
+	assert.deepEqual(searches, [true], "settled for two polls");
+	ctl._checkRoute();
+	assert.deepEqual(searches, [true], "no repeat after the update");
+	paths = [[north(0), north(3)]];
+	ctl._state = "idle";
+	ctl._checkRoute();
+	ctl._checkRoute();
+	assert.deepEqual(searches, [true], "cleared POIs stop following the route");
 });

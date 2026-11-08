@@ -6,10 +6,13 @@ import { decodeGeometry, mvtDecode } from "../utils/mvt.js";
 import {
 	createRouteIndex,
 	haversine,
+	longestGap,
 	measureRoute,
 	routeParts,
 	routePasses,
+	routeSignature,
 	routeTiles,
+	sliceRoute,
 } from "../utils/route-geometry.js";
 import { _dwGetRouteModel } from "../utils/route-model.js";
 
@@ -169,6 +172,26 @@ export function waypointName(poi, maxLength = 16) {
 
 export function formatRouteDistance(metres, metric = true) {
 	return metric ? (metres / 1000).toFixed(1) + " km" : (metres / 1609.344).toFixed(1) + " mi";
+}
+
+export function formatRange(from, to, metric = true) {
+	const unit = metric ? 1000 : 1609.344;
+	return (from / unit).toFixed(1) + "–" + (to / unit).toFixed(1) + (metric ? " km" : " mi");
+}
+
+// Water drives the gap warning; cafés and shops can usually refill a bottle.
+export const SUPPLY_GAPS = {
+	water: ["water"],
+	resupply: ["water", "food", "shop"],
+};
+
+// Longest stretch of the route without a POI from `categories`, counting
+// every pass of an out-and-back route. `count` is the number of such POIs.
+export function supplyGap(pois, total, categories) {
+	const wanted = new Set(categories);
+	const sources = (pois || []).filter((poi) => wanted.has(poi.category));
+	const gap = longestGap(sources.flatMap((poi) => poi.passes.map((pass) => pass.along)), total);
+	return gap && { ...gap, count: sources.length };
 }
 
 export function formatOffset(metres, metric = true) {
@@ -333,6 +356,9 @@ function loadPrefs() {
 
 const LIST_LIMIT = 300;
 const CONFIRM_ADD_ALL_OVER = 20;
+// While POIs are shown, poll the route this often; an edit must hold for two
+// polls (router responses included) before the search re-runs.
+const ROUTE_WATCH_MS = 1500;
 
 export class RoutePoiController {
 	constructor(map) {
@@ -347,9 +373,15 @@ export class RoutePoiController {
 		this._group = null;
 		this._panel = null;
 		this._btn = null;
-		this._status = { text: "", error: false };
+		this._status = { text: "", error: false, note: false };
+		this._summary = null;
 		this._prefs = loadPrefs();
 		this._syncTimer = null;
+		this._gapLayer = null;
+		this._watchTimer = null;
+		this._searchedSig = null;
+		this._pendingSig = null;
+		this._scrollReset = false;
 		// Undo, deleting a waypoint or reloading the plan swaps planner markers;
 		// re-derive which POIs are waypoints after any marker change.
 		this._onMapLayers = () => {
@@ -374,13 +406,16 @@ export class RoutePoiController {
 		else this.clear();
 	}
 
-	search() {
+	search(auto = false) {
 		this._cancel();
 		const gen = ++this._gen;
 		this._ensurePanel();
 		this._setState("loading");
-		this._setStatus("Finding POIs along the route…");
-		const paths = _dwGetRouteModel().paths.map((entry) => entry.points);
+		this._setStatus(auto ? "Route changed — updating POIs…" : "Finding POIs along the route…");
+		const paths = this._currentPaths();
+		this._searchedSig = routeSignature(paths);
+		this._pendingSig = null;
+		this._startWatching();
 		this._handle = findRoutePois(paths, this._prefs.radius, {
 			onProgress: (done, total) => {
 				if (gen === this._gen) this._setStatus(`Reading map data… ${done}/${total} tiles`);
@@ -392,9 +427,12 @@ export class RoutePoiController {
 			this._route = err ? null : result.route;
 			this._map.off("layeradd layerremove", this._onMapLayers);
 			if (this._pois.length) this._map.on("layeradd layerremove", this._onMapLayers);
+			this._clearGap();
 			this._renderMarkers();
+			this._scrollReset = true;
 			this._setState("active");
 			if (err) {
+				this._summary = { text: err.message, error: true };
 				this._setStatus(err.message, true);
 				return;
 			}
@@ -404,8 +442,12 @@ export class RoutePoiController {
 				: "No POIs";
 			const failed = result.failedTiles
 				? ` · ${result.failedTiles} of ${result.tileCount} map tiles didn't load` : "";
-			this._setStatus(`${found} within ${formatOffset(this._prefs.radius, metric)} of the ` +
-				`${formatRouteDistance(result.route.total, metric)} route${failed}`, !!result.failedTiles);
+			this._summary = {
+				text: `${found} within ${formatOffset(this._prefs.radius, metric)} of the ` +
+					`${formatRouteDistance(result.route.total, metric)} route${failed}`,
+				error: !!result.failedTiles,
+			};
+			this._setStatus(this._summary.text, this._summary.error);
 		});
 	}
 
@@ -416,6 +458,8 @@ export class RoutePoiController {
 		this._route = null;
 		this._map.off("layeradd layerremove", this._onMapLayers);
 		clearTimeout(this._syncTimer);
+		this._stopWatching();
+		this._clearGap();
 		if (this._group) { this._group.remove(); this._group = null; }
 		this._markers.clear();
 		if (this._panel) { this._panel.remove(); this._panel = null; }
@@ -424,6 +468,82 @@ export class RoutePoiController {
 
 	_cancel() {
 		if (this._handle) { this._handle.cancel(); this._handle = null; }
+	}
+
+	_currentPaths() {
+		return _dwGetRouteModel().paths.map((entry) => entry.points);
+	}
+
+	// -- Following route edits ----------------------------------------------
+
+	_startWatching() {
+		if (this._watchTimer) return;
+		this._watchTimer = setInterval(() => this._checkRoute(), ROUTE_WATCH_MS);
+	}
+
+	_stopWatching() {
+		clearInterval(this._watchTimer);
+		this._watchTimer = null;
+		this._searchedSig = this._pendingSig = null;
+	}
+
+	_checkRoute() {
+		if (this._state === "idle") return;
+		if (typeof document !== "undefined" && document.hidden) return;
+		const sig = routeSignature(this._currentPaths());
+		if (sig === this._searchedSig) { this._pendingSig = null; return; }
+		if (sig !== this._pendingSig) { this._pendingSig = sig; return; }
+		this.search(true);
+	}
+
+	// -- Supply gaps ---------------------------------------------------------
+
+	_gap(kind) {
+		return this._route ? supplyGap(this._pois, this._route.total, SUPPLY_GAPS[kind]) : null;
+	}
+
+	_clearGap() {
+		if (this._gapLayer) { this._gapLayer.remove(); this._gapLayer = null; }
+	}
+
+	// Highlight a gap on the route and fit it beside the panel.
+	_showGap(kind) {
+		const gap = this._gap(kind);
+		if (!gap) return;
+		const lines = sliceRoute(this._route, gap.from, gap.to)
+			.map((line) => line.map((p) => [p[1], p[0]]));
+		if (!lines.length) return;
+		this._clearGap();
+		this._gapLayer = L.layerGroup(lines.map((line) => L.polyline(line, {
+			color: "#e53935", weight: 9, opacity: 0.45, dashArray: "10 8",
+			lineCap: "butt", interactive: false,
+		}))).addTo(this._map);
+		const bounds = L.latLngBounds(lines.flat());
+		const panelWidth = this._panel ? this._panel.offsetWidth + 24 : 40;
+		this._map.fitBounds(bounds, { paddingTopLeft: [panelWidth, 50], paddingBottomRight: [40, 70] });
+	}
+
+	_gapHtml() {
+		if (this._state !== "active" || !this._route) return "";
+		const metric = this._metric();
+		const radius = formatOffset(this._prefs.radius, metric);
+		const water = this._gap("water");
+		const resupply = this._gap("resupply");
+		if (!water) return "";
+		const line = (kind, gap, label) =>
+			esc`<button type="button" class="dw-poi-gap" data-poi-gap="${kind}" title="Show this stretch on the map">` +
+			esc`${label}: <b>${formatRouteDistance(gap.length, metric)}</b> (${formatRange(gap.from, gap.to, metric)})</button>`;
+		const parts = [];
+		if (!water.count) {
+			parts.push(esc`<div class="dw-poi-gap-warn"><i class="fa fa-tint"></i> No drinking water within ${radius} of the route</div>`);
+		} else {
+			parts.push(`<div><i class="fa fa-tint"></i> ` + line("water", water, "Longest stretch without water") + `</div>`);
+		}
+		// Only worth a line when cafés and shops shorten the gap noticeably.
+		if (resupply && resupply.count > water.count && resupply.length < water.length - 250) {
+			parts.push(`<div class="dw-poi-gap-sub">` + line("resupply", resupply, "Counting cafés & shops") + `</div>`);
+		}
+		return `<div class="dw-poi-gaps">${parts.join("")}</div>`;
 	}
 
 	_plan() {
@@ -455,7 +575,13 @@ export class RoutePoiController {
 	}
 
 	_setStatus(text, error = false) {
-		this._status = { text, error };
+		this._status = { text, error, note: false };
+		this._renderPanel();
+	}
+
+	// Waypoint messages replace the search summary until the waypoints change.
+	_note(text, error = false) {
+		this._status = { text, error, note: true };
 		this._renderPanel();
 	}
 
@@ -561,17 +687,17 @@ export class RoutePoiController {
 	_addWaypoint(poi, quiet = false) {
 		const plan = this._plan();
 		if (!plan || typeof plan.addWaypoint !== "function") {
-			this._setStatus("This dynamic.watch page doesn't support adding waypoints.", true);
+			this._note("This dynamic.watch page doesn't support adding waypoints.", true);
 			return false;
 		}
 		if (this._waypointNear(poi)) {
 			this._markAdded(poi);
-			if (!quiet) this._setStatus("A waypoint is already there.");
+			if (!quiet) this._note("A waypoint is already there.");
 			return false;
 		}
 		const max = Number(plan.waypointCountMax);
 		if (Number.isFinite(max) && Array.isArray(plan.waypoints) && plan.waypoints.length >= max) {
-			this._setStatus(`This route already has the maximum of ${max} waypoints.`, true);
+			this._note(`This route already has the maximum of ${max} waypoints.`, true);
 			return false;
 		}
 		const name = waypointName(poi, Number(plan.waypointNameLength) || 16);
@@ -580,11 +706,11 @@ export class RoutePoiController {
 			console.warn("[CustomTiles] Route POIs: addWaypoint failed", e);
 		}
 		if (!added) {
-			this._setStatus("dynamic.watch didn't accept the waypoint.", true);
+			this._note("dynamic.watch didn't accept the waypoint.", true);
 			return false;
 		}
 		this._markAdded(poi);
-		if (!quiet) this._setStatus(`Added “${name}” as a waypoint — save the route to keep it.`);
+		if (!quiet) this._note(`Added “${name}” as a waypoint — save the route to keep it.`);
 		return true;
 	}
 
@@ -610,6 +736,8 @@ export class RoutePoiController {
 			const marker = this._markers.get(poi.id);
 			if (marker) marker.setIcon(this._icon(poi));
 		}
+		// e.g. Undo removed the waypoint a note said was added.
+		if (this._status.note && this._summary) this._status = { ...this._summary, note: false };
 		this._renderPanel();
 	}
 
@@ -623,16 +751,16 @@ export class RoutePoiController {
 	_addAll() {
 		this._refreshAdded();
 		const pending = this._visiblePois().filter((poi) => !this._added.has(poi.id));
-		if (!pending.length) { this._setStatus("Every POI shown is already a waypoint."); return; }
+		if (!pending.length) { this._note("Every POI shown is already a waypoint."); return; }
 		if (pending.length > CONFIRM_ADD_ALL_OVER &&
 			!window.confirm(`Add ${pending.length} waypoints to this route?`)) return;
 		let count = 0;
-		this._status = { text: "", error: false };
+		this._status = { text: "", error: false, note: true };
 		for (const poi of pending) {
 			if (this._addWaypoint(poi, true)) count++;
 			else if (this._status.error) return;
 		}
-		this._setStatus(count
+		this._note(count
 			? `Added ${count} waypoint${count === 1 ? "" : "s"} — save the route to keep them.`
 			: "Those POIs already have waypoints.");
 	}
@@ -682,12 +810,16 @@ export class RoutePoiController {
 		const radiusOptions = POI_RADIUS_OPTIONS.map((r) =>
 			`<option value="${r}"${r === this._prefs.radius ? " selected" : ""}>${_escHtml(formatOffset(r, metric))}</option>`).join("");
 		const collapsed = el.classList.contains("dw-poi-panel--collapsed");
+		const oldList = el.querySelector(".dw-poi-list");
+		const scrollTop = oldList && !this._scrollReset ? oldList.scrollTop : 0;
+		this._scrollReset = false;
 		el.innerHTML =
 			`<div class="dw-poi-hd"><b>POIs along route</b><span class="dw-poi-hd-btns">` +
 			`<button type="button" data-poi-act="collapse" title="${collapsed ? "Expand" : "Collapse"}">${collapsed ? "+" : "–"}</button>` +
 			`<button type="button" data-poi-act="close" title="Close and clear POIs">×</button></span></div>` +
 			`<div class="dw-poi-body">` +
 			esc`<div class="dw-poi-status${this._status.error ? " dw-poi-status--error" : ""}">${this._status.text}</div>` +
+			this._gapHtml() +
 			`<div class="dw-poi-opts"><label>Within <select data-poi-radius>${radiusOptions}</select></label>` +
 			`<button type="button" data-poi-act="refresh"${this._state === "loading" ? " disabled" : ""}>Search again</button></div>` +
 			(chips ? `<div class="dw-poi-chips">${chips}</div>` : "") +
@@ -697,6 +829,9 @@ export class RoutePoiController {
 			`© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors, via ` +
 			`<a href="https://openfreemap.org/" target="_blank" rel="noreferrer">OpenFreeMap</a></div>` +
 			`</div>`;
+		// Keep the list where the user left it when adding waypoints or filtering.
+		const list = el.querySelector(".dw-poi-list");
+		if (list && scrollTop) list.scrollTop = scrollTop;
 	}
 
 	_poiById(id) {
@@ -716,6 +851,11 @@ export class RoutePoiController {
 				this._panel.classList.toggle("dw-poi-panel--collapsed");
 				this._renderPanel();
 			}
+			return;
+		}
+		const gap = target.closest("[data-poi-gap]");
+		if (gap) {
+			this._showGap(gap.dataset.poiGap);
 			return;
 		}
 		const chip = target.closest("[data-poi-cat]");

@@ -1,0 +1,60 @@
+// ==UserScript==
+// @name         dynamicWatch – Map Layers & Overlays
+// @namespace    https://dynamic.watch
+// @version      7.14.0
+// @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
+// @author       Matthew Aucott
+// @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
+// @supportURL   https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles/issues
+// @updateURL    https://raw.githubusercontent.com/CalculatedCausality/dynamicWatch-Custom-Tiles/main/dynamicwatch-custom-tiles.meta.js
+// @downloadURL  https://raw.githubusercontent.com/CalculatedCausality/dynamicWatch-Custom-Tiles/main/dynamicwatch-custom-tiles.user.js
+// @match        https://dynamic.watch/plan*
+// @match        https://embed.waze.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
+// @connect      qldglobe.information.qld.gov.au
+// @connect      spatial-img.information.qld.gov.au
+// @connect      spatial-gis.information.qld.gov.au
+// @connect      maps.six.nsw.gov.au
+// @connect      portal.spatial.nsw.gov.au
+// @connect      plan-gis.mapshare.vic.gov.au
+// @connect      services.thelist.tas.gov.au
+// @connect      lsa4.geohub.sa.gov.au
+// @connect      services1.arcgis.com
+// @connect      gis.environment.gov.au
+// @connect      geopublic.scc.qld.gov.au
+// @connect      developmenti.sunshinecoast.qld.gov.au
+// @connect      publicdocs.scc.qld.gov.au
+// @connect      api.vexcelgroup.com
+// @connect      admin.vexcelgroup.com
+// @connect      connecttile.garmin.com
+// @connect      strava.com
+// @connect      heatmap-external-a.strava.com
+// @connect      cdn.apple-mapkit.com
+// @connect      duckduckgo.com
+// @connect      tiles.stadiamaps.com
+// @connect      s3-us-west-2.amazonaws.com
+// @connect      wayback.maptiles.arcgis.com
+// @connect      opensky-network.org
+// @connect      www.marinetraffic.com
+// @connect      www.waze.com
+// @connect      openinframap.org
+// @connect      spatial.infrastructure.gov.au
+// @connect      tiles.openseamap.org
+// @connect      www.lightpollutionmap.info
+// @connect      tiles.openfreemap.org
+// @connect      www.onthehouse.com.au
+// @connect      d1yalngj9nsyl4.cloudfront.net
+// @connect      www.geocaching.com
+// @connect      tiles01.geocaching.com
+// @connect      tiles02.geocaching.com
+// @connect      tiles03.geocaching.com
+// @connect      tiles04.geocaching.com
+// @connect      api.mapbox.com
+// @connect      s3.amazonaws.com
+// @connect      elevation-tiles-prod.s3.amazonaws.com
+// @run-at       document-start
+// ==/UserScript==

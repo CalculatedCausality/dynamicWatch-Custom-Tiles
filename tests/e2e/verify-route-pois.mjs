@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Verify "POIs along route" on a saved plan: the planner-toolbar button finds
 // POIs from OpenFreeMap vector tiles, pins them in route order, filters by
-// category, adds a POI as a planner waypoint, and never leaks clicks to the
-// planner (which would add route points). Nothing is saved.
+// category, reports and highlights the longest stretch without water, adds a
+// POI as a planner waypoint, follows route edits, and never leaks clicks to
+// the planner (which would add route points). Nothing is saved.
 //
 //   npm run e2e:route-pois            PLAN=/plan/<id> to use another route
 import { chromium } from "playwright";
@@ -68,6 +69,7 @@ try {
 			chips: [...document.querySelectorAll(".dw-poi-chip")].map((c) => ({
 				id: c.dataset.poiCat, count: Number(c.querySelector(".dw-poi-count").textContent) })),
 			active: document.getElementById("dw-poi-btn").classList.contains("active"),
+			gaps: document.querySelector(".dw-poi-gaps")?.textContent.trim() || "",
 		};
 	});
 	console.log(`  ${found.status} (${((Date.now() - started) / 1000).toFixed(1)} s)`);
@@ -75,6 +77,9 @@ try {
 	check(found.markers === found.rows, "every listed POI is pinned on the map", `${found.markers} markers`);
 	check(found.km.every((km, i) => i === 0 || km >= found.km[i - 1]), "list is ordered by distance along the route");
 	check(found.active, "toolbar button shows the active state");
+	const waterChip = found.chips.find((c) => c.id === "water");
+	check(waterChip ? /Longest stretch without water: [\d.]+ (km|mi)/.test(found.gaps)
+		: /No drinking water within/.test(found.gaps), "panel reports the water situation", found.gaps);
 	mkdirSync(reportDir, { recursive: true });
 	const shot = resolve(reportDir, `route-pois-${new Date().toISOString().replace(/[:.]/g, "-")}.png`);
 	await page.screenshot({ path: shot });
@@ -125,7 +130,68 @@ try {
 		document.querySelector(".dw-poi-row .dw-poi-row-add")?.disabled === false, before, { timeout: 10_000 })
 		.then(() => true).catch(() => false);
 	check(undone, "planner Undo removes the waypoint and re-enables the POI");
+	check(await page.waitForFunction((summary) => document.querySelector(".dw-poi-status")?.textContent === summary,
+		found.status, { timeout: 5_000 }).then(() => true).catch(() => false),
+	"after Undo the panel shows the search summary again, not the stale \"Added\" note");
 	check(await routeMarkers() === startMarkers, "Undo restores the original route");
+
+	// Editing the route re-runs the search by itself. Append a temporary
+	// stretch along the Mooloolaba esplanade (taps, cafés, toilets), then
+	// take it away again. The plan is never saved.
+	const status = () => page.evaluate(() => document.querySelector(".dw-poi-status")?.textContent || "");
+	const settled = (prev) => page.waitForFunction((p) => {
+		const t = document.querySelector(".dw-poi-status")?.textContent || "";
+		return /within .* route/.test(t) && t !== p;
+	}, prev, { timeout: 30_000 }).then(() => true).catch(() => false);
+	// Undo can re-run the search (the planner rounds restored points); let that
+	// settle so the baseline is a search result, not a waypoint message.
+	const isResult = () => page.waitForFunction(() =>
+		/within .* route/.test(document.querySelector(".dw-poi-status")?.textContent || ""), undefined, { timeout: 30_000 });
+	await isResult();
+	await page.waitForTimeout(3500);
+	await isResult();
+	const original = await status();
+	await page.evaluate(() => {
+		const pts = [[-26.6826, 153.1196], [-26.6790, 153.1205], [-26.6745, 153.1180], [-26.6700, 153.1150],
+			[-26.6655, 153.1110], [-26.6600, 153.1050], [-26.6540, 153.0990], [-26.6480, 153.0960]];
+		const polyline = L.polyline(pts, { color: "#c0f" }).addTo(window.leafletPlan.map);
+		window._dwTestSeg = { polyline, marker_end: null };
+		window.leafletPlan.lines[0].push(window._dwTestSeg);
+	});
+	const editStarted = Date.now();
+	const followed = await settled(original);
+	const extended = await page.evaluate(() => ({
+		status: document.querySelector(".dw-poi-status").textContent,
+		gaps: document.querySelector(".dw-poi-gaps")?.textContent.trim() || "",
+		water: Number(document.querySelector('.dw-poi-chip[data-poi-cat="water"] .dw-poi-count')?.textContent || 0),
+	}));
+	console.log(`  after edit: ${extended.status} (${((Date.now() - editStarted) / 1000).toFixed(1)} s)`);
+	check(followed && extended.status !== original, "POIs update by themselves when the route changes");
+	check(extended.water > 0 && /Longest stretch without water: [\d.]+ km \([\d.]+–[\d.]+ km\)/.test(extended.gaps),
+		"water gap is measured once the route passes water", extended.gaps);
+	await page.click('.dw-poi-gap[data-poi-gap="water"]');
+	await page.waitForTimeout(800);
+	const highlight = await page.evaluate(() => {
+		const map = window.leafletPlan.map;
+		const lines = Object.values(map._layers).filter((l) => l.options && l.options.dashArray === "10 8" && l.getBounds);
+		return { count: lines.length, inView: lines.length > 0 && lines.every((l) => map.getBounds().pad(0.05).contains(l.getBounds())) };
+	});
+	check(highlight.count > 0 && highlight.inView, "clicking the gap highlights that stretch and fits it in view",
+		JSON.stringify(highlight));
+	const gapShot = resolve(reportDir, `route-pois-gap-${new Date().toISOString().replace(/[:.]/g, "-")}.png`);
+	await page.screenshot({ path: gapShot });
+	const beforeRemoval = await status();
+	await page.evaluate(() => {
+		const line = window.leafletPlan.lines[0];
+		line.splice(line.indexOf(window._dwTestSeg), 1);
+		window.leafletPlan.map.removeLayer(window._dwTestSeg.polyline);
+	});
+	const restored = await settled(beforeRemoval);
+	const finalStatus = await status();
+	check(restored && finalStatus === original && finalStatus === found.status,
+		"removing the stretch restores the original results", finalStatus);
+	check(await page.evaluate(() => !Object.values(window.leafletPlan.map._layers)
+		.some((l) => l.options && l.options.dashArray === "10 8")), "a new search clears the old gap highlight");
 
 	await page.click("#dw-poi-btn");
 	const cleared = await page.evaluate(() => ({
@@ -135,7 +201,7 @@ try {
 	}));
 	check(!cleared.panel && !cleared.markers && !cleared.active, "pressing the button again clears POIs");
 	check(pageErrors.length === 0, "no page errors", pageErrors.slice(0, 2).join(" | "));
-	console.log(`  screenshot: ${shot}`);
+	console.log(`  screenshots: ${shot}\n               ${gapShot}`);
 } catch (error) {
 	console.error(`✗ Route POIs: ${error.message}`);
 	results.push(false);

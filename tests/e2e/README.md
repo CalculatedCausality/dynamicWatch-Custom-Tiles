@@ -98,8 +98,12 @@ Requires `.auth/storage.json` and network access to `tiles.openfreemap.org`.
 Presses the planner-toolbar POI button on a saved route and checks that POIs
 are listed in route order and pinned on the map, a category chip hides and
 restores its pins, a real click on a pin opens its popup, panel and pin clicks
-never add route points, **Add as waypoint** creates a named planner waypoint,
-and pressing the button again clears everything. The plan is never saved.
+never add route points, **Add as waypoint** creates a named planner waypoint
+that the site's Undo removes, and pressing the button again clears everything.
+It then appends a temporary stretch along the Mooloolaba esplanade and checks
+the POIs update by themselves, the longest stretch without water is reported
+and highlighted, and removing the stretch restores the original results. The
+plan is never saved.
 Part of `npm run test:live`.
 
 ### `verify-geocaches.mjs` — Geocaches layer end-to-end

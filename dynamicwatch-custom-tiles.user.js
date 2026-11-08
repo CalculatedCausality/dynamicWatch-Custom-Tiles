@@ -1,9 +1,13 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.13.0
+// @version      7.14.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
+// @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
+// @supportURL   https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles/issues
+// @updateURL    https://raw.githubusercontent.com/CalculatedCausality/dynamicWatch-Custom-Tiles/main/dynamicwatch-custom-tiles.meta.js
+// @downloadURL  https://raw.githubusercontent.com/CalculatedCausality/dynamicWatch-Custom-Tiles/main/dynamicwatch-custom-tiles.user.js
 // @match        https://dynamic.watch/plan*
 // @match        https://embed.waze.com/*
 // @grant        GM_xmlhttpRequest
@@ -10876,6 +10880,47 @@
     }
     return passes.map((g) => g.best);
   }
+  function routeSignature(paths) {
+    let h = 2166136261, n = 0;
+    const mix = (v) => {
+      h = Math.imul(h ^ (v | 0), 16777619) >>> 0;
+    };
+    for (const path of paths || []) {
+      mix(2147483647);
+      for (const p of path || []) {
+        if (!validPoint(p)) continue;
+        mix(Math.round(p[0] * 1e6));
+        mix(Math.round(p[1] * 1e6));
+        n++;
+      }
+    }
+    return n + ":" + h.toString(16);
+  }
+  function longestGap(alongs, total) {
+    if (!(total > 0)) return null;
+    const stops = (alongs || []).filter(Number.isFinite).map((a) => Math.max(0, Math.min(total, a))).sort((a, b) => a - b);
+    let prev = 0, best = null;
+    for (const at of [...stops, total]) {
+      if (!best || at - prev > best.length) best = { from: prev, to: at, length: at - prev };
+      prev = at;
+    }
+    return best;
+  }
+  function sliceRoute(route, from, to) {
+    const out = [];
+    const lerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    for (const { points, cum } of route.parts) {
+      const piece = [];
+      for (let i = 1; i < points.length; i++) {
+        const a = cum[i - 1], b = cum[i];
+        if (b < from || a > to || b === a) continue;
+        if (!piece.length) piece.push(a >= from ? points[i - 1] : lerp(points[i - 1], points[i], (from - a) / (b - a)));
+        piece.push(b <= to ? points[i] : lerp(points[i - 1], points[i], (to - a) / (b - a)));
+      }
+      if (piece.length > 1) out.push(piece);
+    }
+    return out;
+  }
   function lngLatToTile(lng, lat, z) {
     const n = 2 ** z;
     const clampedLat = Math.max(-85.0511, Math.min(85.0511, lat)) * RAD;
@@ -11111,6 +11156,20 @@
   function formatRouteDistance(metres, metric = true) {
     return metric ? (metres / 1e3).toFixed(1) + " km" : (metres / 1609.344).toFixed(1) + " mi";
   }
+  function formatRange(from, to, metric = true) {
+    const unit = metric ? 1e3 : 1609.344;
+    return (from / unit).toFixed(1) + "–" + (to / unit).toFixed(1) + (metric ? " km" : " mi");
+  }
+  var SUPPLY_GAPS = {
+    water: ["water"],
+    resupply: ["water", "food", "shop"]
+  };
+  function supplyGap(pois, total, categories) {
+    const wanted = new Set(categories);
+    const sources = (pois || []).filter((poi) => wanted.has(poi.category));
+    const gap = longestGap(sources.flatMap((poi) => poi.passes.map((pass) => pass.along)), total);
+    return gap && { ...gap, count: sources.length };
+  }
   function formatOffset(metres, metric = true) {
     return metric ? Math.round(metres) + " m" : Math.round(metres * 3.28084) + " ft";
   }
@@ -11282,6 +11341,7 @@
   }
   var LIST_LIMIT = 300;
   var CONFIRM_ADD_ALL_OVER = 20;
+  var ROUTE_WATCH_MS = 1500;
   var RoutePoiController = class {
     constructor(map) {
       this._map = map;
@@ -11295,9 +11355,15 @@
       this._group = null;
       this._panel = null;
       this._btn = null;
-      this._status = { text: "", error: false };
+      this._status = { text: "", error: false, note: false };
+      this._summary = null;
       this._prefs = loadPrefs();
       this._syncTimer = null;
+      this._gapLayer = null;
+      this._watchTimer = null;
+      this._searchedSig = null;
+      this._pendingSig = null;
+      this._scrollReset = false;
       this._onMapLayers = () => {
         clearTimeout(this._syncTimer);
         this._syncTimer = setTimeout(() => this._syncAdded(), 200);
@@ -11320,13 +11386,16 @@
       if (this._state === "idle") this.search();
       else this.clear();
     }
-    search() {
+    search(auto = false) {
       this._cancel();
       const gen = ++this._gen;
       this._ensurePanel();
       this._setState("loading");
-      this._setStatus("Finding POIs along the route…");
-      const paths = _dwGetRouteModel().paths.map((entry) => entry.points);
+      this._setStatus(auto ? "Route changed — updating POIs…" : "Finding POIs along the route…");
+      const paths = this._currentPaths();
+      this._searchedSig = routeSignature(paths);
+      this._pendingSig = null;
+      this._startWatching();
       this._handle = findRoutePois(paths, this._prefs.radius, {
         onProgress: (done, total) => {
           if (gen === this._gen) this._setStatus(`Reading map data… ${done}/${total} tiles`);
@@ -11338,16 +11407,23 @@
         this._route = err ? null : result.route;
         this._map.off("layeradd layerremove", this._onMapLayers);
         if (this._pois.length) this._map.on("layeradd layerremove", this._onMapLayers);
+        this._clearGap();
         this._renderMarkers();
+        this._scrollReset = true;
         this._setState("active");
         if (err) {
+          this._summary = { text: err.message, error: true };
           this._setStatus(err.message, true);
           return;
         }
         const metric = this._metric();
         const found = this._pois.length ? `${this._pois.length} POI${this._pois.length === 1 ? "" : "s"}` : "No POIs";
         const failed = result.failedTiles ? ` · ${result.failedTiles} of ${result.tileCount} map tiles didn't load` : "";
-        this._setStatus(`${found} within ${formatOffset(this._prefs.radius, metric)} of the ${formatRouteDistance(result.route.total, metric)} route${failed}`, !!result.failedTiles);
+        this._summary = {
+          text: `${found} within ${formatOffset(this._prefs.radius, metric)} of the ${formatRouteDistance(result.route.total, metric)} route${failed}`,
+          error: !!result.failedTiles
+        };
+        this._setStatus(this._summary.text, this._summary.error);
       });
     }
     clear() {
@@ -11357,6 +11433,8 @@
       this._route = null;
       this._map.off("layeradd layerremove", this._onMapLayers);
       clearTimeout(this._syncTimer);
+      this._stopWatching();
+      this._clearGap();
       if (this._group) {
         this._group.remove();
         this._group = null;
@@ -11373,6 +11451,81 @@
         this._handle.cancel();
         this._handle = null;
       }
+    }
+    _currentPaths() {
+      return _dwGetRouteModel().paths.map((entry) => entry.points);
+    }
+    // -- Following route edits ----------------------------------------------
+    _startWatching() {
+      if (this._watchTimer) return;
+      this._watchTimer = setInterval(() => this._checkRoute(), ROUTE_WATCH_MS);
+    }
+    _stopWatching() {
+      clearInterval(this._watchTimer);
+      this._watchTimer = null;
+      this._searchedSig = this._pendingSig = null;
+    }
+    _checkRoute() {
+      if (this._state === "idle") return;
+      if (typeof document !== "undefined" && document.hidden) return;
+      const sig = routeSignature(this._currentPaths());
+      if (sig === this._searchedSig) {
+        this._pendingSig = null;
+        return;
+      }
+      if (sig !== this._pendingSig) {
+        this._pendingSig = sig;
+        return;
+      }
+      this.search(true);
+    }
+    // -- Supply gaps ---------------------------------------------------------
+    _gap(kind) {
+      return this._route ? supplyGap(this._pois, this._route.total, SUPPLY_GAPS[kind]) : null;
+    }
+    _clearGap() {
+      if (this._gapLayer) {
+        this._gapLayer.remove();
+        this._gapLayer = null;
+      }
+    }
+    // Highlight a gap on the route and fit it beside the panel.
+    _showGap(kind) {
+      const gap = this._gap(kind);
+      if (!gap) return;
+      const lines = sliceRoute(this._route, gap.from, gap.to).map((line) => line.map((p) => [p[1], p[0]]));
+      if (!lines.length) return;
+      this._clearGap();
+      this._gapLayer = L.layerGroup(lines.map((line) => L.polyline(line, {
+        color: "#e53935",
+        weight: 9,
+        opacity: 0.45,
+        dashArray: "10 8",
+        lineCap: "butt",
+        interactive: false
+      }))).addTo(this._map);
+      const bounds = L.latLngBounds(lines.flat());
+      const panelWidth = this._panel ? this._panel.offsetWidth + 24 : 40;
+      this._map.fitBounds(bounds, { paddingTopLeft: [panelWidth, 50], paddingBottomRight: [40, 70] });
+    }
+    _gapHtml() {
+      if (this._state !== "active" || !this._route) return "";
+      const metric = this._metric();
+      const radius = formatOffset(this._prefs.radius, metric);
+      const water = this._gap("water");
+      const resupply = this._gap("resupply");
+      if (!water) return "";
+      const line = (kind, gap, label) => esc`<button type="button" class="dw-poi-gap" data-poi-gap="${kind}" title="Show this stretch on the map">` + esc`${label}: <b>${formatRouteDistance(gap.length, metric)}</b> (${formatRange(gap.from, gap.to, metric)})</button>`;
+      const parts = [];
+      if (!water.count) {
+        parts.push(esc`<div class="dw-poi-gap-warn"><i class="fa fa-tint"></i> No drinking water within ${radius} of the route</div>`);
+      } else {
+        parts.push(`<div><i class="fa fa-tint"></i> ` + line("water", water, "Longest stretch without water") + `</div>`);
+      }
+      if (resupply && resupply.count > water.count && resupply.length < water.length - 250) {
+        parts.push(`<div class="dw-poi-gap-sub">` + line("resupply", resupply, "Counting cafés & shops") + `</div>`);
+      }
+      return `<div class="dw-poi-gaps">${parts.join("")}</div>`;
     }
     _plan() {
       try {
@@ -11405,7 +11558,12 @@
       btn.title = this._state === "idle" ? "Find POIs along the route" : "Clear route POIs";
     }
     _setStatus(text, error = false) {
-      this._status = { text, error };
+      this._status = { text, error, note: false };
+      this._renderPanel();
+    }
+    // Waypoint messages replace the search summary until the waypoints change.
+    _note(text, error = false) {
+      this._status = { text, error, note: true };
       this._renderPanel();
     }
     _visiblePois() {
@@ -11493,17 +11651,17 @@
     _addWaypoint(poi, quiet = false) {
       const plan = this._plan();
       if (!plan || typeof plan.addWaypoint !== "function") {
-        this._setStatus("This dynamic.watch page doesn't support adding waypoints.", true);
+        this._note("This dynamic.watch page doesn't support adding waypoints.", true);
         return false;
       }
       if (this._waypointNear(poi)) {
         this._markAdded(poi);
-        if (!quiet) this._setStatus("A waypoint is already there.");
+        if (!quiet) this._note("A waypoint is already there.");
         return false;
       }
       const max = Number(plan.waypointCountMax);
       if (Number.isFinite(max) && Array.isArray(plan.waypoints) && plan.waypoints.length >= max) {
-        this._setStatus(`This route already has the maximum of ${max} waypoints.`, true);
+        this._note(`This route already has the maximum of ${max} waypoints.`, true);
         return false;
       }
       const name = waypointName(poi, Number(plan.waypointNameLength) || 16);
@@ -11514,11 +11672,11 @@
         console.warn("[CustomTiles] Route POIs: addWaypoint failed", e);
       }
       if (!added) {
-        this._setStatus("dynamic.watch didn't accept the waypoint.", true);
+        this._note("dynamic.watch didn't accept the waypoint.", true);
         return false;
       }
       this._markAdded(poi);
-      if (!quiet) this._setStatus(`Added “${name}” as a waypoint — save the route to keep it.`);
+      if (!quiet) this._note(`Added “${name}” as a waypoint — save the route to keep it.`);
       return true;
     }
     _waypointNear(poi) {
@@ -11541,6 +11699,7 @@
         const marker = this._markers.get(poi.id);
         if (marker) marker.setIcon(this._icon(poi));
       }
+      if (this._status.note && this._summary) this._status = { ...this._summary, note: false };
       this._renderPanel();
     }
     _markAdded(poi) {
@@ -11553,17 +11712,17 @@
       this._refreshAdded();
       const pending = this._visiblePois().filter((poi) => !this._added.has(poi.id));
       if (!pending.length) {
-        this._setStatus("Every POI shown is already a waypoint.");
+        this._note("Every POI shown is already a waypoint.");
         return;
       }
       if (pending.length > CONFIRM_ADD_ALL_OVER && !window.confirm(`Add ${pending.length} waypoints to this route?`)) return;
       let count = 0;
-      this._status = { text: "", error: false };
+      this._status = { text: "", error: false, note: true };
       for (const poi of pending) {
         if (this._addWaypoint(poi, true)) count++;
         else if (this._status.error) return;
       }
-      this._setStatus(count ? `Added ${count} waypoint${count === 1 ? "" : "s"} — save the route to keep them.` : "Those POIs already have waypoints.");
+      this._note(count ? `Added ${count} waypoint${count === 1 ? "" : "s"} — save the route to keep them.` : "Those POIs already have waypoints.");
     }
     // -- Panel --------------------------------------------------------------
     _ensurePanel() {
@@ -11595,7 +11754,12 @@
       const more = visible.length > LIST_LIMIT ? `<li class="dw-poi-more">+${visible.length - LIST_LIMIT} more on the map</li>` : "";
       const radiusOptions = POI_RADIUS_OPTIONS.map((r) => `<option value="${r}"${r === this._prefs.radius ? " selected" : ""}>${_escHtml(formatOffset(r, metric))}</option>`).join("");
       const collapsed = el.classList.contains("dw-poi-panel--collapsed");
-      el.innerHTML = `<div class="dw-poi-hd"><b>POIs along route</b><span class="dw-poi-hd-btns"><button type="button" data-poi-act="collapse" title="${collapsed ? "Expand" : "Collapse"}">${collapsed ? "+" : "–"}</button><button type="button" data-poi-act="close" title="Close and clear POIs">×</button></span></div><div class="dw-poi-body">` + esc`<div class="dw-poi-status${this._status.error ? " dw-poi-status--error" : ""}">${this._status.text}</div>` + `<div class="dw-poi-opts"><label>Within <select data-poi-radius>${radiusOptions}</select></label><button type="button" data-poi-act="refresh"${this._state === "loading" ? " disabled" : ""}>Search again</button></div>` + (chips ? `<div class="dw-poi-chips">${chips}</div>` : "") + (rows ? `<ol class="dw-poi-list">${rows}${more}</ol>` : "") + (visible.length ? `<div class="dw-poi-ft"><button type="button" data-poi-act="add-all">Add shown as waypoints</button></div>` : "") + `<div class="dw-poi-attr">POI data © <a href="https://openmaptiles.org/" target="_blank" rel="noreferrer">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors, via <a href="https://openfreemap.org/" target="_blank" rel="noreferrer">OpenFreeMap</a></div></div>`;
+      const oldList = el.querySelector(".dw-poi-list");
+      const scrollTop = oldList && !this._scrollReset ? oldList.scrollTop : 0;
+      this._scrollReset = false;
+      el.innerHTML = `<div class="dw-poi-hd"><b>POIs along route</b><span class="dw-poi-hd-btns"><button type="button" data-poi-act="collapse" title="${collapsed ? "Expand" : "Collapse"}">${collapsed ? "+" : "–"}</button><button type="button" data-poi-act="close" title="Close and clear POIs">×</button></span></div><div class="dw-poi-body">` + esc`<div class="dw-poi-status${this._status.error ? " dw-poi-status--error" : ""}">${this._status.text}</div>` + this._gapHtml() + `<div class="dw-poi-opts"><label>Within <select data-poi-radius>${radiusOptions}</select></label><button type="button" data-poi-act="refresh"${this._state === "loading" ? " disabled" : ""}>Search again</button></div>` + (chips ? `<div class="dw-poi-chips">${chips}</div>` : "") + (rows ? `<ol class="dw-poi-list">${rows}${more}</ol>` : "") + (visible.length ? `<div class="dw-poi-ft"><button type="button" data-poi-act="add-all">Add shown as waypoints</button></div>` : "") + `<div class="dw-poi-attr">POI data © <a href="https://openmaptiles.org/" target="_blank" rel="noreferrer">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors, via <a href="https://openfreemap.org/" target="_blank" rel="noreferrer">OpenFreeMap</a></div></div>`;
+      const list = el.querySelector(".dw-poi-list");
+      if (list && scrollTop) list.scrollTop = scrollTop;
     }
     _poiById(id) {
       return this._pois.find((poi) => poi.id === id) || null;
@@ -11613,6 +11777,11 @@
           this._panel.classList.toggle("dw-poi-panel--collapsed");
           this._renderPanel();
         }
+        return;
+      }
+      const gap = target.closest("[data-poi-gap]");
+      if (gap) {
+        this._showGap(gap.dataset.poiGap);
         return;
       }
       const chip = target.closest("[data-poi-cat]");
@@ -13100,6 +13269,16 @@
         ".dw-poi-panel--collapsed .dw-poi-body { display: none; }",
         ".dw-poi-status { color: #374151; }",
         ".dw-poi-status--error { color: #b91c1c; }",
+        ".dw-poi-gaps { display: flex; flex-direction: column; gap: 2px; padding: 4px 6px; border-radius: 4px; background: #eef5fc; }",
+        ".dw-poi-gaps > div { display: flex; align-items: baseline; gap: 4px; }",
+        ".dw-poi-gaps .fa-tint { flex: 0 0 12px; color: #1e88e5; }",
+        ".dw-poi-gap { border: 0; padding: 0; background: none; color: #0d47a1; cursor: pointer; text-align: left; font: inherit; }",
+        ".dw-poi-gap:hover { text-decoration: underline; }",
+        ".dw-poi-gap-sub { padding-left: 16px; }",
+        ".dw-poi-gap b { font-weight: 700; }",
+        ".dw-poi-gap-sub .dw-poi-gap { color: #37474f; font-size: 11px; }",
+        ".dw-poi-gap-warn { color: #9a3412; }",
+        ".dw-poi-gap-warn .fa-tint { color: #c2410c; }",
         ".dw-poi-opts { display: flex; align-items: center; justify-content: space-between; gap: 6px; }",
         ".dw-poi-opts select, .dw-poi-opts button, .dw-poi-ft button { font-size: 11px; }",
         ".dw-poi-chips { display: flex; flex-wrap: wrap; gap: 4px; }",

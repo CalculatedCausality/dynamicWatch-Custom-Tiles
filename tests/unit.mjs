@@ -1555,6 +1555,21 @@ t("@connect covers every host the providers GM-fetch from", () => {
 	}
 });
 
+t("userscript metadata: auto-update URLs, meta file and install link agree", () => {
+	const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+	const header = _BUILT_SCRIPT.slice(0, _BUILT_SCRIPT.indexOf("// ==/UserScript==") + "// ==/UserScript==".length);
+	const meta = (key) => (header.match(new RegExp(`^// @${key}\\s+(\\S+)`, "m")) || [])[1];
+	assert(/^\d+\.\d+\.\d+$/.test(meta("version") || ""), `semver @version: ${meta("version")}`);
+	const repo = "https://raw.githubusercontent.com/CalculatedCausality/dynamicWatch-Custom-Tiles/main/";
+	eq(meta("updateURL"), repo + "dynamicwatch-custom-tiles.meta.js");
+	eq(meta("downloadURL"), repo + "dynamicwatch-custom-tiles.user.js");
+	// The polled meta file must announce exactly the version the bundle carries.
+	eq(readFileSync(resolve(root, "dynamicwatch-custom-tiles.meta.js"), "utf8"), header + "\n");
+	const readme = readFileSync(resolve(root, "README.md"), "utf8");
+	assert(readme.includes("https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles/raw/main/dynamicwatch-custom-tiles.user.js"),
+		"README install link points at the same repository and branch");
+});
+
 // -- Summary -----------------------------------------------------------
 
 console.log("");

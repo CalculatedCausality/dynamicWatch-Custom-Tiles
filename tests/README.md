@@ -13,6 +13,12 @@ bash tests/run.sh --live -c  # live suite, plain CI output
 bash tests/run.sh --all --ci # both suites, plain CI output
 ```
 
+CI ([`.github/workflows/tests.yml`](../.github/workflows/tests.yml)) runs
+`npm run check:bundle` (the committed userscript matches a fresh build) and
+`bash tests/run.sh --ci` on every push to `main` and every pull request. The
+live suite runs only when started by hand with the *live* option, because
+third-party endpoints can fail for reasons unrelated to the commit.
+
 `npm test` never contacts external services, requires no credentials, and
 rebuilds the userscript before checking it. `bash tests/run.sh` uses the
 currently built bundle without rebuilding. The source regressions
@@ -68,8 +74,9 @@ batch input and report/protocol behavior against synthetic
 responses. `check-secrets.mjs` checks the repository for accidentally included
 credentials; `lightpoll-token.mjs` checks public WMS URL construction.
 `route-pois.mjs` covers route-corridor geometry (distance along the route,
-out-and-back passes, tile coverage), vector-tile POI decoding, filtering, tile
-retries/caching and adding POIs as planner waypoints. These checks are part of
+out-and-back passes, tile coverage, slicing a stretch), vector-tile POI
+decoding, filtering, tile retries/caching, water and resupply gaps, following
+route edits, and adding POIs as planner waypoints. These checks are part of
 the default `npm test` run.
 
 ### Synthetic report browser check (local only)

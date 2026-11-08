@@ -1,0 +1,55 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      live:
+        description: Also probe the live map endpoints (network only; no logins)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    name: Offline tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Committed userscript matches the source
+        run: npm run check:bundle
+      - name: Install Chromium for the local report check
+        run: npx playwright install --with-deps chromium
+      - name: Unit, source-regression, secret-scan and report checks
+        run: bash tests/run.sh --ci
+
+  live:
+    name: Live endpoint checks
+    # Manual only: third-party map services change and rate-limit, so a red
+    # run here means "look at the endpoint", not "this commit is broken".
+    if: github.event_name == 'workflow_dispatch' && inputs.live
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Browser checks that need a dynamic.watch login skip themselves here.
+      - run: bash tests/run.sh --live --ci

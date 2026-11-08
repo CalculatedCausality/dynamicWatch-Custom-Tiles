@@ -115,6 +115,55 @@ export function routePasses(index, lng, lat) {
 	return passes.map((g) => g.best);
 }
 
+// Cheap fingerprint of the planner's paths (order, segmenting and ~0.1 m
+// coordinates) so an edited route can be told apart from a re-drawn one.
+export function routeSignature(paths) {
+	let h = 0x811c9dc5, n = 0;
+	const mix = (v) => { h = Math.imul(h ^ (v | 0), 0x01000193) >>> 0; };
+	for (const path of paths || []) {
+		mix(0x7fffffff);
+		for (const p of path || []) {
+			if (!validPoint(p)) continue;
+			mix(Math.round(p[0] * 1e6));
+			mix(Math.round(p[1] * 1e6));
+			n++;
+		}
+	}
+	return n + ":" + h.toString(16);
+}
+
+// Longest stretch of [0, total] metres with no stop, given the distances
+// along the route at which stops are passed. Route start and end bound it.
+export function longestGap(alongs, total) {
+	if (!(total > 0)) return null;
+	const stops = (alongs || []).filter(Number.isFinite)
+		.map((a) => Math.max(0, Math.min(total, a))).sort((a, b) => a - b);
+	let prev = 0, best = null;
+	for (const at of [...stops, total]) {
+		if (!best || at - prev > best.length) best = { from: prev, to: at, length: at - prev };
+		prev = at;
+	}
+	return best;
+}
+
+// The [lng, lat] polylines covering metres `from`..`to` along a measured
+// route; a stretch spanning separate parts yields one polyline per part.
+export function sliceRoute(route, from, to) {
+	const out = [];
+	const lerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+	for (const { points, cum } of route.parts) {
+		const piece = [];
+		for (let i = 1; i < points.length; i++) {
+			const a = cum[i - 1], b = cum[i];
+			if (b < from || a > to || b === a) continue;
+			if (!piece.length) piece.push(a >= from ? points[i - 1] : lerp(points[i - 1], points[i], (from - a) / (b - a)));
+			piece.push(b <= to ? points[i] : lerp(points[i - 1], points[i], (to - a) / (b - a)));
+		}
+		if (piece.length > 1) out.push(piece);
+	}
+	return out;
+}
+
 export function lngLatToTile(lng, lat, z) {
 	const n = 2 ** z;
 	const clampedLat = Math.max(-85.0511, Math.min(85.0511, lat)) * RAD;
