@@ -1,8 +1,8 @@
 // Course features on the route itself, for the watch's Up Ahead list: creek
 // crossings, named track and road sections, and climbs. Pure functions over
-// a measured route (route-geometry.js), its 50 m samples (route-timing.js),
+// a measured route (route-geometry.js), its 50 m samples (route-profile.js),
 // map-tile lines as [lng, lat] arrays, and sampled elevations.
-import { smoothElevations } from "./route-timing.js";
+import { smoothElevations } from "./route-profile.js";
 
 const M_PER_DEG = 6371008.8 * Math.PI / 180;
 

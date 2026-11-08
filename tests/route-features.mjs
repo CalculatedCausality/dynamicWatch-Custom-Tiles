@@ -1,11 +1,9 @@
 // Run with `node --test tests/route-features.mjs`; source modules only, no network.
 // Course features for Up Ahead: creek crossings, track sections and climbs.
-process.env.TZ = "Australia/Brisbane";
-
 import test from "node:test";
 import assert from "node:assert/strict";
 import { measureRoute, routeParts } from "../src/utils/route-geometry.js";
-import { resampleRoute } from "../src/utils/route-timing.js";
+import { resampleRoute } from "../src/utils/route-profile.js";
 import {
 	abbreviate, climbLabel, climbTopLabel, creekCrossings, findClimbs, trackSections,
 } from "../src/utils/route-features.js";
@@ -115,7 +113,7 @@ test("climb names fit the watch, shortening rather than truncating", () => {
 	const item = { type: "climb", climb, name: "Climb 171m 3.7k", along: 13100 };
 	assert.equal(waypointLabel(item), "Climb 171m 3.7k");
 	assert.equal(waypointLabel(item, { mode: "km" }), "13k Climb 171m");
-	assert.equal(waypointLabel(item, { mode: "km-time", eta: new Date(2026, 10, 9, 8, 24).getTime() }), "13k 08:24 +171m");
+	assert.equal(waypointLabel(item, { mode: "km", maxLength: 10 }), "13k +171m", "very short name limits keep the gain");
 	const top = { type: "climb_top", climb, name: "Top 171m climb", along: 16800 };
 	assert.equal(waypointLabel(top, { mode: "km" }), "17k Top 171m");
 	const creek = { type: "creek_crossing", name: "East Cedar Creek", along: 13040 };

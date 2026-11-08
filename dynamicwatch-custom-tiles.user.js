@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.16.0
+// @version      7.17.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -56,7 +56,6 @@
 // @connect      api.mapbox.com
 // @connect      s3.amazonaws.com
 // @connect      elevation-tiles-prod.s3.amazonaws.com
-// @connect      api.open-meteo.com
 // @run-at       document-start
 // ==/UserScript==
 (() => {
@@ -350,12 +349,10 @@
     ROUTE_POI_TILE_ZOOM: 14,
     ROUTE_POI_MAX_TILES: 400,
     ROUTE_POI_PREFS_KEY: "dw_route_poi_prefs",
-    // Arrival-time estimates: AWS Terrain Tiles (Terrarium PNG, keyless) for
-    // elevation, and Open-Meteo (keyless, CC BY 4.0) for the forecast.
+    // Route elevation profile (climbs): AWS Terrain Tiles, Terrarium PNG, keyless.
     ROUTE_ELEVATION_TILE: "https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png",
     ROUTE_ELEVATION_ZOOM: 12,
-    ROUTE_ELEVATION_MAX_TILES: 80,
-    OPEN_METEO_FORECAST: "https://api.open-meteo.com/v1/forecast"
+    ROUTE_ELEVATION_MAX_TILES: 80
   };
   var BLANK_TILE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
   var DW_LAYER_GROUPS = [
@@ -10997,7 +10994,7 @@
     return [...tiles.values()].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
   }
 
-  // src/utils/route-timing.js
+  // src/utils/route-profile.js
   var SAMPLE_STEP_M = 50;
   function resampleRoute(route, step = SAMPLE_STEP_M) {
     const samples = [];
@@ -11015,14 +11012,6 @@
     }
     return samples;
   }
-  function gradeFactor(grade) {
-    const g = Math.max(-0.45, Math.min(0.45, Number(grade) || 0));
-    if (g >= 0) {
-      const cost = 155.4 * g ** 5 - 30.4 * g ** 4 - 43.3 * g ** 3 + 46.3 * g ** 2 + 19.5 * g + 3.6;
-      return cost / 3.6;
-    }
-    return 1 + 1.8 * g + 9 * g * g;
-  }
   function smoothElevations(values, window2 = 5) {
     const half = Math.floor(window2 / 2), out = new Float64Array(values.length);
     for (let i = 0; i < values.length; i++) {
@@ -11036,73 +11025,6 @@
       out[i] = n ? sum / n : NaN;
     }
     return out;
-  }
-  function routeTiming(samples, elevations, paceSecPerKm) {
-    const times = new Float64Array(samples.length);
-    const smooth = elevations ? smoothElevations(elevations) : null;
-    let ascent = 0, descent = 0;
-    for (let i = 1; i < samples.length; i++) {
-      const dist = samples[i].along - samples[i - 1].along;
-      let factor = 1;
-      if (smooth && !samples[i].partStart && dist > 0) {
-        const rise = smooth[i] - smooth[i - 1];
-        if (Number.isFinite(rise)) {
-          factor = gradeFactor(rise / dist);
-          if (rise > 0) ascent += rise;
-          else descent -= rise;
-        }
-      }
-      times[i] = times[i - 1] + (samples[i].partStart ? 0 : dist / 1e3 * paceSecPerKm * factor);
-    }
-    return {
-      alongs: samples.map((s) => s.along),
-      times,
-      total: times[times.length - 1] || 0,
-      ascent: smooth ? ascent : null,
-      descent: smooth ? descent : null
-    };
-  }
-  function locate(sorted, value) {
-    let lo = 0, hi = sorted.length - 1;
-    while (hi - lo > 1) {
-      const mid = lo + hi >> 1;
-      if (sorted[mid] <= value) lo = mid;
-      else hi = mid;
-    }
-    return lo;
-  }
-  function timeAt(timing, along) {
-    const { alongs, times } = timing;
-    if (!alongs.length) return 0;
-    if (along <= alongs[0]) return times[0];
-    if (along >= alongs[alongs.length - 1]) return times[times.length - 1];
-    const i = locate(alongs, along);
-    const span = alongs[i + 1] - alongs[i];
-    return times[i] + (span > 0 ? (along - alongs[i]) / span : 0) * (times[i + 1] - times[i]);
-  }
-  function alongAt(timing, seconds) {
-    const { alongs, times } = timing;
-    if (!alongs.length) return 0;
-    if (seconds <= times[0]) return alongs[0];
-    if (seconds >= times[times.length - 1]) return alongs[alongs.length - 1];
-    const i = locate(times, seconds);
-    const span = times[i + 1] - times[i];
-    return alongs[i] + (span > 0 ? (seconds - times[i]) / span : 0) * (alongs[i + 1] - alongs[i]);
-  }
-  function parsePace(text) {
-    const m = /^\s*(\d{1,2})(?::([0-5]\d))?\s*$/.exec(String(text || ""));
-    if (!m) return null;
-    const seconds = Number(m[1]) * 60 + Number(m[2] || 0);
-    return seconds >= 120 && seconds <= 3600 ? seconds : null;
-  }
-  function formatPace(seconds) {
-    const s = Math.round(seconds);
-    return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-  }
-  function formatDuration(seconds) {
-    const minutes = Math.round(seconds / 60);
-    const h = Math.floor(minutes / 60), m = minutes % 60;
-    return h ? `${h} h ${String(m).padStart(2, "0")}` : `${m} min`;
   }
 
   // src/utils/route-features.js
@@ -11396,74 +11318,6 @@
     return firstFitting([`Top ${gain} climb`, `Top ${gain}`, "Top"], maxLength);
   }
 
-  // src/utils/sun.js
-  var RAD2 = Math.PI / 180;
-  var DAY_MS = 864e5;
-  var J1970 = 2440588;
-  var J2000 = 2451545;
-  var J0 = 9e-4;
-  var OBLIQUITY = RAD2 * 23.4397;
-  var toDays = (ms) => ms / DAY_MS - 0.5 + J1970 - J2000;
-  var fromJulian = (j) => (j + 0.5 - J1970) * DAY_MS;
-  function sunTimes(ms, lat, lng) {
-    const lw = RAD2 * -lng;
-    const phi = RAD2 * lat;
-    const n = Math.round(toDays(ms) - J0 - lw / (2 * Math.PI));
-    const transit = (ht) => J0 + (ht + lw) / (2 * Math.PI) + n;
-    const ds = transit(0);
-    const M = RAD2 * (357.5291 + 0.98560028 * ds);
-    const C = RAD2 * (1.9148 * Math.sin(M) + 0.02 * Math.sin(2 * M) + 3e-4 * Math.sin(3 * M));
-    const L2 = M + C + RAD2 * 102.9372 + Math.PI;
-    const dec = Math.asin(Math.sin(OBLIQUITY) * Math.sin(L2));
-    const solarTransit = (d) => J2000 + d + 53e-4 * Math.sin(M) - 69e-4 * Math.sin(2 * L2);
-    const noon = solarTransit(ds);
-    const pair = (angle) => {
-      const cosH = (Math.sin(angle * RAD2) - Math.sin(phi) * Math.sin(dec)) / (Math.cos(phi) * Math.cos(dec));
-      if (!(cosH >= -1 && cosH <= 1)) return [null, null];
-      const set = solarTransit(transit(Math.acos(cosH)));
-      return [fromJulian(noon - (set - noon)), fromJulian(set)];
-    };
-    const [sunrise, sunset] = pair(-0.833);
-    const [dawn, dusk] = pair(-6);
-    return { sunrise, sunset, dawn, dusk, noon: fromJulian(noon) };
-  }
-  function darkIntervals(startMs, endMs, lat, lng) {
-    if (!(endMs > startMs)) return [];
-    const light = [];
-    let polarNight = true;
-    for (let t = startMs - DAY_MS; t <= endMs + DAY_MS; t += DAY_MS) {
-      const { sunrise, sunset, noon } = sunTimes(t, lat, lng);
-      if (sunrise != null && sunset != null) {
-        light.push([sunrise, sunset]);
-        polarNight = false;
-      } else {
-        const up = Math.sin(lat * RAD2) * Math.sin(declinationAt(noon)) + Math.cos(lat * RAD2) * Math.cos(declinationAt(noon)) > Math.sin(-0.833 * RAD2);
-        if (up) {
-          light.push([noon - DAY_MS / 2, noon + DAY_MS / 2]);
-          polarNight = false;
-        }
-      }
-    }
-    if (polarNight) return [[startMs, endMs]];
-    light.sort((a, b) => a[0] - b[0]);
-    const dark = [];
-    let cursor = startMs;
-    for (const [rise, set] of light) {
-      if (set <= cursor) continue;
-      if (rise > cursor) dark.push([cursor, Math.min(rise, endMs)]);
-      cursor = Math.max(cursor, set);
-      if (cursor >= endMs) break;
-    }
-    if (cursor < endMs) dark.push([cursor, endMs]);
-    return dark.filter(([a, b]) => b - a > 6e4);
-  }
-  function declinationAt(ms) {
-    const d = toDays(ms);
-    const M = RAD2 * (357.5291 + 0.98560028 * d);
-    const C = RAD2 * (1.9148 * Math.sin(M) + 0.02 * Math.sin(2 * M) + 3e-4 * Math.sin(3 * M));
-    return Math.asin(Math.sin(OBLIQUITY) * Math.sin(M + C + RAD2 * 102.9372 + Math.PI));
-  }
-
   // src/providers/route-elevation.js
   var TILE = 256;
   var _tiles = /* @__PURE__ */ new Map();
@@ -11586,124 +11440,6 @@
         inflight.clear();
       }
     };
-  }
-
-  // src/providers/route-weather.js
-  var HOURLY = "temperature_2m,apparent_temperature,precipitation_probability,precipitation,wind_speed_10m,wind_gusts_10m,uv_index,weather_code";
-  var HOUR_MS = 36e5;
-  var FORECAST_DAYS = 16;
-  var _cache = /* @__PURE__ */ new Map();
-  var CACHE_MS = 30 * 6e4;
-  function weatherPoints(samples, timing, startMs, maxPoints = 12) {
-    if (!samples.length) return [];
-    const total = samples[samples.length - 1].along;
-    const count = Math.max(2, Math.min(maxPoints, Math.ceil((total - 1) / 3e3) + 1));
-    const points = [];
-    let j = 0;
-    for (let k = 0; k < count; k++) {
-      const along = total * k / (count - 1);
-      while (j < samples.length - 1 && samples[j + 1].along <= along) j++;
-      const s = samples[j];
-      points.push({ along, lat: s.lat, lng: s.lng, eta: startMs + timeAt(timing, along) * 1e3 });
-    }
-    return points;
-  }
-  var isoHour = (ms) => new Date(Math.floor(ms / HOUR_MS) * HOUR_MS).toISOString().slice(0, 13) + ":00";
-  function weatherUrl(points) {
-    const first = Math.min(...points.map((p) => p.eta));
-    const last = Math.max(...points.map((p) => p.eta));
-    const params = new URLSearchParams({
-      latitude: points.map((p) => p.lat.toFixed(4)).join(","),
-      longitude: points.map((p) => p.lng.toFixed(4)).join(","),
-      hourly: HOURLY,
-      timezone: "GMT",
-      timeformat: "unixtime",
-      wind_speed_unit: "kmh",
-      start_hour: isoHour(first),
-      end_hour: isoHour(last + HOUR_MS)
-    });
-    return CFG.OPEN_METEO_FORECAST + "?" + params;
-  }
-  function applyForecast(points, data) {
-    const sites = Array.isArray(data) ? data : [data];
-    return points.map((p, i) => {
-      const hourly = sites[i] && sites[i].hourly;
-      if (!hourly || !Array.isArray(hourly.time) || !hourly.time.length) return { ...p, wx: null };
-      let best = 0;
-      for (let h = 1; h < hourly.time.length; h++) {
-        if (Math.abs(hourly.time[h] * 1e3 - p.eta) < Math.abs(hourly.time[best] * 1e3 - p.eta)) best = h;
-      }
-      const pick = (k) => Array.isArray(hourly[k]) && Number.isFinite(hourly[k][best]) ? hourly[k][best] : null;
-      return {
-        ...p,
-        wx: {
-          temp: pick("temperature_2m"),
-          feels: pick("apparent_temperature"),
-          rainChance: pick("precipitation_probability"),
-          rain: pick("precipitation"),
-          wind: pick("wind_speed_10m"),
-          gusts: pick("wind_gusts_10m"),
-          uv: pick("uv_index"),
-          code: pick("weather_code")
-        }
-      };
-    });
-  }
-  function summarizeWeather(points) {
-    const withWx = points.filter((p) => p.wx);
-    if (!withWx.length) return null;
-    const extreme = (key, better) => withWx.reduce((best, p) => p.wx[key] != null && (best == null || better(p.wx[key], best.wx[key])) ? p : best, null);
-    const at = (p, key) => p ? { value: p.wx[key], along: p.along, eta: p.eta } : null;
-    const storms = withWx.filter((p) => p.wx.code != null && p.wx.code >= 95);
-    return {
-      minTemp: at(extreme("temp", (a, b) => a < b), "temp"),
-      maxTemp: at(extreme("temp", (a, b) => a > b), "temp"),
-      maxFeels: at(extreme("feels", (a, b) => a > b), "feels"),
-      maxRainChance: at(extreme("rainChance", (a, b) => a > b), "rainChance"),
-      maxGusts: at(extreme("gusts", (a, b) => a > b), "gusts"),
-      maxUv: at(extreme("uv", (a, b) => a > b), "uv"),
-      storm: storms.length ? { along: storms[0].along, eta: storms[0].eta } : null
-    };
-  }
-  function maxFeelsBetween(points, from, to) {
-    let max = null;
-    for (const p of points) {
-      if (!p.wx || p.wx.feels == null || p.along < from - 1500 || p.along > to + 1500) continue;
-      if (max == null || p.wx.feels > max) max = p.wx.feels;
-    }
-    return max;
-  }
-  function fetchRouteWeather(points, opts, cb) {
-    opts = opts || {};
-    const now = opts.now != null ? opts.now : Date.now();
-    if (!points.length) {
-      cb(null, { status: "none" });
-      return;
-    }
-    const first = Math.min(...points.map((p) => p.eta));
-    const last = Math.max(...points.map((p) => p.eta));
-    if (last < now - HOUR_MS) {
-      cb(null, { status: "past" });
-      return;
-    }
-    if (first > now + (FORECAST_DAYS - 0.5) * 24 * HOUR_MS) {
-      cb(null, { status: "too-far" });
-      return;
-    }
-    const url = weatherUrl(points);
-    const hit = _cache.get(url);
-    if (hit && now - hit.at < CACHE_MS) {
-      cb(null, { status: "ok", points: applyForecast(points, hit.data) });
-      return;
-    }
-    (opts.fetchJson || gmJsonGet)(url, { timeout: 2e4 }, (err, data) => {
-      if (err || !data || data.error) {
-        cb(err || new Error(String(data && data.reason || "forecast")));
-        return;
-      }
-      _cache.set(url, { at: now, data });
-      cb(null, { status: "ok", points: applyForecast(points, data) });
-    });
   }
 
   // src/providers/route-pois.js
@@ -11984,25 +11720,14 @@
   }
   var NAME_MODES = [
     { id: "name", label: "Name only" },
-    { id: "km", label: "Distance + name" },
-    { id: "km-time", label: "Distance + time + name" }
+    { id: "km", label: "Distance + name" }
   ];
-  var pad2 = (n) => String(n).padStart(2, "0");
-  function clock(ms) {
-    const d = new Date(ms);
-    return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
-  }
-  function formatClock(ms, refMs) {
-    const d = new Date(ms), ref = new Date(refMs == null ? ms : refMs);
-    const sameDay = d.getFullYear() === ref.getFullYear() && d.getMonth() === ref.getMonth() && d.getDate() === ref.getDate();
-    return (sameDay ? "" : d.toLocaleDateString([], { weekday: "short" }) + " ") + clock(ms);
-  }
-  function waypointLabel(poi, { mode = "name", along = poi.along, eta = null, metric = true, maxLength = 16 } = {}) {
+  function waypointLabel(poi, { mode = "name", along = poi.along, metric = true, maxLength = 16 } = {}) {
     const max = Math.max(1, maxLength);
     let prefix = "";
-    if (mode !== "name" && Number.isFinite(along)) {
+    if (mode === "km" && Number.isFinite(along)) {
       const d = along / (metric ? 1e3 : 1609.344);
-      prefix = (d < 10 ? d.toFixed(1) : String(Math.round(d))) + (metric ? "k" : "mi") + (mode === "km-time" && eta != null ? " " + clock(eta) : "") + " ";
+      prefix = (d < 10 ? d.toFixed(1) : String(Math.round(d))) + (metric ? "k" : "mi") + " ";
     }
     const room = Math.max(1, max - prefix.length);
     let base;
@@ -12011,29 +11736,6 @@
     else base = (poi.name || poiTypeLabel(poi)).replace(/\s+/g, " ").trim();
     if (base.length > room) base = abbreviate(base);
     return (prefix + base.slice(0, room)).slice(0, max).trim();
-  }
-  function waterGuideLitres(hours, feels) {
-    if (!(hours >= 0.5)) return null;
-    const [lo, hi] = feels >= 30 ? [0.8, 1.2] : feels >= 25 ? [0.6, 1] : [0.4, 0.8];
-    const half = (v) => Math.max(0.5, Math.round(v * 2) / 2);
-    return [half(hours * lo), half(hours * hi)];
-  }
-  function toLocalInput(ms) {
-    const d = new Date(ms);
-    return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + "T" + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
-  }
-  function defaultStart(now = Date.now()) {
-    const d = new Date(now);
-    d.setHours(6, 0, 0, 0);
-    if (d.getTime() < now + 36e5) d.setDate(d.getDate() + 1);
-    return toLocalInput(d.getTime());
-  }
-  function normaliseStart(value, now = Date.now()) {
-    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(String(value || ""))) return defaultStart(now);
-    const d = new Date(value);
-    if (!Number.isFinite(d.getTime())) return defaultStart(now);
-    while (d.getTime() < now - 6 * 36e5) d.setDate(d.getDate() + 1);
-    return toLocalInput(d.getTime());
   }
   var CATEGORY_PRIORITY = {
     water: 0,
@@ -12271,29 +11973,6 @@
   function toPage(value) {
     return typeof cloneInto === "function" ? cloneInto(value, pageWindow()) : value;
   }
-  function replaceAround(root, fresh, keep, slot) {
-    const oldChain = [], newChain = [];
-    for (let n = keep; n && n !== root; n = n.parentNode) oldChain.unshift(n);
-    for (let n = slot; n && n !== fresh; n = n.parentNode) newChain.unshift(n);
-    if (!oldChain.length || oldChain[0].parentNode !== root || newChain.length !== oldChain.length || newChain[0].parentNode !== fresh || oldChain.some((n, i) => n.nodeName !== newChain[i].nodeName || n.className !== newChain[i].className)) return false;
-    let oldParent = root, newParent = fresh;
-    for (let i = 0; i < oldChain.length; i++) {
-      const oldChild = oldChain[i], newChild = newChain[i];
-      for (const n of [...oldParent.childNodes]) if (n !== oldChild) oldParent.removeChild(n);
-      let before = true;
-      for (const n of [...newParent.childNodes]) {
-        if (n === newChild) {
-          before = false;
-          continue;
-        }
-        if (before) oldParent.insertBefore(n, oldChild);
-        else oldParent.appendChild(n);
-      }
-      oldParent = oldChild;
-      newParent = newChild;
-    }
-    return true;
-  }
   function loadPrefs() {
     let prefs = {};
     try {
@@ -12301,14 +11980,11 @@
     } catch (_) {
     }
     const radius = Number(prefs.radius);
-    const pace = Number(prefs.pace);
+    const nameMode = prefs.nameMode === "km-time" ? "km" : prefs.nameMode;
     return {
       radius: POI_RADIUS_OPTIONS.includes(radius) ? radius : 100,
       hidden: Array.isArray(prefs.hidden) ? prefs.hidden.filter((id) => CATEGORY[id]) : [],
-      pace: pace >= 120 && pace <= 3600 ? pace : 360,
-      start: normaliseStart(prefs.start),
-      nameMode: NAME_MODES.some((m) => m.id === prefs.nameMode) ? prefs.nameMode : "name",
-      timingOpen: prefs.timingOpen !== false
+      nameMode: NAME_MODES.some((m) => m.id === nameMode) ? nameMode : "name"
     };
   }
   var LIST_LIMIT = 300;
@@ -12336,9 +12012,7 @@
       this._searchedSig = null;
       this._pendingSig = null;
       this._scrollReset = false;
-      this._timing = null;
-      this._timingGen = 0;
-      this._inputTimer = null;
+      this._hasElevation = false;
       this._onMapLayers = () => {
         clearTimeout(this._syncTimer);
         this._syncTimer = setTimeout(() => this._syncAdded(), 200);
@@ -12365,7 +12039,6 @@
       this._cancel();
       const gen = ++this._gen;
       this._ensurePanel();
-      this._stopTiming();
       this._setState("loading");
       this._setStatus(auto ? "Route changed — updating POIs…" : "Finding POIs along the route…");
       const paths = this._currentPaths();
@@ -12388,8 +12061,7 @@
         this._renderMarkers();
         this._scrollReset = true;
         this._setState("active");
-        if (err) this._stopTiming();
-        else this._startTiming(result);
+        this._hasElevation = !err && !!result.elevations;
         if (err) {
           this._summary = { text: err.message, error: true };
           this._setStatus(err.message, true);
@@ -12415,7 +12087,7 @@
       this._map.off("layeradd layerremove", this._onMapLayers);
       clearTimeout(this._syncTimer);
       this._stopWatching();
-      this._stopTiming();
+      this._hasElevation = false;
       this._clearGap();
       if (this._group) {
         this._group.remove();
@@ -12461,155 +12133,6 @@
       }
       this.search(true);
     }
-    // -- Arrival times, daylight and weather ---------------------------------
-    _startMs() {
-      const ms = new Date(this._prefs.start).getTime();
-      return Number.isFinite(ms) ? ms : new Date(defaultStart()).getTime();
-    }
-    _stopTiming() {
-      this._timingGen++;
-      clearTimeout(this._inputTimer);
-      this._timing = null;
-    }
-    // New search result: time the route with its elevation profile (flat when
-    // that didn't load) and fetch the forecast for the arrival times.
-    _startTiming(result) {
-      this._stopTiming();
-      if (!this._route) return;
-      const samples = result && result.samples ? result.samples : resampleRoute(this._route);
-      const elevations = result && result.elevations ? result.elevations : null;
-      this._timing = {
-        gen: this._timingGen,
-        samples,
-        elevations,
-        elevationStatus: elevations ? "ok" : "failed",
-        weather: { status: "idle" }
-      };
-      this._recomputeTiming(true);
-    }
-    _recomputeTiming(withWeather) {
-      const t = this._timing;
-      if (!t) return;
-      t.startMs = this._startMs();
-      t.model = routeTiming(t.samples, t.elevations, this._prefs.pace);
-      const start = t.samples[0];
-      t.dark = start ? darkIntervals(t.startMs, t.startMs + t.model.total * 1e3, start.lat, start.lng) : [];
-      if (withWeather) this._fetchWeather();
-      this._renderPanel();
-    }
-    _fetchWeather() {
-      const t = this._timing;
-      if (!t) return;
-      const gen = this._timingGen;
-      const key = t.weatherSeq = (t.weatherSeq || 0) + 1;
-      t.weather = { status: "loading" };
-      fetchRouteWeather(weatherPoints(t.samples, t.model, t.startMs), {}, (err, result) => {
-        if (gen !== this._timingGen || !this._timing || this._timing.weatherSeq !== key) return;
-        if (err) t.weather = { status: "failed" };
-        else if (result.status !== "ok") t.weather = result;
-        else t.weather = { status: "ok", points: result.points, summary: summarizeWeather(result.points) };
-        this._renderPanel();
-      });
-    }
-    // Epoch ms at which the route passes `along` metres, or null.
-    _eta(along) {
-      const t = this._timing;
-      return t && t.model ? t.startMs + timeAt(t.model, along) * 1e3 : null;
-    }
-    _paceInput() {
-      const perKm = this._prefs.pace;
-      return formatPace(this._metric() ? perKm : perKm * 1.609344);
-    }
-    _onTimingInput(field, value) {
-      clearTimeout(this._inputTimer);
-      this._inputTimer = setTimeout(() => {
-        if (field === "pace") {
-          const seconds = parsePace(value);
-          if (seconds == null) return;
-          this._prefs.pace = Math.round(this._metric() ? seconds : seconds / 1.609344);
-        } else if (field === "start") {
-          const ms = new Date(value).getTime();
-          if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value) || !Number.isFinite(ms)) return;
-          this._prefs.start = value;
-        }
-        this._savePrefs();
-        this._recomputeTiming(true);
-      }, 600);
-    }
-    _timingHtml() {
-      if (this._state !== "active" || !this._route) return "";
-      const metric = this._metric();
-      const open = this._prefs.timingOpen;
-      const head = `<button type="button" class="dw-poi-timing-hd" data-poi-act="timing-toggle" aria-expanded="${open}"><i class="fa fa-clock-o"></i> Timing &amp; conditions <span>${open ? "▾" : "▸"}</span></button>`;
-      if (!open) return `<div class="dw-poi-timing">${head}</div>`;
-      const nameOptions = NAME_MODES.map((m) => `<option value="${m.id}"${m.id === this._prefs.nameMode ? " selected" : ""}>${_escHtml(m.label)}</option>`).join("");
-      const form = `<div class="dw-poi-timing-form">` + esc`<label>Start <input type="datetime-local" data-poi-start value="${this._prefs.start}"></label>` + esc`<label>Pace <input type="text" data-poi-pace value="${this._paceInput()}" size="4" inputmode="numeric" title="Your flat pace, min:sec"> /${metric ? "km" : "mi"}</label>` + `<label title="Waypoint names are all that reach the watch">Waypoint names <select data-poi-names>${nameOptions}</select></label></div>`;
-      const t = this._timing;
-      if (!t || !t.model) return `<div class="dw-poi-timing">${head}${form}</div>`;
-      const lines = [];
-      const finish = t.startMs + t.model.total * 1e3;
-      let climb = "";
-      if (t.elevationStatus === "failed") climb = " · flat estimate (elevation unavailable)";
-      else if (t.model.ascent != null) {
-        const f = (m) => metric ? Math.round(m) + " m" : Math.round(m * 3.28084) + " ft";
-        climb = ` · ↑ ${f(t.model.ascent)} ↓ ${f(t.model.descent)}`;
-      }
-      lines.push(`<div><i class="fa fa-flag-checkered"></i> ` + esc`Finish ≈ <b>${formatClock(finish, t.startMs)}</b> · ${formatDuration(t.model.total)} moving${climb}</div>`);
-      lines.push(this._daylightHtml(t, finish, metric));
-      lines.push(this._weatherHtml(t, metric));
-      return `<div class="dw-poi-timing">${head}${form}<div class="dw-poi-timing-out">${lines.join("")}</div></div>`;
-    }
-    _daylightHtml(t, finish, metric) {
-      const start = t.samples[0];
-      const sun = sunTimes(finish, start.lat, start.lng);
-      if (!t.dark.length) {
-        return `<div><i class="fa fa-sun-o"></i> ` + esc`Daylight all the way` + (sun.sunset != null ? esc` · sunset ${formatClock(sun.sunset, t.startMs)}` : "") + `</div>`;
-      }
-      const parts = t.dark.slice(0, 2).map(([a, b]) => {
-        const from = alongAt(t.model, (a - t.startMs) / 1e3), to = alongAt(t.model, (b - t.startMs) / 1e3);
-        const where = from <= 1 ? `first ${formatRouteDistance(to, metric)}` : to >= t.model.alongs[t.model.alongs.length - 1] - 1 ? `from ${formatRouteDistance(from, metric)}` : formatRange(from, to, metric);
-        const when = from <= 1 ? `until ${formatClock(b, t.startMs)}` : `from ${formatClock(a, t.startMs)}`;
-        return esc`${where} (${when})`;
-      });
-      const more = t.dark.length > 2 ? ` +${t.dark.length - 2} more` : "";
-      return `<div class="dw-poi-warn"><i class="fa fa-moon-o"></i> In the dark: ${parts.join(", ")}${more}</div>`;
-    }
-    _weatherHtml(t, metric) {
-      const w = t.weather;
-      const note = (text) => `<div class="dw-poi-wx-note"><i class="fa fa-thermometer-half"></i> ${_escHtml(text)}</div>`;
-      if (!w || w.status === "idle" || w.status === "loading") return note("Loading the forecast…");
-      if (w.status === "too-far") return note("Forecast available up to 16 days ahead");
-      if (w.status === "past") return note("Start time has passed — no forecast");
-      if (w.status !== "ok" || !w.summary) return note("Forecast unavailable right now");
-      const s = w.summary;
-      const temp = (c) => metric ? Math.round(c) + " °C" : Math.round(c * 9 / 5 + 32) + " °F";
-      const speed = (k) => metric ? Math.round(k) + " km/h" : Math.round(k / 1.609344) + " mph";
-      const where = (x) => `${formatRouteDistance(x.along, metric)}, ${formatClock(x.eta, t.startMs)}`;
-      const bits = [];
-      if (s.minTemp && s.maxTemp) bits.push(esc`${temp(s.minTemp.value)}–${temp(s.maxTemp.value)}`);
-      if (s.maxFeels && s.maxTemp && s.maxFeels.value >= s.maxTemp.value + 1) {
-        bits.push(esc`feels ${temp(s.maxFeels.value)} (${where(s.maxFeels)})`);
-      }
-      if (s.maxRainChance) bits.push(esc`rain ${Math.round(s.maxRainChance.value)}%` + (s.maxRainChance.value >= 20 ? esc` (${where(s.maxRainChance)})` : ""));
-      if (s.maxGusts) bits.push(esc`gusts ${speed(s.maxGusts.value)}`);
-      if (s.maxUv && s.maxUv.value >= 3) bits.push(esc`UV ${Math.round(s.maxUv.value)}`);
-      const hot = s.maxFeels && s.maxFeels.value >= 30;
-      const out = [`<div class="${hot ? "dw-poi-warn" : ""}"><i class="fa fa-thermometer-half"></i> ${bits.join(" · ")}</div>`];
-      if (s.storm) out.push(`<div class="dw-poi-warn"><i class="fa fa-bolt"></i> ` + esc`Thunderstorms possible around ${where(s.storm)}</div>`);
-      return out.join("");
-    }
-    // "about 3 h 50, up to 24 °C · rough guide 1.5–3 L" for a stretch.
-    _gapTimingText(gap) {
-      const t = this._timing;
-      if (!t || !t.model || !gap || gap.length <= 0) return "";
-      const seconds = timeAt(t.model, gap.to) - timeAt(t.model, gap.from);
-      const parts = [`about ${formatDuration(seconds)}`];
-      const feels = t.weather && t.weather.status === "ok" ? maxFeelsBetween(t.weather.points, gap.from, gap.to) : null;
-      if (feels != null) parts.push(`up to ${this._metric() ? Math.round(feels) + " °C" : Math.round(feels * 9 / 5 + 32) + " °F"}`);
-      const litres = waterGuideLitres(seconds / 3600, feels == null ? 20 : feels);
-      if (litres) parts.push(`rough guide ${litres[0] === litres[1] ? litres[0] : litres[0] + "–" + litres[1]} L`);
-      return parts.join(", ");
-    }
     // -- Supply gaps ---------------------------------------------------------
     _gap(kind) {
       return this._route ? supplyGap(this._pois, this._route.total, SUPPLY_GAPS[kind]) : null;
@@ -12650,12 +12173,8 @@
       const parts = [];
       if (!water.count) {
         parts.push(esc`<div class="dw-poi-gap-warn"><i class="fa fa-tint"></i> No drinking water within ${radius} of the route</div>`);
-        const timing = this._gapTimingText(water);
-        if (timing) parts.push(esc`<div class="dw-poi-gap-sub dw-poi-gap-time">Carry it all: ${timing}</div>`);
       } else {
         parts.push(`<div><i class="fa fa-tint"></i> ` + line("water", water, "Longest stretch without water") + `</div>`);
-        const timing = this._gapTimingText(water);
-        if (timing) parts.push(esc`<div class="dw-poi-gap-sub dw-poi-gap-time">${timing}</div>`);
       }
       if (resupply && resupply.count > water.count && resupply.length < water.length - 250) {
         parts.push(`<div class="dw-poi-gap-sub">` + line("resupply", resupply, "Counting cafés & shops") + `</div>`);
@@ -12746,11 +12265,7 @@
     }
     _passesText(poi) {
       const metric = this._metric();
-      const start = this._timing && this._timing.startMs;
-      return poi.passes.map((pass) => {
-        const eta = this._eta(pass.along);
-        return formatRouteDistance(pass.along, metric) + (eta != null ? ` (${formatClock(eta, start)})` : "");
-      }).join(" & ");
+      return poi.passes.map((pass) => formatRouteDistance(pass.along, metric)).join(" & ");
     }
     _tooltipHtml(poi) {
       const label = poiTypeLabel(poi);
@@ -12763,12 +12278,7 @@
       if (c) {
         const dist = formatRouteDistance(c.length, metric);
         const pct = (g) => Math.round(g * 100) + "%";
-        let line = esc`↑ ${formatOffset(c.gain, metric)} over ${dist} · average ${pct(c.grade)} · steepest ${pct(c.steepest)}`;
-        const t = this._timing;
-        if (t && t.model) {
-          const minutes = (timeAt(t.model, c.to) - timeAt(t.model, c.from)) / 60;
-          line += esc` · about ${formatDuration(minutes * 60)} to the top`;
-        }
+        const line = esc`↑ ${formatOffset(c.gain, metric)} over ${dist} · average ${pct(c.grade)} · steepest ${pct(c.steepest)}`;
         const span = poi.type === "climb_top" ? esc`From ${formatRouteDistance(c.from, metric)} (${formatOffset(c.base, metric)})` : esc`Top at ${formatRouteDistance(c.to, metric)} (${formatOffset(c.top, metric)})`;
         return `<div>${line}</div><div>${span}</div>`;
       }
@@ -12832,7 +12342,6 @@
       }
       const name = waypointLabel(poi, {
         mode: this._prefs.nameMode,
-        eta: this._eta(poi.along),
         metric: this._metric(),
         maxLength: Number(plan.waypointNameLength) || 16
       });
@@ -12913,10 +12422,6 @@
         this._onPanelClick(e);
       });
       el.addEventListener("change", (e) => this._onPanelChange(e));
-      el.addEventListener("input", (e) => {
-        const field = e.target && e.target.closest ? e.target.closest("[data-poi-start], [data-poi-pace]") : null;
-        if (field) this._onTimingInput(field.matches("[data-poi-pace]") ? "pace" : "start", field.value);
-      });
       const isField = (t) => t && /^(INPUT|SELECT|TEXTAREA)$/.test(t.nodeName);
       for (const type of ["keydown", "keypress", "keyup"]) {
         el.addEventListener(type, (e) => {
@@ -12937,7 +12442,7 @@
       const rows = visible.slice(0, LIST_LIMIT).map((poi) => {
         const cat = CATEGORY[poi.category];
         const added = this._added.has(poi.id);
-        return esc`<li class="dw-poi-row" data-poi-row="${poi.id}">` + `<span class="dw-poi-dot" style="background:${cat.color}"></span>` + esc`<span class="dw-poi-name" title="${poiTypeLabel(poi)}">${poi.name || poiTypeLabel(poi)}</span>` + esc`<span class="dw-poi-km">${formatRouteDistance(poi.along, metric)}` + (this._eta(poi.along) != null ? esc` · ${clock(this._eta(poi.along))}` : "") + `</span>` + esc`<button type="button" class="dw-poi-row-add" data-poi-add="${poi.id}"` + (added ? ' disabled title="Waypoint added">✓' : ' title="Add as waypoint">+') + `</button></li>`;
+        return esc`<li class="dw-poi-row" data-poi-row="${poi.id}">` + `<span class="dw-poi-dot" style="background:${cat.color}"></span>` + esc`<span class="dw-poi-name" title="${poiTypeLabel(poi)}">${poi.name || poiTypeLabel(poi)}</span>` + esc`<span class="dw-poi-km">${formatRouteDistance(poi.along, metric)}</span>` + esc`<button type="button" class="dw-poi-row-add" data-poi-add="${poi.id}"` + (added ? ' disabled title="Waypoint added">✓' : ' title="Add as waypoint">+') + `</button></li>`;
       }).join("");
       const more = visible.length > LIST_LIMIT ? `<li class="dw-poi-more">+${visible.length - LIST_LIMIT} more on the map</li>` : "";
       const radiusOptions = POI_RADIUS_OPTIONS.map((r) => `<option value="${r}"${r === this._prefs.radius ? " selected" : ""}>${_escHtml(formatOffset(r, metric))}</option>`).join("");
@@ -12945,18 +12450,8 @@
       const oldList = el.querySelector(".dw-poi-list");
       const scrollTop = oldList && !this._scrollReset ? oldList.scrollTop : 0;
       this._scrollReset = false;
-      const timed = this._state === "active" && this._timing && this._timing.model;
-      const html = `<div class="dw-poi-hd"><b>POIs along route</b><span class="dw-poi-hd-btns"><button type="button" data-poi-act="collapse" title="${collapsed ? "Expand" : "Collapse"}">${collapsed ? "+" : "–"}</button><button type="button" data-poi-act="close" title="Close and clear POIs">×</button></span></div><div class="dw-poi-body">` + esc`<div class="dw-poi-status${this._status.error ? " dw-poi-status--error" : ""}">${this._status.text}</div>` + this._gapHtml() + this._timingHtml() + `<div class="dw-poi-opts"><label>Within <select data-poi-radius>${radiusOptions}</select></label><button type="button" data-poi-act="refresh"${this._state === "loading" ? " disabled" : ""}>Search again</button></div>` + (chips ? `<div class="dw-poi-chips">${chips}</div>` : "") + (rows ? `<ol class="dw-poi-list">${rows}${more}</ol>` : "") + (visible.length ? `<div class="dw-poi-ft"><button type="button" data-poi-act="add-all">Add shown as waypoints</button></div>` : "") + `<div class="dw-poi-attr">POI data © <a href="https://openmaptiles.org/" target="_blank" rel="noreferrer">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors, via <a href="https://openfreemap.org/" target="_blank" rel="noreferrer">OpenFreeMap</a>` + (timed ? ` · Weather <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Open-Meteo.com</a> (CC BY 4.0) · Elevation <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank" rel="noreferrer">AWS Terrain Tiles</a>` : "") + `</div></div>`;
-      const active = typeof document !== "undefined" ? document.activeElement : null;
-      const keep = active && el.contains(active) ? active.closest(".dw-poi-timing-form") : null;
-      let swapped = false;
-      if (keep) {
-        const fresh = document.createElement("div");
-        fresh.innerHTML = html;
-        const slot = fresh.querySelector(".dw-poi-timing-form");
-        swapped = !!slot && replaceAround(el, fresh, keep, slot);
-      }
-      if (!swapped) el.innerHTML = html;
+      const nameOptions = NAME_MODES.map((m) => `<option value="${m.id}"${m.id === this._prefs.nameMode ? " selected" : ""}>${_escHtml(m.label)}</option>`).join("");
+      el.innerHTML = `<div class="dw-poi-hd"><b>POIs along route</b><span class="dw-poi-hd-btns"><button type="button" data-poi-act="collapse" title="${collapsed ? "Expand" : "Collapse"}">${collapsed ? "+" : "–"}</button><button type="button" data-poi-act="close" title="Close and clear POIs">×</button></span></div><div class="dw-poi-body">` + esc`<div class="dw-poi-status${this._status.error ? " dw-poi-status--error" : ""}">${this._status.text}</div>` + this._gapHtml() + `<div class="dw-poi-opts"><label>Within <select data-poi-radius>${radiusOptions}</select></label><button type="button" data-poi-act="refresh"${this._state === "loading" ? " disabled" : ""}>Search again</button></div><div class="dw-poi-opts"><label title="Waypoint names are all that reach the watch">Waypoint names <select data-poi-names>${nameOptions}</select></label></div>` + (chips ? `<div class="dw-poi-chips">${chips}</div>` : "") + (rows ? `<ol class="dw-poi-list">${rows}${more}</ol>` : "") + (visible.length ? `<div class="dw-poi-ft"><button type="button" data-poi-act="add-all">Add shown as waypoints</button></div>` : "") + `<div class="dw-poi-attr">POI data © <a href="https://openmaptiles.org/" target="_blank" rel="noreferrer">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors, via <a href="https://openfreemap.org/" target="_blank" rel="noreferrer">OpenFreeMap</a>` + (this._state === "active" && this._hasElevation ? ` · Elevation <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank" rel="noreferrer">AWS Terrain Tiles</a>` : "") + `</div></div>`;
       const list = el.querySelector(".dw-poi-list");
       if (list && scrollTop) list.scrollTop = scrollTop;
     }
@@ -12972,11 +12467,7 @@
         if (action === "close") this.clear();
         else if (action === "refresh") this.search();
         else if (action === "add-all") this._addAll();
-        else if (action === "timing-toggle") {
-          this._prefs.timingOpen = !this._prefs.timingOpen;
-          this._savePrefs();
-          this._renderPanel();
-        } else if (action === "collapse") {
+        else if (action === "collapse") {
           this._panel.classList.toggle("dw-poi-panel--collapsed");
           this._renderPanel();
         }
@@ -14490,19 +13981,6 @@
         ".dw-poi-gap-sub .dw-poi-gap { color: #37474f; font-size: 11px; }",
         ".dw-poi-gap-warn { color: #9a3412; }",
         ".dw-poi-gap-warn .fa-tint { color: #c2410c; }",
-        ".dw-poi-gap-time { color: #37474f; font-size: 11px; }",
-        ".dw-poi-timing { display: flex; flex-direction: column; gap: 4px; padding: 4px 6px; border-radius: 4px; background: #f5f6f8; }",
-        ".dw-poi-timing-hd { display: flex; align-items: center; gap: 5px; border: 0; padding: 0; background: none; cursor: pointer; font: inherit; font-weight: 600; color: #374151; text-align: left; }",
-        ".dw-poi-timing-hd span { margin-left: auto; color: #6b7280; }",
-        ".dw-poi-timing-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 11px; }",
-        ".dw-poi-timing-form input, .dw-poi-timing-form select { font-size: 11px; padding: 1px 3px; }",
-        ".dw-poi-timing-form input[data-poi-pace] { width: 3.6em; text-align: center; }",
-        ".dw-poi-timing-out { display: flex; flex-direction: column; gap: 2px; }",
-        ".dw-poi-timing-out > div { padding-left: 16px; text-indent: -16px; }",
-        ".dw-poi-timing-out .fa { width: 12px; margin-right: 4px; text-align: center; text-indent: 0; color: #6b7280; }",
-        ".dw-poi-warn { color: #9a3412; }",
-        ".dw-poi-timing-out .dw-poi-warn .fa { color: #c2410c; }",
-        ".dw-poi-wx-note { color: #6b7280; }",
         ".dw-poi-opts { display: flex; align-items: center; justify-content: space-between; gap: 6px; }",
         ".dw-poi-opts select, .dw-poi-opts button, .dw-poi-ft button { font-size: 11px; }",
         ".dw-poi-chips { display: flex; flex-wrap: wrap; gap: 4px; }",

@@ -153,7 +153,7 @@ The **signpost** button in the planner toolbar (beside 3D) finds useful stops al
 
 It also finds **course points** on the route itself, so your watch's Up Ahead list shows what's coming:
 
-- **Climbs** and **climb tops**: rises of at least 40 m averaging 3% or more, from the elevation profile. A climb ends where the route levels out or drops more than about 12 m. A climb is named like `Climb 171m 3.7k` and its top `Top 171m climb`. The popup gives the average and steepest gradient and the estimated time to the top. On watches without ClimbPro, such as the Instinct 3, this gives you a climb list in Up Ahead.
+- **Climbs** and **climb tops**: rises of at least 40 m averaging 3% or more, from [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) elevation data (about 35 m resolution). A climb ends where the route levels out or drops more than about 12 m. A climb is named like `Climb 171m 3.7k` and its top `Top 171m climb`. The popup gives the average and steepest gradient. On watches without ClimbPro, such as the Instinct 3, this gives you a climb list in Up Ahead.
 - **Creek crossings**, named where the map names the creek
 - **Track sections**: where the route moves onto a differently named track or road, such as `Turpentine Track`
 
@@ -163,21 +163,13 @@ Up Ahead shows only the next few entries, so **Add shown as waypoints** adds one
 
 Above the list, the panel shows the **longest stretch without drinking water**, measured along the route from the start to the finish (or "No drinking water within 100 m of the route"). If cafés and shops shorten it noticeably, a second line gives that figure too. Click either line to highlight that stretch on the map.
 
-**Timing & conditions** estimates when you'll reach each point. Enter your start time and flat pace (per km or per mile, following your dynamic.watch units). Climbs and descents are costed from [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) elevation data (about 35 m resolution), using the energy cost of running uphill (Minetti et al.) and a modest boost on gentle descents. The panel shows:
-
-- the estimated finish and moving time, with total climb and descent
-- any stretch you'll cover in the dark (between sunset and sunrise)
-- the forecast along the route at your expected arrival times, from [Open-Meteo](https://open-meteo.com/): temperature range, the hottest feels-like temperature, rain chance, gusts, UV and thunderstorm warnings
-
-List rows and popups show each POI's arrival time. The water line adds how long the stretch without water takes, with a rough drinking guide of 0.4–0.8 L an hour, more in heat. Forecasts reach 16 days ahead, and the estimate is moving time only, without stops.
-
-**Waypoint names** sets what POI waypoints are called: the name alone (the default), distance and name (`4.2k Kiosk`), or distance, arrival time and name (`4.2k 07:25 Kiosk`). dynamic.watch sends only a waypoint's position and name to the watch, within its name limit (16 characters on most accounts), so this is how distance or timing reaches the watch. Waypoints you've already added keep their names. When a name wouldn't otherwise fit, common words are shortened (Creek → Ck, Track → Trk, Road → Rd), and climbs drop to `Climb 171m` or `+171m`.
+**Waypoint names** sets what POI waypoints are called: the name alone (the default) or distance and name (`4.2k Kiosk`). dynamic.watch sends only a waypoint's position and name to the watch, within its name limit (16 characters on most accounts). Waypoints you've already added keep their names. When a name wouldn't otherwise fit, common words are shortened (Creek → Ck, Track → Trk, Road → Rd), and climbs drop to `Climb 171m` or `+171m`.
 
 While the POIs are shown, they follow your edits: add, drag or delete route points and the list and pins update a couple of seconds after the route settles. **Search again** re-runs it at any time.
 
 Click a pin or list entry for details, then **Add as waypoint** (or **Add shown as waypoints**) to add it to the plan as a named waypoint — dynamic.watch sends waypoints to your watch once you **save** the route, and Undo removes them. Press the button again to clear the POIs. Pins work in 3D Mode too.
 
-POI data comes from OpenStreetMap via [OpenFreeMap](https://openfreemap.org/)'s keyless vector tiles, so coverage is only as good as local OSM mapping; very long routes (roughly 300 km or more) need splitting. Weather data is by [Open-Meteo.com](https://open-meteo.com/) (CC BY 4.0).
+POI data comes from OpenStreetMap via [OpenFreeMap](https://openfreemap.org/)'s keyless vector tiles, so coverage is only as good as local OSM mapping; very long routes (roughly 300 km or more) need splitting.
 
 ### Google Maps from any click
 
@@ -309,13 +301,18 @@ bash tests/run.sh --ci   # plain text output
 [GitHub Actions](.github/workflows/tests.yml) runs the bundle check and the offline suite on every push to `main` and every pull request. The live endpoint checks can be started by hand from the Actions tab (**Run workflow** → tick *live*); browser checks that need a dynamic.watch login skip there.
 
 - **`unit.mjs`** (116 tests, no network) — pure helpers: tile geometry, MVT/protobuf decode, Cadastre formatters, historical-map URLs, OnTheHouse URL builders, INTVL date utilities, layer-provider factories, and layer-group registration. Loaded into a sandboxed `vm.createContext` via [`_loader.mjs`](tests/_loader.mjs) so the production code itself is what gets exercised.
-- **Source-level regressions** (`polling-data-layer.mjs`, `viewport-layers.mjs`, `route-pois.mjs`, `route-timing.mjs`, `route-features.mjs`, `userscript-menu.mjs`, `release-scripts.mjs`, `vexcel-*.mjs`, `lightpoll-token.mjs`; no network) — async overlay freshness/retries, route-POI geometry and waypoints, course points (creek crossings, track sections and climb detection), arrival times (pace model, sunrise/sunset against reference times, elevation and forecast handling with stubbed fetches), the userscript menu and its redaction, the version-bump and release-notes scripts, and the Vexcel capture CLI with mocked services. `check-secrets.mjs` checks shipped source and bundle for embedded credentials.
+- **Source-level regressions** (`polling-data-layer.mjs`, `viewport-layers.mjs`, `route-pois.mjs`, `route-profile.mjs`, `route-features.mjs`, `userscript-menu.mjs`, `release-scripts.mjs`, `vexcel-*.mjs`, `lightpoll-token.mjs`; no network) — async overlay freshness/retries, route-POI geometry and waypoints, course points (creek crossings, track sections and climb detection), the elevation profile (Terrarium decoding and fetching with stubbed requests), the userscript menu and its redaction, the version-bump and release-notes scripts, and the Vexcel capture CLI with mocked services. `check-secrets.mjs` checks shipped source and bundle for embedded credentials.
 - **`smoke.sh`** (34 tests + 7 skips, ~15 s) — HTTP probe every public layer endpoint over Brisbane CBD: HTTP 200 + content-type + minimum body size. Mapbox Terrain-DEM is skipped unless `MAPBOX_TOKEN` is set.
 - **`shape.mjs`** (42 tests + 2 skips, ~15 s) — deep structural validation: PNG/JPEG magic-byte sniff, PBF decoded via the userscript's own `mvtDecode`, JSON field walks asserting every field the script reads. Also runs the full QLD CSRF token bootstrap, Apple DuckDuckGo → bootstrap chain, and the Esri Wayback catalog → release → tile pipeline end-to-end. Mapbox terrain probes are opt-in via `MAPBOX_TOKEN`.
 - **`e2e/run-3d-asserts.mjs`** (8 tests, ~60 s) — Playwright-driven assertions on a real Chromium against a saved plan. Covers 3D enable, marker reprojection under rotation, waypoint drag, the rapid-toggle stress path, heatmap persistence, overlay-above-base layer order, and the 3D → 2D → 3D cycle. Needs `npm install` + `npm run e2e:install` + `npm run e2e:auth` once; see [`tests/e2e/README.md`](tests/e2e/README.md).
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
-- **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance-and-time names), climbs, creek crossings and track sections on the route, the timing section (finish time with climbing, daylight, live forecast, pace changes), and that no click or keystroke leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
+- **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, list clicks opening popups beside the panel, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.17.0
+
+- Removed **Timing & conditions** from the POI panel (start time, pace, finish estimate, daylight and forecast), along with arrival times in the list and the distance-and-time waypoint names. None of it reached the watch except as fixed text in names, and a watch's Virtual Partner can pace you live instead. Waypoint names keep the distance option.
+- The script no longer contacts Open-Meteo.
 
 ### Release notes — 7.16.0
 

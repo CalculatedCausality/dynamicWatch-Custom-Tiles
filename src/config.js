@@ -373,12 +373,10 @@ export const CFG = {
 	ROUTE_POI_MAX_TILES: 400,
 	ROUTE_POI_PREFS_KEY: "dw_route_poi_prefs",
 
-	// Arrival-time estimates: AWS Terrain Tiles (Terrarium PNG, keyless) for
-	// elevation, and Open-Meteo (keyless, CC BY 4.0) for the forecast.
+	// Route elevation profile (climbs): AWS Terrain Tiles, Terrarium PNG, keyless.
 	ROUTE_ELEVATION_TILE: "https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png",
 	ROUTE_ELEVATION_ZOOM: 12,
 	ROUTE_ELEVATION_MAX_TILES: 80,
-	OPEN_METEO_FORECAST: "https://api.open-meteo.com/v1/forecast",
 };
 
 export const BLANK_TILE =

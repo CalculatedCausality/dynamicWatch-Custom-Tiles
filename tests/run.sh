@@ -75,7 +75,7 @@ if [ "$MODE" != live ]; then
 		"$HERE/vexcel-capture.mjs" "$HERE/vexcel-tile-batch.mjs" \
 		"$HERE/vexcel-http.mjs" "$HERE/vexcel-protocol-report.mjs" \
 		"$HERE/vexcel-cache.mjs" "$HERE/vexcel-csv.mjs" "$HERE/lightpoll-token.mjs" \
-		"$HERE/route-pois.mjs" "$HERE/route-timing.mjs" "$HERE/route-features.mjs" \
+		"$HERE/route-pois.mjs" "$HERE/route-profile.mjs" "$HERE/route-features.mjs" \
 		"$HERE/userscript-menu.mjs" \
 		"$HERE/release-scripts.mjs"
 	REGRESSION_RC=$RUN_RC

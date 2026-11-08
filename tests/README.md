@@ -35,7 +35,7 @@ remote outages. Each runner exits with the sum of component exit codes
 
 ```bash
 node tests/unit.mjs
-node --test tests/polling-data-layer.mjs tests/viewport-layers.mjs tests/vexcel-capture.mjs tests/vexcel-tile-batch.mjs tests/vexcel-http.mjs tests/vexcel-protocol-report.mjs tests/vexcel-cache.mjs tests/vexcel-csv.mjs tests/lightpoll-token.mjs tests/route-pois.mjs tests/route-timing.mjs tests/route-features.mjs tests/userscript-menu.mjs tests/release-scripts.mjs
+node --test tests/polling-data-layer.mjs tests/viewport-layers.mjs tests/vexcel-capture.mjs tests/vexcel-tile-batch.mjs tests/vexcel-http.mjs tests/vexcel-protocol-report.mjs tests/vexcel-cache.mjs tests/vexcel-csv.mjs tests/lightpoll-token.mjs tests/route-pois.mjs tests/route-profile.mjs tests/route-features.mjs tests/userscript-menu.mjs tests/release-scripts.mjs
 node tests/check-secrets.mjs
 node tests/e2e/verify-vexcel-report.mjs
 bash tests/smoke.sh        # live endpoint liveness
@@ -76,11 +76,9 @@ credentials; `lightpoll-token.mjs` checks public WMS URL construction.
 `route-pois.mjs` covers route-corridor geometry (distance along the route,
 out-and-back passes, tile coverage, slicing a stretch), vector-tile POI
 decoding, filtering, tile retries/caching, water and resupply gaps, following
-route edits, and adding POIs as planner waypoints. `route-timing.mjs` covers
-the arrival-time model (resampling, grade factors, time/distance lookups),
-sunrise/sunset against Open-Meteo reference times, dark stretches, Terrarium
-elevation decoding and fetching, forecast requests and summaries with stubbed
-fetches, waypoint name modes and keeping a focused input across re-renders.
+route edits, and adding POIs as planner waypoints. `route-profile.mjs` covers
+resampling the route, smoothing elevations, Terrarium elevation decoding and
+fetching with stubbed requests, and the waypoint name modes.
 `route-features.mjs` covers course points: creek crossings (tile duplicates,
 creeks the route wanders along, repeat passes), named track sections (junction
 side roads, unmapped gaps, returning names), ClimbPro-style climb detection

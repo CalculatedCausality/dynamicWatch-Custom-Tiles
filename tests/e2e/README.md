@@ -94,20 +94,18 @@ HEADED=1 npm run e2e:route-pois            # watch it
 PLAN=/plan/<id> npm run e2e:route-pois     # another saved route (default /plan/2344645)
 ```
 
-Requires `.auth/storage.json` and network access to `tiles.openfreemap.org`,
-`elevation-tiles-prod.s3.amazonaws.com` and `api.open-meteo.com`.
+Requires `.auth/storage.json` and network access to `tiles.openfreemap.org` and
+`elevation-tiles-prod.s3.amazonaws.com`.
 Presses the planner-toolbar POI button on a saved route and checks that POIs
 are listed in route order and pinned on the map, a category chip hides and
 restores its pins, a real click on a pin opens its popup, panel and pin clicks
 never add route points, **Add as waypoint** creates a named planner waypoint
 that the site's Undo removes, and pressing the button again clears everything.
 Climbs (each with a top), creek crossings and named track sections must be
-found on the route, and a climb's popup must show its gradient and time to the
-top. The timing section must show a finish time with climbing from elevation data,
-daylight and the live forecast; the water line and list rows must show times; a
-faster pace must scale the estimate while the pace field keeps focus, without
-moving the map; and the distance-and-time name mode must produce names such as
-`4.2k 07:25 Kiosk`.
+found on the route, a climb's popup must show its gradient and where it ends,
+the list must keep room for several rows, a list click must open its popup
+beside the panel, and the distance name mode must produce names such as
+`4.2k Kiosk`.
 It then appends a temporary stretch along the Mooloolaba esplanade and checks
 the POIs update by themselves, the longest stretch without water is reported
 and highlighted, and removing the stretch restores the original results. The
