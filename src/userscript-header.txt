@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.12.0
-// @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, and 3D terrain.
+// @version      7.13.0
+// @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
 // @match        https://embed.waze.com/*
@@ -41,6 +41,7 @@
 // @connect      spatial.infrastructure.gov.au
 // @connect      tiles.openseamap.org
 // @connect      www.lightpollutionmap.info
+// @connect      tiles.openfreemap.org
 // @connect      www.onthehouse.com.au
 // @connect      d1yalngj9nsyl4.cloudfront.net
 // @connect      www.geocaching.com

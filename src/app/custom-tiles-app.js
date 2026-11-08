@@ -55,6 +55,7 @@ import {
 } from "../providers/openinframap.js";
 import { createQldEnvironmentProviders } from "../providers/qld-environment.js";
 import { createQldMiningProviders } from "../providers/qld-mining.js";
+import { RoutePoiController } from "../providers/route-pois.js";
 import {
 	HistoricalMapsIndexProvider,
 	fetchHistMapSheets,
@@ -310,6 +311,8 @@ export class CustomTilesApp {
 
 			this._mode3DController = new Mode3DController(this);
 			Mode3DButton.attach(map, this._mode3DController);
+			this._routePois = new RoutePoiController(map);
+			this._routePois.attachButton();
 
 			if (!map.getPane("dwRoadsPane")) {
 				map.createPane("dwRoadsPane");
@@ -1109,6 +1112,45 @@ export class CustomTilesApp {
 			// Bootstrap 3 does for pressed buttons.
 			".dw-3d-btn { padding: 5px 8px; }",
 			".dw-3d-btn.active { background: #e0e0e0; border-color: #999; box-shadow: inset 0 3px 5px rgba(0,0,0,.125); }",
+			// POIs along the route: toolbar button, map pins and results panel.
+			".dw-poi-btn { padding: 5px 8px; }",
+			".dw-poi-btn.active { background: #e0e0e0; border-color: #999; box-shadow: inset 0 3px 5px rgba(0,0,0,.125); }",
+			".dw-poi-icon { background: none; border: 0; }",
+			".dw-poi-pin { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; box-sizing: border-box; border: 2px solid #fff; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); color: #fff; font: 700 9px/1 sans-serif; box-shadow: -1px 1px 4px rgba(0,0,0,.45); }",
+			".dw-poi-pin > * { transform: rotate(45deg); }",
+			".dw-poi-pin .fa { font-size: 11px; }",
+			".dw-poi-icon--added .dw-poi-pin { opacity: .55; border-color: #1565c0; }",
+			".dw-poi-tip { font-size: 11px; }",
+			".dw-poi-pop { font-size: 12px; line-height: 1.45; min-width: 170px; }",
+			".dw-poi-pop-sub { color: #6b7280; }",
+			".dw-poi-pop-actions { display: flex; align-items: center; gap: 10px; margin-top: 6px; }",
+			".dw-poi-add-btn { padding: 2px 8px; border: 1px solid #1565c0; border-radius: 4px; background: #1e88e5; color: #fff; cursor: pointer; font-size: 11px; }",
+			".dw-poi-add-btn:disabled { background: #e3f2fd; color: #1565c0; cursor: default; }",
+			".dw-poi-panel { position: absolute; left: 12px; top: 90px; z-index: 1150; width: min(300px, calc(100% - 24px)); max-height: min(60vh, 520px); display: flex; flex-direction: column; background: rgba(255,255,255,.97); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,.35); font: 12px/1.4 sans-serif; color: #222; }",
+			".dw-poi-hd { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 4px 10px; border-bottom: 1px solid #e5e5e5; }",
+			".dw-poi-hd-btns button { border: 0; background: none; font-size: 16px; line-height: 1; padding: 0 4px; cursor: pointer; color: #555; }",
+			".dw-poi-hd-btns button:hover { color: #000; }",
+			".dw-poi-body { display: flex; flex-direction: column; gap: 6px; padding: 6px 10px 8px; overflow: hidden; min-height: 0; }",
+			".dw-poi-panel--collapsed .dw-poi-body { display: none; }",
+			".dw-poi-status { color: #374151; }",
+			".dw-poi-status--error { color: #b91c1c; }",
+			".dw-poi-opts { display: flex; align-items: center; justify-content: space-between; gap: 6px; }",
+			".dw-poi-opts select, .dw-poi-opts button, .dw-poi-ft button { font-size: 11px; }",
+			".dw-poi-chips { display: flex; flex-wrap: wrap; gap: 4px; }",
+			".dw-poi-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border: 1px solid #bbb; border-radius: 10px; background: #fff; cursor: pointer; font-size: 11px; }",
+			".dw-poi-chip--off { opacity: .45; text-decoration: line-through; }",
+			".dw-poi-count { color: #6b7280; }",
+			".dw-poi-dot { display: inline-block; flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; }",
+			".dw-poi-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; min-height: 0; flex: 1 1 auto; border-top: 1px solid #eee; }",
+			".dw-poi-row { display: flex; align-items: center; gap: 6px; padding: 3px 2px; border-bottom: 1px solid #f2f2f2; cursor: pointer; }",
+			".dw-poi-row:hover { background: #f5f8ff; }",
+			".dw-poi-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+			".dw-poi-km { flex: 0 0 auto; color: #6b7280; font-variant-numeric: tabular-nums; }",
+			".dw-poi-row-add { flex: 0 0 auto; width: 20px; height: 20px; padding: 0; border: 1px solid #90caf9; border-radius: 4px; background: #fff; color: #1565c0; cursor: pointer; line-height: 1; }",
+			".dw-poi-row-add:disabled { border-color: #ddd; color: #2e7d32; cursor: default; }",
+			".dw-poi-more { padding: 4px 2px; color: #6b7280; }",
+			".dw-poi-attr { font-size: 9.5px; color: #888; }",
+			".dw-poi-attr a { color: #888; }",
 			".dw-flight-icon { background: none !important; border: none !important; }",
 			".dw-flight-tip { font-size: 11px; line-height: 1.4; }",
 			// Geocache icon — overflow:visible so the favourites-points

@@ -74,7 +74,8 @@ if [ "$MODE" != live ]; then
 		"$HERE/polling-data-layer.mjs" "$HERE/viewport-layers.mjs" \
 		"$HERE/vexcel-capture.mjs" "$HERE/vexcel-tile-batch.mjs" \
 		"$HERE/vexcel-http.mjs" "$HERE/vexcel-protocol-report.mjs" \
-		"$HERE/vexcel-cache.mjs" "$HERE/vexcel-csv.mjs" "$HERE/lightpoll-token.mjs"
+		"$HERE/vexcel-cache.mjs" "$HERE/vexcel-csv.mjs" "$HERE/lightpoll-token.mjs" \
+		"$HERE/route-pois.mjs"
 	REGRESSION_RC=$RUN_RC
 
 	run_suite "secret and repository hygiene checks (no network)" node "$HERE/check-secrets.mjs"
@@ -100,23 +101,27 @@ if [ "$MODE" != offline ]; then
 	run_suite "shape tests (live structural validation)" node "$HERE/shape.mjs" "${CI_ARGS[@]}"
 	SHAPE_RC=$RUN_RC
 
-	section "auth-dependent 3D and normal-CORS raster browser checks"
+	section "auth-dependent 3D, normal-CORS raster and route-POI browser checks"
 	if [ ! -f "$REPO/.auth/storage.json" ]; then
 		echo 'SKIP — no auth state at .auth/storage.json (`npm run e2e:auth`)'
 		THREED_RC=0
 		RASTER_RC=0
+		POIS_RC=0
 	elif ! playwright_available; then
 		echo 'SKIP — Playwright or Chromium unavailable (`npm install && npm run e2e:install`)'
 		THREED_RC=0
 		RASTER_RC=0
+		POIS_RC=0
 	else
 		# The repo-relative paths avoid MSYS conversion of Windows-native Node paths.
 		run_browser tests/e2e/run-3d-asserts.mjs
 		THREED_RC=$RUN_RC
 		run_browser tests/e2e/verify-raster-security.mjs
 		RASTER_RC=$RUN_RC
+		run_browser tests/e2e/verify-route-pois.mjs
+		POIS_RC=$RUN_RC
 	fi
-	section "live: smoke=${SMOKE_RC} shape=${SHAPE_RC} 3d=${THREED_RC} raster=${RASTER_RC}"
+	section "live: smoke=${SMOKE_RC} shape=${SHAPE_RC} 3d=${THREED_RC} raster=${RASTER_RC} route-pois=${POIS_RC}"
 fi
 
 echo "# overall exit-code sum: ${TOTAL_RC}"

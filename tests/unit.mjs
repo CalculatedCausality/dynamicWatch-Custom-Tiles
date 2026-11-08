@@ -1548,6 +1548,7 @@ t("@connect covers every host the providers GM-fetch from", () => {
 		"lsa4.geohub.sa.gov.au",            // SA parcel + suburb identify
 		"services1.arcgis.com",             // ACT block identify
 		"gis.environment.gov.au",           // national cadastre (WA/NT identify)
+		"tiles.openfreemap.org",            // POIs along route (vector tiles)
 	];
 	for (const host of required) {
 		assert(declared.has(host), `@connect missing for GM-fetched host: ${host}`);

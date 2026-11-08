@@ -21,6 +21,8 @@
     "e2e:geocaches:headed": "HEADED=1 node tests/e2e/verify-geocaches.mjs",
     "e2e:raster-security": "node tests/e2e/verify-raster-security.mjs",
     "e2e:vexcel-report": "node tests/e2e/verify-vexcel-report.mjs",
+    "e2e:route-pois": "npm run build && node tests/e2e/verify-route-pois.mjs",
+    "e2e:route-pois:headed": "npm run build && HEADED=1 node tests/e2e/verify-route-pois.mjs",
     "e2e:diag-layers": "node tests/e2e/diag-layers.mjs",
     "e2e:diag-layers:headed": "HEADED=1 node tests/e2e/diag-layers.mjs",
     "e2e:stamen-3d": "node tests/e2e/verify-stamen-3d.mjs",

@@ -145,6 +145,14 @@ A few layers show inline tooltips on hover:
 - **Historic Mining Leases** — permit number, type, status, minerals, and holder
 - **INTVL Global Map** — territory size, the owner's colour swatch, and the precise recording time decoded from the activity's cuid
 
+### POIs along your route
+
+The **signpost** button in the planner toolbar (beside 3D) finds useful stops along the route you've drawn and pins them on the map: drinking water, toilets, cafés and food, shops and fuel, viewpoints and peaks, shelters and campsites, pharmacies and hospitals, and bike shops or repair stands. A panel lists them in route order with their distance along the route (both passes on an out-and-back), and category chips show or hide each type. Choose a 50–500 m corridor; your choice and hidden categories are remembered.
+
+Click a pin or list entry for details, then **Add as waypoint** (or **Add shown as waypoints**) to add it to the plan as a named waypoint — dynamic.watch sends waypoints to your watch once you **save** the route, and Undo removes them. Press the button again to clear the POIs. Pins work in 3D Mode too.
+
+POI data comes from OpenStreetMap via [OpenFreeMap](https://openfreemap.org/)'s keyless vector tiles, so coverage is only as good as local OSM mapping; very long routes (roughly 300 km or more) need splitting.
+
 ### Google Maps from any click
 
 Right-clicking the map (or placing a waypoint) shows a popup with the usual dynamicWatch actions. The script adds a **Google Maps** button to the same row; it opens a pin at that coordinate in a new tab. From there, use Google Maps' pegman to enter Street View where available.
@@ -256,12 +264,17 @@ bash tests/run.sh --ci   # plain text output
 ```
 
 - **`unit.mjs`** (115 tests, no network) — pure helpers: tile geometry, MVT/protobuf decode, Cadastre formatters, historical-map URLs, OnTheHouse URL builders, INTVL date utilities, layer-provider factories, and layer-group registration. Loaded into a sandboxed `vm.createContext` via [`_loader.mjs`](tests/_loader.mjs) so the production code itself is what gets exercised.
-- **Source-level regressions** (`polling-data-layer.mjs`, `viewport-layers.mjs`, `vexcel-capture.mjs`, `vexcel-tile-batch.mjs`, `vexcel-http.mjs`, `vexcel-protocol-report.mjs`; no network) — async overlay freshness/retries and the Vexcel capture CLI with mocked services. `check-secrets.mjs` checks shipped source and bundle for embedded credentials.
+- **Source-level regressions** (`polling-data-layer.mjs`, `viewport-layers.mjs`, `route-pois.mjs`, `vexcel-*.mjs`, `lightpoll-token.mjs`; no network) — async overlay freshness/retries, route-POI geometry and waypoints, and the Vexcel capture CLI with mocked services. `check-secrets.mjs` checks shipped source and bundle for embedded credentials.
 - **`smoke.sh`** (34 tests + 7 skips, ~15 s) — HTTP probe every public layer endpoint over Brisbane CBD: HTTP 200 + content-type + minimum body size. Mapbox Terrain-DEM is skipped unless `MAPBOX_TOKEN` is set.
 - **`shape.mjs`** (42 tests + 2 skips, ~15 s) — deep structural validation: PNG/JPEG magic-byte sniff, PBF decoded via the userscript's own `mvtDecode`, JSON field walks asserting every field the script reads. Also runs the full QLD CSRF token bootstrap, Apple DuckDuckGo → bootstrap chain, and the Esri Wayback catalog → release → tile pipeline end-to-end. Mapbox terrain probes are opt-in via `MAPBOX_TOKEN`.
 - **`e2e/run-3d-asserts.mjs`** (8 tests, ~60 s) — Playwright-driven assertions on a real Chromium against a saved plan. Covers 3D enable, marker reprojection under rotation, waypoint drag, the rapid-toggle stress path, heatmap persistence, overlay-above-base layer order, and the 3D → 2D → 3D cycle. Needs `npm install` + `npm run e2e:install` + `npm run e2e:auth` once; see [`tests/e2e/README.md`](tests/e2e/README.md).
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
+- **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint, and that no click leaks through to add route points. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.13.0
+
+- New **POIs along your route** button in the planner toolbar: finds water, toilets, food, shops, views, shelter, medical and bike stops near the route, lists them by distance along it, and adds any of them to the plan as named waypoints.
 
 ### Release notes — 7.12.0
 

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.12.0
-// @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, and 3D terrain.
+// @version      7.13.0
+// @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @match        https://dynamic.watch/plan*
 // @match        https://embed.waze.com/*
@@ -41,6 +41,7 @@
 // @connect      spatial.infrastructure.gov.au
 // @connect      tiles.openseamap.org
 // @connect      www.lightpollutionmap.info
+// @connect      tiles.openfreemap.org
 // @connect      www.onthehouse.com.au
 // @connect      d1yalngj9nsyl4.cloudfront.net
 // @connect      www.geocaching.com
@@ -336,7 +337,14 @@
     // STYLES=WA = "World Atlas" colour ramp matching the official site.
     LIGHTPOL_WMS_BASE: "https://www.lightpollutionmap.info/tiles/wms",
     LIGHTPOL_WMS_LAYER: "PostGIS:SB_2025",
-    LIGHTPOL_WMS_STYLE: "WA"
+    LIGHTPOL_WMS_STYLE: "WA",
+    // "POIs along route" reads OpenFreeMap's keyless OpenMapTiles vector
+    // tiles. The TileJSON names the current planet build; z14 carries every
+    // POI. The tile cap bounds one search (~300 km of route at 100 m).
+    OPENFREEMAP_TILEJSON: "https://tiles.openfreemap.org/planet",
+    ROUTE_POI_TILE_ZOOM: 14,
+    ROUTE_POI_MAX_TILES: 400,
+    ROUTE_POI_PREFS_KEY: "dw_route_poi_prefs"
   };
   var BLANK_TILE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
   var DW_LAYER_GROUPS = [
@@ -4764,6 +4772,54 @@
     return query;
   }
 
+  // src/utils/route-model.js
+  function _dwGetRouteModel() {
+    try {
+      const pageWin4 = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+      const plan = pageWin4.leafletPlan;
+      if (!plan || !Array.isArray(plan.lines)) return { paths: [], markers: [] };
+      const paths = [], markers = [], seenMarkers = /* @__PURE__ */ new Set();
+      const addMarker = (marker, type) => {
+        if (!marker || seenMarkers.has(marker) || typeof marker.getLatLng !== "function") return;
+        const point = marker.getLatLng();
+        if (!point || !Number.isFinite(point.lat) || !Number.isFinite(point.lng)) return;
+        seenMarkers.add(marker);
+        markers.push({ marker, type, point: [point.lng, point.lat] });
+      };
+      for (const line of plan.lines) {
+        if (!Array.isArray(line)) continue;
+        for (let segmentIdx = 0; segmentIdx < line.length; segmentIdx++) {
+          const segment = line[segmentIdx];
+          addMarker(
+            segment && segment.marker_end,
+            segmentIdx === 0 ? "start" : segmentIdx === line.length - 1 ? "end" : "via"
+          );
+          const polyline = segment && segment.polyline;
+          if (!polyline || typeof polyline.getLatLngs !== "function") continue;
+          try {
+            const visit = (part) => {
+              if (!Array.isArray(part) || !part.length) return;
+              if (!part.some(Array.isArray)) {
+                const points = part.filter((point) => point && Number.isFinite(point.lat) && Number.isFinite(point.lng)).map((point) => [point.lng, point.lat]);
+                if (points.length > 1) paths.push({ points, polyline });
+                return;
+              }
+              for (const child of part) visit(child);
+            };
+            visit(polyline.getLatLngs());
+          } catch (_) {
+          }
+        }
+      }
+      for (const waypoint of Array.isArray(plan.waypoints) ? plan.waypoints : []) {
+        addMarker(waypoint && waypoint.marker, "waypoint");
+      }
+      return { paths, markers };
+    } catch (_) {
+      return { paths: [], markers: [] };
+    }
+  }
+
   // src/providers/vexcel.js
   function _vexcelTileTpl(token, session) {
     const base = CFG.VEXCEL_WMTS_BASE + "?service=wmts&request=getTile&layer=urban&Style=RGB&TileMatrixSet=urban&TileMatrix={z}&TileRow={y}&TileCol={x}&format=image/jpeg";
@@ -5013,52 +5069,6 @@
         }
       );
     });
-  }
-  function _dwGetRouteModel() {
-    try {
-      const pageWin4 = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-      const plan = pageWin4.leafletPlan;
-      if (!plan || !Array.isArray(plan.lines)) return { paths: [], markers: [] };
-      const paths = [], markers = [], seenMarkers = /* @__PURE__ */ new Set();
-      const addMarker = (marker, type) => {
-        if (!marker || seenMarkers.has(marker) || typeof marker.getLatLng !== "function") return;
-        const point = marker.getLatLng();
-        if (!point || !Number.isFinite(point.lat) || !Number.isFinite(point.lng)) return;
-        seenMarkers.add(marker);
-        markers.push({ marker, type, point: [point.lng, point.lat] });
-      };
-      for (const line of plan.lines) {
-        if (!Array.isArray(line)) continue;
-        for (let segmentIdx = 0; segmentIdx < line.length; segmentIdx++) {
-          const segment = line[segmentIdx];
-          addMarker(
-            segment && segment.marker_end,
-            segmentIdx === 0 ? "start" : segmentIdx === line.length - 1 ? "end" : "via"
-          );
-          const polyline = segment && segment.polyline;
-          if (!polyline || typeof polyline.getLatLngs !== "function") continue;
-          try {
-            const visit = (part) => {
-              if (!Array.isArray(part) || !part.length) return;
-              if (!part.some(Array.isArray)) {
-                const points = part.filter((point) => point && Number.isFinite(point.lat) && Number.isFinite(point.lng)).map((point) => [point.lng, point.lat]);
-                if (points.length > 1) paths.push({ points, polyline });
-                return;
-              }
-              for (const child of part) visit(child);
-            };
-            visit(polyline.getLatLngs());
-          } catch (_) {
-          }
-        }
-      }
-      for (const waypoint of Array.isArray(plan.waypoints) ? plan.waypoints : []) {
-        addMarker(waypoint && waypoint.marker, "waypoint");
-      }
-      return { paths, markers };
-    } catch (_) {
-      return { paths: [], markers: [] };
-    }
   }
   function createVexcelControl() {
     if (_vexCtl) return _vexCtl;
@@ -9461,7 +9471,7 @@
       const FETCH_MAX_Z = 13;
       const DEBOUNCE_MS = 500;
       const MAX_TILES = 64;
-      const TYPE_LABELS = {
+      const TYPE_LABELS2 = {
         2: "T",
         3: "M",
         8: "?",
@@ -9487,7 +9497,7 @@
       };
       const detailsCache = /* @__PURE__ */ new Map();
       const tileCache = /* @__PURE__ */ new Map();
-      const TILE_CACHE_MAX = 64;
+      const TILE_CACHE_MAX2 = 64;
       let subdomainIdx = 0;
       function nextSubdomain() {
         const list = CFG.GEOCACHING_TILE_SUBDOMAINS;
@@ -9532,7 +9542,7 @@
         });
       }
       function buildPinIcon(typeId, fill, opacity, favs) {
-        const label = TYPE_LABELS[typeId] || "G";
+        const label = TYPE_LABELS2[typeId] || "G";
         const favBadge = favs > 0 ? `<div style="position:absolute;top:-6px;right:-8px;background:#d33;color:#fff;font:bold 9px/1 sans-serif;padding:2px 4px;border-radius:8px;border:1px solid #fff;white-space:nowrap;box-shadow:0 0 2px rgba(0,0,0,.45);pointer-events:none;">♥${favs > 99 ? "99+" : favs}</div>` : "";
         const html = `<div style="position:relative;width:20px;height:20px;overflow:visible;cursor:pointer;"><div style="background:${fill};color:#fff;opacity:${opacity};width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font:bold 11px/1 sans-serif;border:1px solid #222;box-shadow:0 0 1px rgba(0,0,0,.6);">${label}</div>` + favBadge + `</div>`;
         return L.divIcon({
@@ -9688,7 +9698,7 @@
             if (myGen !== this._gen || !this._group) return;
             if (!err && data) {
               tileCache.set(key, data);
-              if (tileCache.size > TILE_CACHE_MAX) {
+              if (tileCache.size > TILE_CACHE_MAX2) {
                 const first = tileCache.keys().next().value;
                 tileCache.delete(first);
               }
@@ -9885,7 +9895,7 @@
           marker._dwData = Object.assign(marker._dwData || {}, {
             color: fill,
             disabled,
-            label: TYPE_LABELS[typeId] || "G",
+            label: TYPE_LABELS2[typeId] || "G",
             diff,
             terr,
             size,
@@ -10725,6 +10735,921 @@
     return { HistoricMinesLayerProvider: HistoricMinesLayerProvider2, MineShaftsLayerProvider: MineShaftsLayerProvider2, HistoricLeasesLayerProvider: HistoricLeasesLayerProvider2 };
   }
 
+  // src/ui/planner-toolbar.js
+  function mountPlannerButton({ id, className, title, iconClass, onClick, onMount }) {
+    const tryMount = () => {
+      const row = document.querySelector(".leaflet-planner-controls");
+      if (!row) return false;
+      if (row.querySelector("#" + id)) return true;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-default fixed-width " + className;
+      btn.id = id;
+      btn.title = title;
+      btn.setAttribute("aria-label", title);
+      btn.setAttribute("aria-pressed", "false");
+      const icon = document.createElement("i");
+      icon.className = "fa " + iconClass;
+      btn.appendChild(icon);
+      row.insertBefore(btn, row.querySelector(".distance"));
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        onClick(btn, e);
+      });
+      if (onMount) onMount(btn);
+      return true;
+    };
+    if (tryMount()) return;
+    const obs = new MutationObserver(() => {
+      if (!tryMount()) return;
+      obs.disconnect();
+      clearTimeout(timeoutId);
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+    const timeoutId = setTimeout(() => {
+      obs.disconnect();
+      if (document.getElementById(id)) return;
+      console.warn(`[CustomTiles] "${title}" button not injected after 15s — couldn't find \`.leaflet-planner-controls\`; dynamic.watch may have changed its planner toolbar.`);
+    }, 15e3);
+  }
+
+  // src/utils/route-geometry.js
+  var EARTH_R = 63710088e-1;
+  var RAD = Math.PI / 180;
+  var M_PER_DEG_LAT = EARTH_R * RAD;
+  var validPoint = (p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]);
+  function haversine(a, b) {
+    const dLat = (b[1] - a[1]) * RAD, dLng = (b[0] - a[0]) * RAD;
+    const s = Math.sin(dLat / 2) ** 2 + Math.cos(a[1] * RAD) * Math.cos(b[1] * RAD) * Math.sin(dLng / 2) ** 2;
+    return 2 * EARTH_R * Math.asin(Math.min(1, Math.sqrt(s)));
+  }
+  function routeParts(paths, joinMeters = 30) {
+    const parts = [];
+    let current = null;
+    for (const path of paths || []) {
+      const points = (path || []).filter(validPoint);
+      if (points.length < 2) continue;
+      const continues = current && haversine(current[current.length - 1], points[0]) <= joinMeters;
+      if (!continues) {
+        current = [];
+        parts.push(current);
+      }
+      for (const p of continues ? points.slice(1) : points) {
+        const last = current[current.length - 1];
+        if (!last || last[0] !== p[0] || last[1] !== p[1]) current.push([p[0], p[1]]);
+      }
+    }
+    return parts.filter((part) => part.length > 1);
+  }
+  function measureRoute(parts) {
+    let total = 0, latSum = 0, count = 0;
+    const measured = [];
+    for (const points of parts || []) {
+      const cum = [total];
+      for (let i = 1; i < points.length; i++) {
+        total += haversine(points[i - 1], points[i]);
+        cum.push(total);
+      }
+      for (const p of points) {
+        latSum += p[1];
+        count++;
+      }
+      measured.push({ points, cum });
+    }
+    return { parts: measured, total, lat0: count ? latSum / count : 0 };
+  }
+  function createRouteIndex(route, radius) {
+    const kx = M_PER_DEG_LAT * Math.cos(route.lat0 * RAD);
+    const ky = M_PER_DEG_LAT;
+    const cell = Math.max(radius * 2, 200);
+    const grid = /* @__PURE__ */ new Map();
+    const add = (key, seg) => {
+      const list = grid.get(key);
+      if (list) list.push(seg);
+      else grid.set(key, [seg]);
+    };
+    for (const { points, cum } of route.parts) {
+      for (let i = 1; i < points.length; i++) {
+        const seg = {
+          ax: points[i - 1][0] * kx,
+          ay: points[i - 1][1] * ky,
+          bx: points[i][0] * kx,
+          by: points[i][1] * ky,
+          along: cum[i - 1],
+          len: cum[i] - cum[i - 1]
+        };
+        const x0 = Math.floor((Math.min(seg.ax, seg.bx) - radius) / cell);
+        const x1 = Math.floor((Math.max(seg.ax, seg.bx) + radius) / cell);
+        const y0 = Math.floor((Math.min(seg.ay, seg.by) - radius) / cell);
+        const y1 = Math.floor((Math.max(seg.ay, seg.by) + radius) / cell);
+        for (let cx = x0; cx <= x1; cx++) {
+          for (let cy = y0; cy <= y1; cy++) add(cx + "," + cy, seg);
+        }
+      }
+    }
+    return { kx, ky, cell, grid, radius, total: route.total };
+  }
+  function routePasses(index, lng, lat) {
+    const px = lng * index.kx, py = lat * index.ky;
+    const segs = index.grid.get(Math.floor(px / index.cell) + "," + Math.floor(py / index.cell));
+    if (!segs) return [];
+    const hits = [];
+    for (const s of segs) {
+      const dx = s.bx - s.ax, dy = s.by - s.ay;
+      const len2 = dx * dx + dy * dy;
+      const t = len2 ? Math.max(0, Math.min(1, ((px - s.ax) * dx + (py - s.ay) * dy) / len2)) : 0;
+      const offset = Math.hypot(px - (s.ax + t * dx), py - (s.ay + t * dy));
+      if (offset <= index.radius) hits.push({ along: s.along + t * s.len, offset });
+    }
+    hits.sort((a, b) => a.along - b.along);
+    const gap = Math.max(index.radius * 4, 400);
+    const passes = [];
+    let group = null;
+    for (const hit of hits) {
+      if (!group || hit.along - group.last > gap) {
+        group = { best: hit, last: hit.along };
+        passes.push(group);
+      } else {
+        group.last = hit.along;
+        if (hit.offset < group.best.offset) group.best = hit;
+      }
+    }
+    return passes.map((g) => g.best);
+  }
+  function lngLatToTile(lng, lat, z) {
+    const n = 2 ** z;
+    const clampedLat = Math.max(-85.0511, Math.min(85.0511, lat)) * RAD;
+    const x = Math.floor((lng + 180) / 360 * n);
+    const y = Math.floor((1 - Math.log(Math.tan(clampedLat) + 1 / Math.cos(clampedLat)) / Math.PI) / 2 * n);
+    return [Math.max(0, Math.min(n - 1, x)), Math.max(0, Math.min(n - 1, y))];
+  }
+  function routeTiles(route, radius, z, step = 200) {
+    const tiles = /* @__PURE__ */ new Map();
+    const reach = radius + step;
+    const addBox = (p) => {
+      const dLat = reach / M_PER_DEG_LAT;
+      const dLng = dLat / Math.max(0.01, Math.cos(p[1] * RAD));
+      const [x0, y0] = lngLatToTile(p[0] - dLng, p[1] + dLat, z);
+      const [x1, y1] = lngLatToTile(p[0] + dLng, p[1] - dLat, z);
+      for (let x = x0; x <= x1; x++) {
+        for (let y = y0; y <= y1; y++) tiles.set(x + "/" + y, [x, y]);
+      }
+    };
+    for (const { points } of route.parts) {
+      addBox(points[0]);
+      for (let i = 1; i < points.length; i++) {
+        const a = points[i - 1], b = points[i];
+        const steps = Math.ceil(haversine(a, b) / step);
+        for (let k = 1; k <= steps; k++) {
+          const t = k / steps;
+          addBox([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+        }
+      }
+    }
+    return [...tiles.values()].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+  }
+
+  // src/providers/route-pois.js
+  var POI_CATEGORIES = [
+    {
+      id: "water",
+      label: "Water",
+      icon: "fa-tint",
+      color: "#1e88e5",
+      types: ["drinking_water", "water_point", "water_tap", "spring"]
+    },
+    {
+      id: "toilets",
+      label: "Toilets",
+      glyph: "WC",
+      color: "#5d4037",
+      types: ["toilets"]
+    },
+    {
+      id: "food",
+      label: "Food & drink",
+      icon: "fa-coffee",
+      color: "#ef6c00",
+      types: ["cafe", "restaurant", "fast_food", "pub", "bar", "biergarten", "ice_cream", "food_court"]
+    },
+    {
+      id: "shop",
+      label: "Shops & fuel",
+      icon: "fa-shopping-cart",
+      color: "#2e7d32",
+      types: ["supermarket", "convenience", "bakery", "greengrocer", "deli", "fuel"]
+    },
+    {
+      id: "views",
+      label: "Views & peaks",
+      icon: "fa-binoculars",
+      color: "#7b1fa2",
+      types: ["viewpoint", "peak", "volcano"]
+    },
+    {
+      id: "shelter",
+      label: "Shelter & camping",
+      icon: "fa-home",
+      color: "#455a64",
+      types: ["shelter", "alpine_hut", "wilderness_hut", "camp_site"]
+    },
+    {
+      id: "medical",
+      label: "Medical",
+      icon: "fa-medkit",
+      color: "#c62828",
+      types: ["pharmacy", "hospital", "defibrillator"]
+    },
+    {
+      id: "bike",
+      label: "Bike",
+      icon: "fa-wrench",
+      color: "#00838f",
+      types: ["bicycle_repair_station", "bicycle"]
+    }
+  ];
+  var CATEGORY = Object.fromEntries(POI_CATEGORIES.map((c) => [c.id, c]));
+  var CATEGORY_BY_TYPE = new Map(
+    POI_CATEGORIES.flatMap((c) => c.types.map((type) => [type, c.id]))
+  );
+  var TYPE_LABELS = {
+    drinking_water: "Drinking water",
+    water_point: "Water point",
+    water_tap: "Water tap",
+    spring: "Spring",
+    toilets: "Toilets",
+    cafe: "Café",
+    restaurant: "Restaurant",
+    fast_food: "Fast food",
+    pub: "Pub",
+    bar: "Bar",
+    biergarten: "Beer garden",
+    ice_cream: "Ice cream",
+    food_court: "Food court",
+    supermarket: "Supermarket",
+    convenience: "Convenience store",
+    bakery: "Bakery",
+    greengrocer: "Greengrocer",
+    deli: "Deli",
+    fuel: "Fuel station",
+    viewpoint: "Viewpoint",
+    peak: "Peak",
+    volcano: "Volcano",
+    shelter: "Shelter",
+    alpine_hut: "Hut",
+    wilderness_hut: "Hut",
+    camp_site: "Campsite",
+    pharmacy: "Pharmacy",
+    hospital: "Hospital",
+    defibrillator: "Defibrillator",
+    bicycle_repair_station: "Bike repair",
+    bicycle: "Bike shop"
+  };
+  var TYPE_GLYPHS = { peak: "▲", volcano: "▲" };
+  var POI_RADIUS_OPTIONS = [50, 100, 250, 500];
+  function classifyPoi(layerName, props) {
+    if (layerName === "mountain_peak") {
+      const type2 = String(props.class || "");
+      return type2 === "peak" || type2 === "volcano" ? { category: "views", type: type2 } : null;
+    }
+    if (layerName !== "poi") return null;
+    const type = String(props.subclass || props.class || "");
+    const category = CATEGORY_BY_TYPE.get(type);
+    return category ? { category, type } : null;
+  }
+  function cleanName(value) {
+    return String(value == null ? "" : value).replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 120);
+  }
+  function decodePoiTile(buffer, z, x, y) {
+    const n = 2 ** z;
+    const pois = [], busStops = [];
+    for (const layer of mvtDecode(buffer)) {
+      if (layer.name !== "poi" && layer.name !== "mountain_peak") continue;
+      const ext = layer.extent || 4096;
+      for (const f of layer.features) {
+        const props = {};
+        for (let i = 0; i + 1 < f.tags.length; i += 2) {
+          props[layer.keys[f.tags[i]]] = layer.values[f.tags[i + 1]];
+        }
+        const busStop = layer.name === "poi" && props.subclass === "bus_stop";
+        const kind = busStop ? null : classifyPoi(layer.name, props);
+        if (!busStop && !kind) continue;
+        const p = decodeGeometry(f.geom)[0]?.[0];
+        if (!p) continue;
+        const lng = (x + p[0] / ext) / n * 360 - 180;
+        const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + p[1] / ext) / n))) * 180 / Math.PI;
+        if (busStop) {
+          busStops.push([lng, lat]);
+          continue;
+        }
+        const ele = Number(props.ele);
+        pois.push({
+          ...kind,
+          name: cleanName(props.name),
+          ele: props.ele != null && Number.isFinite(ele) ? Math.round(ele) : null,
+          lng,
+          lat
+        });
+      }
+    }
+    return { pois, busStops };
+  }
+  function selectRoutePois(tiles, route, radius) {
+    const index = createRouteIndex(route, radius);
+    const stopCells = /* @__PURE__ */ new Map();
+    const cellKey = (lng, lat) => Math.round(lng * 2e3) + "," + Math.round(lat * 2e3);
+    for (const tile of tiles) {
+      for (const stop of tile.busStops || []) {
+        const key = cellKey(stop[0], stop[1]);
+        if (!stopCells.has(key)) stopCells.set(key, []);
+        stopCells.get(key).push(stop);
+      }
+    }
+    const nearBusStop = (poi) => {
+      const cx = Math.round(poi.lng * 2e3), cy = Math.round(poi.lat * 2e3);
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (const stop of stopCells.get(cx + dx + "," + (cy + dy)) || []) {
+            if (haversine(stop, [poi.lng, poi.lat]) <= 25) return true;
+          }
+        }
+      }
+      return false;
+    };
+    const seen = /* @__PURE__ */ new Map(), ids = /* @__PURE__ */ new Set(), kept = [];
+    for (const tile of tiles) {
+      for (const poi of tile.pois || []) {
+        if (poi.type === "shelter" && nearBusStop(poi)) continue;
+        const key = poi.type + "|" + poi.name.toLowerCase();
+        const same = seen.get(key) || [];
+        if (same.some((q) => haversine([q.lng, q.lat], [poi.lng, poi.lat]) < 15)) continue;
+        const passes = routePasses(index, poi.lng, poi.lat);
+        if (!passes.length) continue;
+        same.push(poi);
+        seen.set(key, same);
+        let id = poi.type + ":" + poi.lat.toFixed(5) + "," + poi.lng.toFixed(5);
+        for (let i = 2; ids.has(id); i++) id = id.replace(/#\d+$/, "") + "#" + i;
+        ids.add(id);
+        kept.push({
+          ...poi,
+          id,
+          passes,
+          along: passes[0].along,
+          offset: Math.min(...passes.map((pass) => pass.offset))
+        });
+      }
+    }
+    return kept.sort((a, b) => a.along - b.along || a.offset - b.offset);
+  }
+  function poiTypeLabel(poi) {
+    return TYPE_LABELS[poi.type] || CATEGORY[poi.category]?.label || "Point of interest";
+  }
+  function waypointName(poi, maxLength = 16) {
+    const base = poi.name || poiTypeLabel(poi);
+    return base.replace(/\s+/g, " ").trim().slice(0, Math.max(1, maxLength)).trim();
+  }
+  function formatRouteDistance(metres, metric = true) {
+    return metric ? (metres / 1e3).toFixed(1) + " km" : (metres / 1609.344).toFixed(1) + " mi";
+  }
+  function formatOffset(metres, metric = true) {
+    return metric ? Math.round(metres) + " m" : Math.round(metres * 3.28084) + " ft";
+  }
+  var _tileCache = /* @__PURE__ */ new Map();
+  var TILE_CACHE_MAX = 800;
+  var TEMPLATE_RE = /^https:\/\/tiles\.openfreemap\.org\/[^?#\s]*\{z\}\/\{x\}\/\{y\}\.pbf$/;
+  function cacheTile(key, value) {
+    _tileCache.delete(key);
+    _tileCache.set(key, value);
+    while (_tileCache.size > TILE_CACHE_MAX) _tileCache.delete(_tileCache.keys().next().value);
+  }
+  function resolveTileTemplate(cb) {
+    cachedFetch("openfreemap_tiles_v1", 12 * 3600 * 1e3, (done) => {
+      gmJsonGet(CFG.OPENFREEMAP_TILEJSON, { timeout: 15e3 }, (err, data) => {
+        const template = data && Array.isArray(data.tiles) ? String(data.tiles[0] || "") : "";
+        if (err || !TEMPLATE_RE.test(template)) {
+          done(err || new Error("tilejson"));
+          return;
+        }
+        done(null, template);
+      });
+    }, cb);
+  }
+  function gmFetchTile(url, cb) {
+    const handle = gmGet(url, { responseType: "arraybuffer", timeout: 2e4 }, (err, r) => {
+      if (err || !r || r.status !== 200 || !r.response) cb(err || new Error("HTTP " + (r && r.status)));
+      else cb(null, r.response);
+    });
+    return { abort: () => gmCancel(handle) };
+  }
+  function loadPoiTiles(tiles, { template, z, fetchTile = gmFetchTile, concurrency = 6, onProgress }, cb) {
+    const results = new Array(tiles.length);
+    const inflight = /* @__PURE__ */ new Set();
+    let next = 0, completed = 0, failed = 0, cancelled = false, finished = false;
+    const progress = () => {
+      if (onProgress) onProgress(completed, tiles.length);
+    };
+    const finish = () => {
+      if (finished || cancelled || completed < tiles.length) return;
+      finished = true;
+      cb(null, { tiles: results.filter(Boolean), failed });
+    };
+    const pump = () => {
+      while (!cancelled && inflight.size < concurrency && next < tiles.length) {
+        const i = next++;
+        const [x, y] = tiles[i];
+        const key = template + "|" + z + "/" + x + "/" + y;
+        const cached = _tileCache.get(key);
+        if (cached) {
+          results[i] = cached;
+          completed++;
+          progress();
+          continue;
+        }
+        const url = template.replace("{z}", z).replace("{x}", x).replace("{y}", y);
+        const attempt = (retry) => {
+          const slot = {};
+          inflight.add(slot);
+          slot.request = fetchTile(url, (err, buffer) => {
+            inflight.delete(slot);
+            if (cancelled) return;
+            let decoded = null;
+            if (!err && buffer) {
+              try {
+                decoded = decodePoiTile(buffer, z, x, y);
+              } catch (_) {
+              }
+            }
+            if (!decoded && !retry) {
+              attempt(true);
+              return;
+            }
+            if (decoded) {
+              results[i] = decoded;
+              cacheTile(key, decoded);
+            } else failed++;
+            completed++;
+            progress();
+            pump();
+          });
+        };
+        attempt(false);
+      }
+      finish();
+    };
+    pump();
+    return {
+      cancel() {
+        cancelled = true;
+        for (const slot of inflight) {
+          try {
+            slot.request && slot.request.abort && slot.request.abort();
+          } catch (_) {
+          }
+        }
+        inflight.clear();
+      }
+    };
+  }
+  function poiError(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+  }
+  function findRoutePois(paths, radius, opts, cb) {
+    opts = opts || {};
+    const parts = routeParts(paths);
+    if (!parts.length) {
+      cb(poiError("noroute", "Draw a route first, then press the POI button."));
+      return { cancel() {
+      } };
+    }
+    const route = measureRoute(parts);
+    const z = CFG.ROUTE_POI_TILE_ZOOM;
+    const tiles = routeTiles(route, radius, z);
+    if (tiles.length > CFG.ROUTE_POI_MAX_TILES) {
+      cb(poiError("toolong", "This route is too long to search in one go — try a smaller corridor or split the route."));
+      return { cancel() {
+      } };
+    }
+    let cancelled = false, inner = null;
+    (opts.resolveTemplate || resolveTileTemplate)((err, template) => {
+      if (cancelled) return;
+      if (err || !template) {
+        cb(poiError("tiles", "Couldn't reach the OpenFreeMap map-data index. Try again shortly."));
+        return;
+      }
+      inner = loadPoiTiles(tiles, {
+        template,
+        z,
+        fetchTile: opts.fetchTile,
+        onProgress: opts.onProgress
+      }, (_err, result) => {
+        if (cancelled) return;
+        if (tiles.length && result.failed === tiles.length) {
+          cb(poiError("tiles", "Couldn't load map data for this route. Try again shortly."));
+          return;
+        }
+        cb(null, {
+          pois: selectRoutePois(result.tiles, route, radius),
+          route,
+          tileCount: tiles.length,
+          failedTiles: result.failed
+        });
+      });
+    });
+    return { cancel() {
+      cancelled = true;
+      if (inner) inner.cancel();
+    } };
+  }
+  function pageWindow() {
+    return typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+  }
+  function toPage(value) {
+    return typeof cloneInto === "function" ? cloneInto(value, pageWindow()) : value;
+  }
+  function loadPrefs() {
+    let prefs = {};
+    try {
+      prefs = JSON.parse(GM_getValue(CFG.ROUTE_POI_PREFS_KEY, "{}")) || {};
+    } catch (_) {
+    }
+    const radius = Number(prefs.radius);
+    return {
+      radius: POI_RADIUS_OPTIONS.includes(radius) ? radius : 100,
+      hidden: Array.isArray(prefs.hidden) ? prefs.hidden.filter((id) => CATEGORY[id]) : []
+    };
+  }
+  var LIST_LIMIT = 300;
+  var CONFIRM_ADD_ALL_OVER = 20;
+  var RoutePoiController = class {
+    constructor(map) {
+      this._map = map;
+      this._state = "idle";
+      this._gen = 0;
+      this._handle = null;
+      this._pois = [];
+      this._route = null;
+      this._markers = /* @__PURE__ */ new Map();
+      this._added = /* @__PURE__ */ new Set();
+      this._group = null;
+      this._panel = null;
+      this._btn = null;
+      this._status = { text: "", error: false };
+      this._prefs = loadPrefs();
+      this._syncTimer = null;
+      this._onMapLayers = () => {
+        clearTimeout(this._syncTimer);
+        this._syncTimer = setTimeout(() => this._syncAdded(), 200);
+      };
+    }
+    attachButton() {
+      mountPlannerButton({
+        id: "dw-poi-btn",
+        className: "dw-poi-btn",
+        title: "Find POIs along the route",
+        iconClass: "fa-map-signs",
+        onClick: () => this.toggle(),
+        onMount: (btn) => {
+          this._btn = btn;
+          this._syncButton();
+        }
+      });
+    }
+    toggle() {
+      if (this._state === "idle") this.search();
+      else this.clear();
+    }
+    search() {
+      this._cancel();
+      const gen = ++this._gen;
+      this._ensurePanel();
+      this._setState("loading");
+      this._setStatus("Finding POIs along the route…");
+      const paths = _dwGetRouteModel().paths.map((entry) => entry.points);
+      this._handle = findRoutePois(paths, this._prefs.radius, {
+        onProgress: (done, total) => {
+          if (gen === this._gen) this._setStatus(`Reading map data… ${done}/${total} tiles`);
+        }
+      }, (err, result) => {
+        if (gen !== this._gen) return;
+        this._handle = null;
+        this._pois = err ? [] : result.pois;
+        this._route = err ? null : result.route;
+        this._map.off("layeradd layerremove", this._onMapLayers);
+        if (this._pois.length) this._map.on("layeradd layerremove", this._onMapLayers);
+        this._renderMarkers();
+        this._setState("active");
+        if (err) {
+          this._setStatus(err.message, true);
+          return;
+        }
+        const metric = this._metric();
+        const found = this._pois.length ? `${this._pois.length} POI${this._pois.length === 1 ? "" : "s"}` : "No POIs";
+        const failed = result.failedTiles ? ` · ${result.failedTiles} of ${result.tileCount} map tiles didn't load` : "";
+        this._setStatus(`${found} within ${formatOffset(this._prefs.radius, metric)} of the ${formatRouteDistance(result.route.total, metric)} route${failed}`, !!result.failedTiles);
+      });
+    }
+    clear() {
+      this._cancel();
+      this._gen++;
+      this._pois = [];
+      this._route = null;
+      this._map.off("layeradd layerremove", this._onMapLayers);
+      clearTimeout(this._syncTimer);
+      if (this._group) {
+        this._group.remove();
+        this._group = null;
+      }
+      this._markers.clear();
+      if (this._panel) {
+        this._panel.remove();
+        this._panel = null;
+      }
+      this._setState("idle");
+    }
+    _cancel() {
+      if (this._handle) {
+        this._handle.cancel();
+        this._handle = null;
+      }
+    }
+    _plan() {
+      try {
+        return pageWindow().leafletPlan || null;
+      } catch (_) {
+        return null;
+      }
+    }
+    _metric() {
+      const plan = this._plan();
+      return !plan || plan.unitsMetric !== false;
+    }
+    _savePrefs() {
+      try {
+        GM_setValue(CFG.ROUTE_POI_PREFS_KEY, JSON.stringify(this._prefs));
+      } catch (_) {
+      }
+    }
+    _setState(state) {
+      this._state = state;
+      this._syncButton();
+    }
+    _syncButton() {
+      const btn = this._btn;
+      if (!btn) return;
+      btn.classList.toggle("active", this._state !== "idle");
+      btn.setAttribute("aria-pressed", this._state === "idle" ? "false" : "true");
+      const icon = btn.querySelector("i");
+      if (icon) icon.className = this._state === "loading" ? "fa fa-spinner fa-spin" : "fa fa-map-signs";
+      btn.title = this._state === "idle" ? "Find POIs along the route" : "Clear route POIs";
+    }
+    _setStatus(text, error = false) {
+      this._status = { text, error };
+      this._renderPanel();
+    }
+    _visiblePois() {
+      const hidden = new Set(this._prefs.hidden);
+      return this._pois.filter((poi) => !hidden.has(poi.category));
+    }
+    // -- Markers ----------------------------------------------------------
+    _icon(poi) {
+      const cat = CATEGORY[poi.category];
+      const glyph = TYPE_GLYPHS[poi.type] || cat.glyph;
+      const inner = glyph ? `<b>${_escHtml(glyph)}</b>` : `<i class="fa ${cat.icon}"></i>`;
+      return L.divIcon({
+        className: "dw-poi-icon" + (this._added.has(poi.id) ? " dw-poi-icon--added" : ""),
+        html: `<span class="dw-poi-pin" style="background:${cat.color}">${inner}</span>`,
+        // A teardrop whose tip marks the POI, so its head stays visible and
+        // clickable when a planner marker sits on the same spot.
+        iconSize: [22, 22],
+        iconAnchor: [11, 27],
+        popupAnchor: [0, -27],
+        tooltipAnchor: [0, -27]
+      });
+    }
+    _renderMarkers() {
+      this._refreshAdded();
+      if (!this._group) this._group = L.layerGroup().addTo(this._map);
+      this._group.clearLayers();
+      this._markers.clear();
+      for (const poi of this._visiblePois()) {
+        const marker = L.marker([poi.lat, poi.lng], {
+          icon: this._icon(poi),
+          keyboard: false,
+          riseOnHover: true,
+          zIndexOffset: -1e3
+        });
+        marker.bindTooltip(() => this._tooltipHtml(poi), { direction: "top", className: "dw-poi-tip" });
+        marker.bindPopup(() => this._popupHtml(poi), { className: "dw-poi-popup", maxWidth: 260 });
+        marker.on("popupopen", (e) => this._onPopupOpen(poi, e));
+        marker.on("popupclose", () => {
+          const plan = this._plan();
+          if (plan && typeof plan.ignoreMapClicks === "function") plan.ignoreMapClicks(false);
+        });
+        this._group.addLayer(marker);
+        this._markers.set(poi.id, marker);
+      }
+    }
+    _passesText(poi) {
+      const metric = this._metric();
+      return poi.passes.map((pass) => formatRouteDistance(pass.along, metric)).join(" & ");
+    }
+    _tooltipHtml(poi) {
+      const label = poiTypeLabel(poi);
+      return esc`<b>${poi.name || label}</b><br>${label} · ${this._passesText(poi)}`;
+    }
+    _popupHtml(poi) {
+      const label = poiTypeLabel(poi);
+      const metric = this._metric();
+      const ele = poi.ele != null ? ` · ${formatOffset(poi.ele, metric)}` : "";
+      const added = this._added.has(poi.id);
+      const maps = "https://www.google.com/maps/search/?api=1&query=" + poi.lat.toFixed(6) + "," + poi.lng.toFixed(6);
+      return `<div class="dw-poi-pop">` + esc`<b>${poi.name || label}</b>` + esc`<div class="dw-poi-pop-sub">${label}${ele}</div>` + esc`<div>At ${this._passesText(poi)} · ${formatOffset(poi.offset, metric)} off route</div>` + `<div class="dw-poi-pop-actions">` + esc`<button type="button" class="dw-poi-add-btn" data-poi-id="${poi.id}"` + (added ? " disabled>Waypoint added" : ">Add as waypoint") + `</button>` + esc`<a href="${maps}" target="_blank" rel="noreferrer">Google Maps ↗</a>` + `</div></div>`;
+    }
+    _onPopupOpen(poi, e) {
+      const plan = this._plan();
+      if (plan && typeof plan.ignoreMapClicks === "function") plan.ignoreMapClicks(true);
+      const el = e.popup.getElement ? e.popup.getElement() : e.popup._container;
+      if (!el || el._dwPoiBound) return;
+      el._dwPoiBound = true;
+      L.DomEvent.on(el, "click", (ev) => {
+        const btn = ev.target && ev.target.closest ? ev.target.closest(".dw-poi-add-btn") : null;
+        if (!btn) return;
+        L.DomEvent.stop(ev);
+        const target = this._poiById(btn.dataset.poiId) || poi;
+        if (this._addWaypoint(target) || this._added.has(target.id)) {
+          btn.disabled = true;
+          btn.textContent = "Waypoint added";
+        }
+      });
+    }
+    _focusPoi(poi) {
+      const marker = this._markers.get(poi.id);
+      this._map.setView([poi.lat, poi.lng], Math.max(this._map.getZoom(), 16));
+      if (marker) marker.openPopup();
+    }
+    // -- Waypoints ----------------------------------------------------------
+    _addWaypoint(poi, quiet = false) {
+      const plan = this._plan();
+      if (!plan || typeof plan.addWaypoint !== "function") {
+        this._setStatus("This dynamic.watch page doesn't support adding waypoints.", true);
+        return false;
+      }
+      if (this._waypointNear(poi)) {
+        this._markAdded(poi);
+        if (!quiet) this._setStatus("A waypoint is already there.");
+        return false;
+      }
+      const max = Number(plan.waypointCountMax);
+      if (Number.isFinite(max) && Array.isArray(plan.waypoints) && plan.waypoints.length >= max) {
+        this._setStatus(`This route already has the maximum of ${max} waypoints.`, true);
+        return false;
+      }
+      const name = waypointName(poi, Number(plan.waypointNameLength) || 16);
+      let added = null;
+      try {
+        added = plan.addWaypoint(toPage([poi.lat, poi.lng]), name, false);
+      } catch (e) {
+        console.warn("[CustomTiles] Route POIs: addWaypoint failed", e);
+      }
+      if (!added) {
+        this._setStatus("dynamic.watch didn't accept the waypoint.", true);
+        return false;
+      }
+      this._markAdded(poi);
+      if (!quiet) this._setStatus(`Added “${name}” as a waypoint — save the route to keep it.`);
+      return true;
+    }
+    _waypointNear(poi) {
+      const plan = this._plan();
+      const waypoints = plan && Array.isArray(plan.waypoints) ? plan.waypoints : [];
+      return waypoints.some((wp) => {
+        const ll = wp && wp.marker && typeof wp.marker.getLatLng === "function" ? wp.marker.getLatLng() : null;
+        return !!ll && haversine([ll.lng, ll.lat], [poi.lng, poi.lat]) < 15;
+      });
+    }
+    _refreshAdded() {
+      const next = new Set(this._pois.filter((poi) => this._waypointNear(poi)).map((poi) => poi.id));
+      const changed = next.size !== this._added.size || [...next].some((id) => !this._added.has(id));
+      this._added = next;
+      return changed;
+    }
+    _syncAdded() {
+      if (!this._refreshAdded()) return;
+      for (const poi of this._pois) {
+        const marker = this._markers.get(poi.id);
+        if (marker) marker.setIcon(this._icon(poi));
+      }
+      this._renderPanel();
+    }
+    _markAdded(poi) {
+      this._added.add(poi.id);
+      const marker = this._markers.get(poi.id);
+      if (marker) marker.setIcon(this._icon(poi));
+      this._renderPanel();
+    }
+    _addAll() {
+      this._refreshAdded();
+      const pending = this._visiblePois().filter((poi) => !this._added.has(poi.id));
+      if (!pending.length) {
+        this._setStatus("Every POI shown is already a waypoint.");
+        return;
+      }
+      if (pending.length > CONFIRM_ADD_ALL_OVER && !window.confirm(`Add ${pending.length} waypoints to this route?`)) return;
+      let count = 0;
+      this._status = { text: "", error: false };
+      for (const poi of pending) {
+        if (this._addWaypoint(poi, true)) count++;
+        else if (this._status.error) return;
+      }
+      this._setStatus(count ? `Added ${count} waypoint${count === 1 ? "" : "s"} — save the route to keep them.` : "Those POIs already have waypoints.");
+    }
+    // -- Panel --------------------------------------------------------------
+    _ensurePanel() {
+      if (this._panel) return;
+      const el = L.DomUtil.create("div", "dw-poi-panel", this._map.getContainer());
+      L.DomEvent.disableClickPropagation(el);
+      L.DomEvent.disableScrollPropagation(el);
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this._onPanelClick(e);
+      });
+      el.addEventListener("change", (e) => this._onPanelChange(e));
+      this._panel = el;
+    }
+    _renderPanel() {
+      const el = this._panel;
+      if (!el) return;
+      const metric = this._metric();
+      const counts = {};
+      for (const poi of this._pois) counts[poi.category] = (counts[poi.category] || 0) + 1;
+      const hidden = new Set(this._prefs.hidden);
+      const chips = POI_CATEGORIES.filter((cat) => counts[cat.id]).map((cat) => `<button type="button" class="dw-poi-chip${hidden.has(cat.id) ? " dw-poi-chip--off" : ""}"` + esc` data-poi-cat="${cat.id}" aria-pressed="${hidden.has(cat.id) ? "false" : "true"}">` + `<span class="dw-poi-dot" style="background:${cat.color}"></span>` + esc`${cat.label} <span class="dw-poi-count">${counts[cat.id]}</span></button>`).join("");
+      const visible = this._visiblePois();
+      const rows = visible.slice(0, LIST_LIMIT).map((poi) => {
+        const cat = CATEGORY[poi.category];
+        const added = this._added.has(poi.id);
+        return esc`<li class="dw-poi-row" data-poi-row="${poi.id}">` + `<span class="dw-poi-dot" style="background:${cat.color}"></span>` + esc`<span class="dw-poi-name" title="${poiTypeLabel(poi)}">${poi.name || poiTypeLabel(poi)}</span>` + esc`<span class="dw-poi-km">${formatRouteDistance(poi.along, metric)}</span>` + esc`<button type="button" class="dw-poi-row-add" data-poi-add="${poi.id}"` + (added ? ' disabled title="Waypoint added">✓' : ' title="Add as waypoint">+') + `</button></li>`;
+      }).join("");
+      const more = visible.length > LIST_LIMIT ? `<li class="dw-poi-more">+${visible.length - LIST_LIMIT} more on the map</li>` : "";
+      const radiusOptions = POI_RADIUS_OPTIONS.map((r) => `<option value="${r}"${r === this._prefs.radius ? " selected" : ""}>${_escHtml(formatOffset(r, metric))}</option>`).join("");
+      const collapsed = el.classList.contains("dw-poi-panel--collapsed");
+      el.innerHTML = `<div class="dw-poi-hd"><b>POIs along route</b><span class="dw-poi-hd-btns"><button type="button" data-poi-act="collapse" title="${collapsed ? "Expand" : "Collapse"}">${collapsed ? "+" : "–"}</button><button type="button" data-poi-act="close" title="Close and clear POIs">×</button></span></div><div class="dw-poi-body">` + esc`<div class="dw-poi-status${this._status.error ? " dw-poi-status--error" : ""}">${this._status.text}</div>` + `<div class="dw-poi-opts"><label>Within <select data-poi-radius>${radiusOptions}</select></label><button type="button" data-poi-act="refresh"${this._state === "loading" ? " disabled" : ""}>Search again</button></div>` + (chips ? `<div class="dw-poi-chips">${chips}</div>` : "") + (rows ? `<ol class="dw-poi-list">${rows}${more}</ol>` : "") + (visible.length ? `<div class="dw-poi-ft"><button type="button" data-poi-act="add-all">Add shown as waypoints</button></div>` : "") + `<div class="dw-poi-attr">POI data © <a href="https://openmaptiles.org/" target="_blank" rel="noreferrer">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors, via <a href="https://openfreemap.org/" target="_blank" rel="noreferrer">OpenFreeMap</a></div></div>`;
+    }
+    _poiById(id) {
+      return this._pois.find((poi) => poi.id === id) || null;
+    }
+    _onPanelClick(e) {
+      const target = e.target && typeof e.target.closest === "function" ? e.target : null;
+      if (!target) return;
+      const act = target.closest("[data-poi-act]");
+      if (act) {
+        const action = act.dataset.poiAct;
+        if (action === "close") this.clear();
+        else if (action === "refresh") this.search();
+        else if (action === "add-all") this._addAll();
+        else if (action === "collapse") {
+          this._panel.classList.toggle("dw-poi-panel--collapsed");
+          this._renderPanel();
+        }
+        return;
+      }
+      const chip = target.closest("[data-poi-cat]");
+      if (chip) {
+        const id = chip.dataset.poiCat;
+        const hidden = new Set(this._prefs.hidden);
+        if (hidden.has(id)) hidden.delete(id);
+        else hidden.add(id);
+        this._prefs.hidden = [...hidden];
+        this._savePrefs();
+        this._renderMarkers();
+        this._renderPanel();
+        return;
+      }
+      const add = target.closest("[data-poi-add]");
+      if (add) {
+        const poi = this._poiById(add.dataset.poiAdd);
+        if (poi) this._addWaypoint(poi);
+        return;
+      }
+      const row = target.closest("[data-poi-row]");
+      if (row) {
+        const poi = this._poiById(row.dataset.poiRow);
+        if (poi) this._focusPoi(poi);
+      }
+    }
+    _onPanelChange(e) {
+      const select = e.target && e.target.closest ? e.target.closest("[data-poi-radius]") : null;
+      if (!select) return;
+      const radius = Number(select.value);
+      if (!POI_RADIUS_OPTIONS.includes(radius)) return;
+      this._prefs.radius = radius;
+      this._savePrefs();
+      this.search();
+    }
+  };
+
   // src/providers/qld-historical-maps.js
   function _adj(m) {
     return [
@@ -11491,6 +12416,8 @@
         );
         this._mode3DController = new Mode3DController(this);
         Mode3DButton.attach(map, this._mode3DController);
+        this._routePois = new RoutePoiController(map);
+        this._routePois.attachButton();
         if (!map.getPane("dwRoadsPane")) {
           map.createPane("dwRoadsPane");
           map.getPane("dwRoadsPane").style.zIndex = 225;
@@ -12151,6 +13078,45 @@
         // Bootstrap 3 does for pressed buttons.
         ".dw-3d-btn { padding: 5px 8px; }",
         ".dw-3d-btn.active { background: #e0e0e0; border-color: #999; box-shadow: inset 0 3px 5px rgba(0,0,0,.125); }",
+        // POIs along the route: toolbar button, map pins and results panel.
+        ".dw-poi-btn { padding: 5px 8px; }",
+        ".dw-poi-btn.active { background: #e0e0e0; border-color: #999; box-shadow: inset 0 3px 5px rgba(0,0,0,.125); }",
+        ".dw-poi-icon { background: none; border: 0; }",
+        ".dw-poi-pin { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; box-sizing: border-box; border: 2px solid #fff; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); color: #fff; font: 700 9px/1 sans-serif; box-shadow: -1px 1px 4px rgba(0,0,0,.45); }",
+        ".dw-poi-pin > * { transform: rotate(45deg); }",
+        ".dw-poi-pin .fa { font-size: 11px; }",
+        ".dw-poi-icon--added .dw-poi-pin { opacity: .55; border-color: #1565c0; }",
+        ".dw-poi-tip { font-size: 11px; }",
+        ".dw-poi-pop { font-size: 12px; line-height: 1.45; min-width: 170px; }",
+        ".dw-poi-pop-sub { color: #6b7280; }",
+        ".dw-poi-pop-actions { display: flex; align-items: center; gap: 10px; margin-top: 6px; }",
+        ".dw-poi-add-btn { padding: 2px 8px; border: 1px solid #1565c0; border-radius: 4px; background: #1e88e5; color: #fff; cursor: pointer; font-size: 11px; }",
+        ".dw-poi-add-btn:disabled { background: #e3f2fd; color: #1565c0; cursor: default; }",
+        ".dw-poi-panel { position: absolute; left: 12px; top: 90px; z-index: 1150; width: min(300px, calc(100% - 24px)); max-height: min(60vh, 520px); display: flex; flex-direction: column; background: rgba(255,255,255,.97); border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,.35); font: 12px/1.4 sans-serif; color: #222; }",
+        ".dw-poi-hd { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 4px 10px; border-bottom: 1px solid #e5e5e5; }",
+        ".dw-poi-hd-btns button { border: 0; background: none; font-size: 16px; line-height: 1; padding: 0 4px; cursor: pointer; color: #555; }",
+        ".dw-poi-hd-btns button:hover { color: #000; }",
+        ".dw-poi-body { display: flex; flex-direction: column; gap: 6px; padding: 6px 10px 8px; overflow: hidden; min-height: 0; }",
+        ".dw-poi-panel--collapsed .dw-poi-body { display: none; }",
+        ".dw-poi-status { color: #374151; }",
+        ".dw-poi-status--error { color: #b91c1c; }",
+        ".dw-poi-opts { display: flex; align-items: center; justify-content: space-between; gap: 6px; }",
+        ".dw-poi-opts select, .dw-poi-opts button, .dw-poi-ft button { font-size: 11px; }",
+        ".dw-poi-chips { display: flex; flex-wrap: wrap; gap: 4px; }",
+        ".dw-poi-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border: 1px solid #bbb; border-radius: 10px; background: #fff; cursor: pointer; font-size: 11px; }",
+        ".dw-poi-chip--off { opacity: .45; text-decoration: line-through; }",
+        ".dw-poi-count { color: #6b7280; }",
+        ".dw-poi-dot { display: inline-block; flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; }",
+        ".dw-poi-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; min-height: 0; flex: 1 1 auto; border-top: 1px solid #eee; }",
+        ".dw-poi-row { display: flex; align-items: center; gap: 6px; padding: 3px 2px; border-bottom: 1px solid #f2f2f2; cursor: pointer; }",
+        ".dw-poi-row:hover { background: #f5f8ff; }",
+        ".dw-poi-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+        ".dw-poi-km { flex: 0 0 auto; color: #6b7280; font-variant-numeric: tabular-nums; }",
+        ".dw-poi-row-add { flex: 0 0 auto; width: 20px; height: 20px; padding: 0; border: 1px solid #90caf9; border-radius: 4px; background: #fff; color: #1565c0; cursor: pointer; line-height: 1; }",
+        ".dw-poi-row-add:disabled { border-color: #ddd; color: #2e7d32; cursor: default; }",
+        ".dw-poi-more { padding: 4px 2px; color: #6b7280; }",
+        ".dw-poi-attr { font-size: 9.5px; color: #888; }",
+        ".dw-poi-attr a { color: #888; }",
         ".dw-flight-icon { background: none !important; border: none !important; }",
         ".dw-flight-tip { font-size: 11px; line-height: 1.4; }",
         // Geocache icon — overflow:visible so the favourites-points

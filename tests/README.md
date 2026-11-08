@@ -29,7 +29,7 @@ remote outages. Each runner exits with the sum of component exit codes
 
 ```bash
 node tests/unit.mjs
-node --test tests/polling-data-layer.mjs tests/viewport-layers.mjs tests/vexcel-capture.mjs tests/vexcel-tile-batch.mjs tests/vexcel-http.mjs tests/vexcel-protocol-report.mjs tests/vexcel-cache.mjs tests/vexcel-csv.mjs tests/lightpoll-token.mjs
+node --test tests/polling-data-layer.mjs tests/viewport-layers.mjs tests/vexcel-capture.mjs tests/vexcel-tile-batch.mjs tests/vexcel-http.mjs tests/vexcel-protocol-report.mjs tests/vexcel-cache.mjs tests/vexcel-csv.mjs tests/lightpoll-token.mjs tests/route-pois.mjs
 node tests/check-secrets.mjs
 node tests/e2e/verify-vexcel-report.mjs
 bash tests/smoke.sh        # live endpoint liveness
@@ -66,7 +66,11 @@ and vector-tile caps. `vexcel-capture.mjs`, `vexcel-tile-batch.mjs`,
 `vexcel-csv.mjs` cover Vexcel capture, tile batching, HTTP handling, pruning,
 batch input and report/protocol behavior against synthetic
 responses. `check-secrets.mjs` checks the repository for accidentally included
-credentials; `lightpoll-token.mjs` checks public WMS URL construction. These checks are part of the default `npm test` run.
+credentials; `lightpoll-token.mjs` checks public WMS URL construction.
+`route-pois.mjs` covers route-corridor geometry (distance along the route,
+out-and-back passes, tile coverage), vector-tile POI decoding, filtering, tile
+retries/caching and adding POIs as planner waypoints. These checks are part of
+the default `npm test` run.
 
 ### Synthetic report browser check (local only)
 

@@ -364,6 +364,14 @@ export const CFG = {
 		"https://www.lightpollutionmap.info/tiles/wms",
 	LIGHTPOL_WMS_LAYER: "PostGIS:SB_2025",
 	LIGHTPOL_WMS_STYLE: "WA",
+
+	// "POIs along route" reads OpenFreeMap's keyless OpenMapTiles vector
+	// tiles. The TileJSON names the current planet build; z14 carries every
+	// POI. The tile cap bounds one search (~300 km of route at 100 m).
+	OPENFREEMAP_TILEJSON: "https://tiles.openfreemap.org/planet",
+	ROUTE_POI_TILE_ZOOM: 14,
+	ROUTE_POI_MAX_TILES: 400,
+	ROUTE_POI_PREFS_KEY: "dw_route_poi_prefs",
 };
 
 export const BLANK_TILE =

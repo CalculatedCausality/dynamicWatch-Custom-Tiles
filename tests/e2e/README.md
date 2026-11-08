@@ -86,6 +86,22 @@ catches browser-security regressions masked by the main 3D harness; the
 fetch-based GM shim still cannot emulate Tampermonkey's cross-origin GM
 requests, so this check uses a direct public raster layer.
 
+### `verify-route-pois.mjs` — POIs along the route
+
+```bash
+npm run e2e:route-pois                     # headless, rebuilds the bundle
+HEADED=1 npm run e2e:route-pois            # watch it
+PLAN=/plan/<id> npm run e2e:route-pois     # another saved route (default /plan/2344645)
+```
+
+Requires `.auth/storage.json` and network access to `tiles.openfreemap.org`.
+Presses the planner-toolbar POI button on a saved route and checks that POIs
+are listed in route order and pinned on the map, a category chip hides and
+restores its pins, a real click on a pin opens its popup, panel and pin clicks
+never add route points, **Add as waypoint** creates a named planner waypoint,
+and pressing the button again clears everything. The plan is never saved.
+Part of `npm run test:live`.
+
 ### `verify-geocaches.mjs` — Geocaches layer end-to-end
 
 ```bash
