@@ -75,7 +75,7 @@ if [ "$MODE" != live ]; then
 		"$HERE/vexcel-capture.mjs" "$HERE/vexcel-tile-batch.mjs" \
 		"$HERE/vexcel-http.mjs" "$HERE/vexcel-protocol-report.mjs" \
 		"$HERE/vexcel-cache.mjs" "$HERE/vexcel-csv.mjs" "$HERE/lightpoll-token.mjs" \
-		"$HERE/route-pois.mjs"
+		"$HERE/route-pois.mjs" "$HERE/release-scripts.mjs"
 	REGRESSION_RC=$RUN_RC
 
 	run_suite "secret and repository hygiene checks (no network)" node "$HERE/check-secrets.mjs"

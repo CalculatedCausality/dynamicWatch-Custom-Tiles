@@ -25,6 +25,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -32,10 +34,50 @@ jobs:
       - run: npm ci
       - name: Committed userscript matches the source
         run: npm run check:bundle
+      - name: Changed userscript has a version bump and release notes
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_BRANCH: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            npm run check:version -- --base "origin/$BASE_BRANCH"
+          else
+            npm run check:version -- --base "$BEFORE_SHA"
+          fi
       - name: Install Chromium for the local report check
         run: npx playwright install --with-deps chromium
       - name: Unit, source-regression, secret-scan and report checks
         run: bash tests/run.sh --ci
+
+  release:
+    name: Release userscript
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: offline
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      # Keyed on the tag rather than the previous push, so a release cancelled
+      # by a quick follow-up push still happens on the next run.
+      - name: Publish a release for a userscript version without one
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(node --input-type=module -e "import { readFileSync } from 'node:fs'; import { readBundleVersion } from './scripts/check-version-bump.mjs'; console.log(readBundleVersion(readFileSync('dynamicwatch-custom-tiles.user.js', 'utf8')))")"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" > /dev/null; then
+            echo "v$VERSION is already released."
+            exit 0
+          fi
+          node scripts/release-notes.mjs "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+          gh release create "v$VERSION" dynamicwatch-custom-tiles.user.js --title "v$VERSION" --notes-file "$RUNNER_TEMP/release-notes.md" --target "$GITHUB_SHA"
 
   live:
     name: Live endpoint checks

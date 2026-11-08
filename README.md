@@ -261,6 +261,8 @@ The build also writes `dynamicwatch-custom-tiles.meta.js`, the header on its own
 
 Commit the rebuilt files with your source changes. `npm run check:bundle` fails if they're out of date, and CI runs it on every push and pull request.
 
+`npm run check:version` compares the committed userscript against `origin/main` (choose another base with `-- --base <ref>`). Whenever the bundle changes, it requires a higher `@version` and a matching `### Release notes — <version>` section with at least one bullet in this README. If the base can't be resolved, it skips with a notice. CI runs it on pushes and pull requests. Once the offline checks pass on `main`, CI publishes a GitHub release `v<version>` with the userscript attached and these release notes, unless that tag already exists.
+
 ### Test suite
 
 A multi-layer regression suite lives under [`tests/`](tests/) — see [tests/README.md](tests/README.md) for the full coverage manifest. Run from the repo root:

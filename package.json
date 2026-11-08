@@ -9,6 +9,7 @@
     "build": "node scripts/build-userscript.mjs",
     "check": "npm run build && node --check dynamicwatch-custom-tiles.user.js",
     "check:bundle": "node scripts/check-bundle.mjs",
+    "check:version": "node scripts/check-version-bump.mjs",
     "test": "npm run build && bash tests/run.sh",
     "test:live": "npm run build && bash tests/run.sh --live",
     "test:all": "npm run build && bash tests/run.sh --all",
