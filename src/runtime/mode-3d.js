@@ -13,6 +13,7 @@ import {
 	hasDwMbProtocol,
 	setDwMbHasProtocol,
 } from "../bridge/mapbox-tile-bridge.js";
+import { insertPlannerButton } from "../ui/planner-toolbar.js";
 import { _escHtml, esc, _safeColor } from "../utils/html.js";
 import { intvlActivityTime, intvlAgo, intvlArea } from "../utils/intvl.js";
 
@@ -1939,8 +1940,8 @@ export class Mode3DController {
 // `.leaflet-planner-controls` row (the bar with travel-mode / undo /
 // save / elevation / distance). The row is rendered late by the
 // site's planner React tree, so we wait for it via MutationObserver.
-// The button mimics the native `btn btn-default fixed-width` styling
-// so it sits flush; an `active` class darkens it when 3D is on.
+// The button mimics the native `btn btn-default fixed-width` styling and
+// spacing; an `active` class darkens it when 3D is on.
 export class Mode3DButton {
 	static attach(map, controller) {
 		const tryMount = () => {
@@ -1953,9 +1954,7 @@ export class Mode3DButton {
 			btn.title = "Toggle 3D terrain";
 			btn.setAttribute("aria-pressed", "false");
 			btn.innerHTML = '<i class="fa fa-cube"></i>';
-			const distance = row.querySelector(".distance");
-			if (distance) row.insertBefore(btn, distance);
-			else row.appendChild(btn);
+			insertPlannerButton(row, btn);
 			btn.addEventListener("click", (e) => {
 				e.preventDefault();
 				const turningOn = !controller.isActive();

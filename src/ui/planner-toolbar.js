@@ -1,3 +1,22 @@
+const isGap = (node) => !!node && node.nodeType === 3 && !/\S/.test(node.nodeValue || "");
+
+// Put a button in the planner row, before the distance readout. The site's
+// own buttons are inline-blocks separated by the line breaks in its markup,
+// and that whitespace is the gap between them; a button inserted by script
+// has none and would sit flush against its neighbours. Give it the same
+// separator on each side that has an element next to it. A row whose markup
+// has no such whitespace is left alone, so the button still matches.
+// `dw-planner-btn` lets the stylesheet close those gaps on very narrow screens.
+export function insertPlannerButton(row, btn) {
+	btn.classList.add("dw-planner-btn");
+	const spaced = Array.from(row.childNodes).some(isGap);
+	row.insertBefore(btn, row.querySelector(".distance"));
+	if (!spaced) return;
+	const gap = () => row.ownerDocument.createTextNode("\n");
+	if (btn.previousSibling && !isGap(btn.previousSibling)) row.insertBefore(gap(), btn);
+	if (btn.nextSibling && !isGap(btn.nextSibling)) row.insertBefore(gap(), btn.nextSibling);
+}
+
 // Mount a button in dynamic.watch's `.leaflet-planner-controls` row, beside
 // the native travel-mode/undo/save buttons. The row renders late, so wait for
 // it with a MutationObserver and warn if the site's markup has changed.
@@ -16,7 +35,7 @@ export function mountPlannerButton({ id, className, title, iconClass, onClick, o
 		const icon = document.createElement("i");
 		icon.className = "fa " + iconClass;
 		btn.appendChild(icon);
-		row.insertBefore(btn, row.querySelector(".distance"));
+		insertPlannerButton(row, btn);
 		btn.addEventListener("click", (e) => {
 			e.preventDefault();
 			onClick(btn, e);

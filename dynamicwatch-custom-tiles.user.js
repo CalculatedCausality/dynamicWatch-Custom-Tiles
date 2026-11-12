@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.17.0
+// @version      7.17.1
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -723,6 +723,54 @@
         }
       }, 30 * 1e3);
     }
+  }
+
+  // src/ui/planner-toolbar.js
+  var isGap = (node) => !!node && node.nodeType === 3 && !/\S/.test(node.nodeValue || "");
+  function insertPlannerButton(row, btn) {
+    btn.classList.add("dw-planner-btn");
+    const spaced = Array.from(row.childNodes).some(isGap);
+    row.insertBefore(btn, row.querySelector(".distance"));
+    if (!spaced) return;
+    const gap = () => row.ownerDocument.createTextNode("\n");
+    if (btn.previousSibling && !isGap(btn.previousSibling)) row.insertBefore(gap(), btn);
+    if (btn.nextSibling && !isGap(btn.nextSibling)) row.insertBefore(gap(), btn.nextSibling);
+  }
+  function mountPlannerButton({ id, className, title, iconClass, onClick, onMount }) {
+    const tryMount = () => {
+      const row = document.querySelector(".leaflet-planner-controls");
+      if (!row) return false;
+      if (row.querySelector("#" + id)) return true;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-default fixed-width " + className;
+      btn.id = id;
+      btn.title = title;
+      btn.setAttribute("aria-label", title);
+      btn.setAttribute("aria-pressed", "false");
+      const icon = document.createElement("i");
+      icon.className = "fa " + iconClass;
+      btn.appendChild(icon);
+      insertPlannerButton(row, btn);
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        onClick(btn, e);
+      });
+      if (onMount) onMount(btn);
+      return true;
+    };
+    if (tryMount()) return;
+    const obs = new MutationObserver(() => {
+      if (!tryMount()) return;
+      obs.disconnect();
+      clearTimeout(timeoutId);
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+    const timeoutId = setTimeout(() => {
+      obs.disconnect();
+      if (document.getElementById(id)) return;
+      console.warn(`[CustomTiles] "${title}" button not injected after 15s — couldn't find \`.leaflet-planner-controls\`; dynamic.watch may have changed its planner toolbar.`);
+    }, 15e3);
   }
 
   // src/utils/html.js
@@ -2356,9 +2404,7 @@
         btn.title = "Toggle 3D terrain";
         btn.setAttribute("aria-pressed", "false");
         btn.innerHTML = '<i class="fa fa-cube"></i>';
-        const distance = row.querySelector(".distance");
-        if (distance) row.insertBefore(btn, distance);
-        else row.appendChild(btn);
+        insertPlannerButton(row, btn);
         btn.addEventListener("click", (e) => {
           e.preventDefault();
           const turningOn = !controller.isActive();
@@ -10779,44 +10825,6 @@
     return { HistoricMinesLayerProvider: HistoricMinesLayerProvider2, MineShaftsLayerProvider: MineShaftsLayerProvider2, HistoricLeasesLayerProvider: HistoricLeasesLayerProvider2 };
   }
 
-  // src/ui/planner-toolbar.js
-  function mountPlannerButton({ id, className, title, iconClass, onClick, onMount }) {
-    const tryMount = () => {
-      const row = document.querySelector(".leaflet-planner-controls");
-      if (!row) return false;
-      if (row.querySelector("#" + id)) return true;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "btn btn-default fixed-width " + className;
-      btn.id = id;
-      btn.title = title;
-      btn.setAttribute("aria-label", title);
-      btn.setAttribute("aria-pressed", "false");
-      const icon = document.createElement("i");
-      icon.className = "fa " + iconClass;
-      btn.appendChild(icon);
-      row.insertBefore(btn, row.querySelector(".distance"));
-      btn.addEventListener("click", (e) => {
-        e.preventDefault();
-        onClick(btn, e);
-      });
-      if (onMount) onMount(btn);
-      return true;
-    };
-    if (tryMount()) return;
-    const obs = new MutationObserver(() => {
-      if (!tryMount()) return;
-      obs.disconnect();
-      clearTimeout(timeoutId);
-    });
-    obs.observe(document.body, { childList: true, subtree: true });
-    const timeoutId = setTimeout(() => {
-      obs.disconnect();
-      if (document.getElementById(id)) return;
-      console.warn(`[CustomTiles] "${title}" button not injected after 15s — couldn't find \`.leaflet-planner-controls\`; dynamic.watch may have changed its planner toolbar.`);
-    }, 15e3);
-  }
-
   // src/utils/route-geometry.js
   var EARTH_R = 63710088e-1;
   var RAD = Math.PI / 180;
@@ -13944,6 +13952,11 @@
         ".dw-histmap-ctl .dw-histmap-msg { color: #b91c1c; min-height: 0; }",
         ".dw-histmap-ctl .dw-histmap-btns { display: flex; gap: 6px; margin-top: 6px; }",
         ".dw-histmap-ctl button { flex: 1; padding: 5px 6px; font-size: 12px; cursor: pointer; }",
+        // Script buttons in the planner action row are spaced like the
+        // native ones (see insertPlannerButton). On phones about 360 px
+        // wide that makes the row a few pixels too long and the distance
+        // readout drops to a second line, so there the gaps are closed.
+        "@media (max-width: 374px) { .leaflet-planner-controls .btn.dw-planner-btn { margin-left: -4px; } }",
         // 3D toggle in the planner action row. Matches the native
         // btn-default look; `.active` darkens it the same way
         // Bootstrap 3 does for pressed buttons.

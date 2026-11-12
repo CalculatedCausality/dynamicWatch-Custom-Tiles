@@ -1107,6 +1107,11 @@ export class CustomTilesApp {
 			".dw-histmap-ctl .dw-histmap-msg { color: #b91c1c; min-height: 0; }",
 			".dw-histmap-ctl .dw-histmap-btns { display: flex; gap: 6px; margin-top: 6px; }",
 			".dw-histmap-ctl button { flex: 1; padding: 5px 6px; font-size: 12px; cursor: pointer; }",
+			// Script buttons in the planner action row are spaced like the
+			// native ones (see insertPlannerButton). On phones about 360 px
+			// wide that makes the row a few pixels too long and the distance
+			// readout drops to a second line, so there the gaps are closed.
+			"@media (max-width: 374px) { .leaflet-planner-controls .btn.dw-planner-btn { margin-left: -4px; } }",
 			// 3D toggle in the planner action row. Matches the native
 			// btn-default look; `.active` darkens it the same way
 			// Bootstrap 3 does for pressed buttons.

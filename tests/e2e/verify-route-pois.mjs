@@ -47,6 +47,22 @@ try {
 		document.querySelectorAll(".modal, .modal-backdrop").forEach((el) => el.remove());
 		document.body.classList.remove("modal-open");
 	});
+	// The script's toolbar buttons must sit in the row like the site's own.
+	await page.waitForSelector("#dw-3d-btn", { timeout: 15_000 }).catch(() => {});
+	const toolbar = await page.evaluate(() => {
+		const row = document.querySelector(".leaflet-planner-controls");
+		const kids = [...row.children].filter((el) => getComputedStyle(el).display !== "none");
+		const rects = kids.map((el) => el.getBoundingClientRect());
+		return {
+			ids: kids.map((el) => el.id || el.className.split(" ")[0]),
+			gaps: rects.slice(1).map((r, i) => Math.round((r.left - rects[i].right) * 10) / 10),
+			lines: new Set(rects.map((r) => Math.round(r.top))).size,
+		};
+	});
+	const nativeGap = toolbar.gaps[0];
+	check(toolbar.ids.includes("dw-3d-btn") && toolbar.ids.includes("dw-poi-btn") && toolbar.lines === 1 &&
+		toolbar.gaps.every((gap) => Math.abs(gap - nativeGap) <= 0.6),
+	"toolbar buttons added by the script are spaced like the native ones", `gaps ${toolbar.gaps.join(", ")} px`);
 	const routeMarkers = () => page.evaluate(() =>
 		window.leafletPlan.lines.flat().filter((s) => s && s.marker_end).length);
 	const startMarkers = await routeMarkers();
