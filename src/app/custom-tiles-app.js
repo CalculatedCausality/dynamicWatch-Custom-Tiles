@@ -1163,6 +1163,13 @@ export class CustomTilesApp {
 			".dw-poi-km { flex: 0 0 auto; color: #6b7280; font-variant-numeric: tabular-nums; }",
 			".dw-poi-row-add { flex: 0 0 auto; width: 20px; height: 20px; padding: 0; border: 1px solid #90caf9; border-radius: 4px; background: #fff; color: #1565c0; cursor: pointer; line-height: 1; }",
 			".dw-poi-row-add:disabled { border-color: #ddd; color: #2e7d32; cursor: default; }",
+			// An added row's tick removes the waypoint again; it turns into a
+			// red cross under the pointer to say so.
+			".dw-poi-row-add--added { border-color: #c8e6c9; color: #2e7d32; }",
+			".dw-poi-untick { display: none; }",
+			".dw-poi-row-add--added:not(:disabled):hover { border-color: #ef9a9a; background: #ffebee; color: #c62828; }",
+			".dw-poi-row-add--added:not(:disabled):hover .dw-poi-tick { display: none; }",
+			".dw-poi-row-add--added:not(:disabled):hover .dw-poi-untick { display: inline; }",
 			".dw-poi-more { padding: 4px 2px; color: #6b7280; }",
 			".dw-poi-attr { font-size: 9.5px; color: #888; }",
 			".dw-poi-attr a { color: #888; }",

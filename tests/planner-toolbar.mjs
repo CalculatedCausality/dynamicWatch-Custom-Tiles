@@ -2,7 +2,9 @@
 // Buttons the script adds to dynamic.watch's planner toolbar.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { insertPlannerButton } from "../src/ui/planner-toolbar.js";
+import {
+	hidePlannerButtonLabel, insertPlannerButton, setPlannerButtonLabel,
+} from "../src/ui/planner-toolbar.js";
 
 // Just enough DOM: child lists, siblings and whitespace text nodes.
 class FakeNode {
@@ -54,4 +56,69 @@ test("a row whose own buttons are not whitespace-separated is left flush", () =>
 	const empty = row();
 	insertPlannerButton(empty, el("3d"));
 	assert.equal(layout(empty), "3d");
+});
+
+// A button with attributes and a `title`, and the site's jQuery tooltip:
+// like Bootstrap's, setting one up moves `title` into `data-original-title`.
+function fakeButton() {
+	const attrs = new Map();
+	return {
+		title: "",
+		setAttribute: (name, value) => attrs.set(name, String(value)),
+		getAttribute: (name) => (attrs.has(name) ? attrs.get(name) : null),
+	};
+}
+function fakeSite({ mobile = false, broken = false } = {}) {
+	const calls = [];
+	const jQuery = (el) => ({
+		tooltip(arg) {
+			calls.push(arg === undefined ? "init" : arg);
+			if (broken) throw new Error("tooltip unavailable");
+			if (arg === undefined) { el.setAttribute("data-original-title", el.title); el.title = ""; }
+		},
+	});
+	jQuery.fn = { tooltip() {} };
+	return { win: { jQuery, is_mobile: mobile }, calls };
+}
+
+test("script buttons get the site's own hover label, set up once and kept up to date", () => {
+	const btn = fakeButton(), site = fakeSite();
+	setPlannerButtonLabel(btn, "Find POIs along the route", site.win);
+	assert.deepEqual(site.calls, ["init"]);
+	assert.equal(btn.getAttribute("data-toggle"), "tooltip");
+	assert.equal(btn.getAttribute("data-placement"), "top");
+	assert.equal(btn.getAttribute("data-original-title"), "Find POIs along the route");
+	assert.equal(btn.title, "", "no plain browser tooltip on top of the site's label");
+	assert.equal(btn.getAttribute("aria-label"), "Find POIs along the route");
+
+	setPlannerButtonLabel(btn, "Clear route POIs", site.win);
+	assert.deepEqual(site.calls, ["init"], "not set up twice");
+	assert.equal(btn.getAttribute("data-original-title"), "Clear route POIs");
+	assert.equal(btn.getAttribute("aria-label"), "Clear route POIs");
+	assert.equal(btn.title, "");
+
+	hidePlannerButtonLabel(btn, site.win);
+	assert.deepEqual(site.calls, ["init", "hide"]);
+});
+
+test("without the site's label code the button keeps a plain title", () => {
+	// dynamic.watch doesn't set these labels up on mobile, so neither does the script.
+	const mobile = fakeButton(), phone = fakeSite({ mobile: true });
+	setPlannerButtonLabel(mobile, "Toggle 3D terrain", phone.win);
+	assert.equal(mobile.title, "Toggle 3D terrain");
+	assert.deepEqual(phone.calls, []);
+	assert.equal(mobile.getAttribute("data-toggle"), null);
+	hidePlannerButtonLabel(mobile, phone.win);
+	assert.deepEqual(phone.calls, [], "nothing to hide");
+
+	const bare = fakeButton();
+	setPlannerButtonLabel(bare, "Toggle 3D terrain", {});
+	assert.equal(bare.title, "Toggle 3D terrain");
+	setPlannerButtonLabel(bare, "Changed", {});
+	assert.equal(bare.title, "Changed");
+
+	const failing = fakeButton(), site = fakeSite({ broken: true });
+	setPlannerButtonLabel(failing, "Toggle 3D terrain", site.win);
+	assert.equal(failing.title, "Toggle 3D terrain", "a failing tooltip call falls back to the title");
+	assert.equal(failing.getAttribute("aria-label"), "Toggle 3D terrain");
 });

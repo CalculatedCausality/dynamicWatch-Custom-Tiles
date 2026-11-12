@@ -13,7 +13,7 @@ import {
 	hasDwMbProtocol,
 	setDwMbHasProtocol,
 } from "../bridge/mapbox-tile-bridge.js";
-import { insertPlannerButton } from "../ui/planner-toolbar.js";
+import { hidePlannerButtonLabel, insertPlannerButton, setPlannerButtonLabel } from "../ui/planner-toolbar.js";
 import { _escHtml, esc, _safeColor } from "../utils/html.js";
 import { intvlActivityTime, intvlAgo, intvlArea } from "../utils/intvl.js";
 
@@ -1951,12 +1951,13 @@ export class Mode3DButton {
 			btn.type = "button";
 			btn.className = "btn btn-default fixed-width dw-3d-btn";
 			btn.id = "dw-3d-btn";
-			btn.title = "Toggle 3D terrain";
 			btn.setAttribute("aria-pressed", "false");
 			btn.innerHTML = '<i class="fa fa-cube"></i>';
 			insertPlannerButton(row, btn);
+			setPlannerButtonLabel(btn, "Toggle 3D terrain");
 			btn.addEventListener("click", (e) => {
 				e.preventDefault();
+				hidePlannerButtonLabel(btn);
 				const turningOn = !controller.isActive();
 				if (turningOn) {
 					controller.enable(map);

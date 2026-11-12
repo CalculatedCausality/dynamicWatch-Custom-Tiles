@@ -63,6 +63,29 @@ try {
 	check(toolbar.ids.includes("dw-3d-btn") && toolbar.ids.includes("dw-poi-btn") && toolbar.lines === 1 &&
 		toolbar.gaps.every((gap) => Math.abs(gap - nativeGap) <= 0.6),
 	"toolbar buttons added by the script are spaced like the native ones", `gaps ${toolbar.gaps.join(", ")} px`);
+	// ...and show the same label when pointed at.
+	const hoverLabel = async (selector) => {
+		await page.mouse.move(700, 300);
+		await page.waitForTimeout(350);
+		await page.hover(selector);
+		await page.waitForTimeout(600);
+		return page.evaluate((sel) => {
+			const btn = document.querySelector(sel), tips = [...document.querySelectorAll(".tooltip")];
+			const b = btn.getBoundingClientRect(), t = tips[0] ? tips[0].getBoundingClientRect() : null;
+			return {
+				count: tips.length, cls: tips[0] ? tips[0].className : "", text: tips[0] ? tips[0].textContent : "",
+				above: t ? Math.round(b.top - t.bottom) : null, title: btn.getAttribute("title") || "",
+			};
+		}, selector);
+	};
+	const nativeLabel = await hoverLabel("#undo");
+	const labels = [await hoverLabel("#dw-3d-btn"), await hoverLabel("#dw-poi-btn")];
+	await page.mouse.move(700, 300);
+	check(nativeLabel.count === 1 && nativeLabel.text.length > 0 &&
+		labels.every((l) => l.count === 1 && l.cls === nativeLabel.cls && l.above === nativeLabel.above && !l.title) &&
+		labels[0].text === "Toggle 3D terrain" && labels[1].text === "Find POIs along the route",
+	"the script's toolbar buttons show the same hover label as the native ones",
+	`"${labels[0].text}", "${labels[1].text}", ${labels[1].above} px above like "${nativeLabel.text}"`);
 	const routeMarkers = () => page.evaluate(() =>
 		window.leafletPlan.lines.flat().filter((s) => s && s.marker_end).length);
 	const startMarkers = await routeMarkers();
@@ -95,6 +118,10 @@ try {
 	check(found.markers === found.rows, "every listed POI is pinned on the map", `${found.markers} markers`);
 	check(found.km.every((km, i) => i === 0 || km >= found.km[i - 1]), "list is ordered by distance along the route");
 	check(found.active, "toolbar button shows the active state");
+	const activeLabel = await hoverLabel("#dw-poi-btn");
+	await page.mouse.move(700, 300);
+	check(activeLabel.count === 1 && activeLabel.text === "Clear route POIs", "the POI button's label follows its state",
+		activeLabel.text);
 	const waterChip = found.chips.find((c) => c.id === "water");
 	check(waterChip ? /Longest stretch without water: [\d.]+ (km|mi)/.test(found.gaps)
 		: /No drinking water within/.test(found.gaps), "panel reports the water situation", found.gaps);
@@ -159,7 +186,7 @@ try {
 		name: window.leafletPlan.waypoints.at(-1)?.name,
 		changed: window.leafletPlan.changed,
 		disabled: document.querySelector(".dw-poi-pop .dw-poi-add-btn")?.disabled,
-		rowDone: document.querySelector(".dw-poi-row .dw-poi-row-add")?.disabled,
+		rowDone: !!document.querySelector(".dw-poi-row .dw-poi-row-add")?.classList.contains("dw-poi-row-add--added"),
 		status: document.querySelector(".dw-poi-status")?.textContent,
 	}));
 	if (added.count !== before + 1) console.log(`  status after add: ${added.status}`);
@@ -171,7 +198,7 @@ try {
 	// The site's Undo removes the waypoint; the POI list follows the plan.
 	await page.click("#undo");
 	const undone = await page.waitForFunction((count) => window.leafletPlan.waypoints.length === count &&
-		document.querySelector(".dw-poi-row .dw-poi-row-add")?.disabled === false, before, { timeout: 10_000 })
+		document.querySelector(".dw-poi-row .dw-poi-row-add")?.classList.contains("dw-poi-row-add--added") === false, before, { timeout: 10_000 })
 		.then(() => true).catch(() => false);
 	check(undone, "planner Undo removes the waypoint and re-enables the POI");
 	check(await page.waitForFunction((summary) => document.querySelector(".dw-poi-status")?.textContent === summary,
@@ -183,9 +210,35 @@ try {
 	await page.waitForFunction(() => /within .* route/.test(document.querySelector(".dw-poi-status")?.textContent || "") &&
 		document.querySelector("[data-poi-names]"), undefined, { timeout: 30_000 });
 	await page.selectOption("[data-poi-names]", "km");
-	await page.locator(".dw-poi-row .dw-poi-row-add:not([disabled])").first().click();
+	const ownNames = await page.evaluate(() => window.leafletPlan.waypoints.map((w) => w.name));
+	const plusRow = page.locator(".dw-poi-row", { has: page.locator(".dw-poi-row-add:not(.dw-poi-row-add--added)") }).first();
+	const rowId = await plusRow.getAttribute("data-poi-row");
+	await plusRow.locator(".dw-poi-row-add").click();
 	const kmName = await page.evaluate(() => window.leafletPlan.waypoints.at(-1)?.name || "");
 	check(/^\d+(\.\d)?k \S/.test(kmName) && kmName.length <= 16, "waypoint names can lead with the distance", kmName);
+
+	// The tick on an added row takes its waypoint off again, and the site's
+	// Undo still works afterwards.
+	const rowState = () => page.evaluate((id) => {
+		const row = [...document.querySelectorAll(".dw-poi-row")].find((r) => r.dataset.poiRow === id);
+		return {
+			ticked: !!row?.querySelector(".dw-poi-row-add--added"),
+			names: window.leafletPlan.waypoints.map((w) => w.name),
+			status: document.querySelector(".dw-poi-status")?.textContent || "",
+		};
+	}, rowId);
+	const ticked = await rowState();
+	await page.locator(".dw-poi-row", { has: page.locator(".dw-poi-row-add--added") }).first().locator("[data-poi-remove]").click();
+	const unticked = await rowState();
+	check(ticked.ticked && !unticked.ticked && JSON.stringify(unticked.names) === JSON.stringify(ownNames) &&
+		unticked.status === `Removed “${kmName}” — Undo brings it back.`,
+	"the tick on an added row removes that waypoint and no other", unticked.status);
+	check(await routeMarkers() === startMarkers, "removing a waypoint leaves the route unchanged");
+	await page.click("#undo");
+	const broughtBack = await page.waitForFunction((count) => window.leafletPlan.waypoints.length === count &&
+		!!document.querySelector(".dw-poi-row .dw-poi-row-add--added"), before + 1, { timeout: 10_000 })
+		.then(() => true).catch(() => false);
+	check(broughtBack && (await rowState()).ticked, "planner Undo brings a removed waypoint back, ticked again");
 	await page.click("#undo");
 	await page.waitForFunction((count) => window.leafletPlan.waypoints.length === count, before, { timeout: 10_000 }).catch(() => {});
 	await page.selectOption("[data-poi-names]", "name");

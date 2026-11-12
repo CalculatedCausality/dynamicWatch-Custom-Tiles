@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.17.1
+// @version      7.18.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -736,6 +736,36 @@
     if (btn.previousSibling && !isGap(btn.previousSibling)) row.insertBefore(gap(), btn);
     if (btn.nextSibling && !isGap(btn.nextSibling)) row.insertBefore(gap(), btn.nextSibling);
   }
+  function pageWindow() {
+    if (typeof unsafeWindow !== "undefined") return unsafeWindow;
+    return typeof window !== "undefined" ? window : {};
+  }
+  var TIP_FLAG = "data-dw-tip";
+  function setPlannerButtonLabel(btn, text, win = pageWindow()) {
+    btn.setAttribute("aria-label", text);
+    if (btn.getAttribute(TIP_FLAG)) {
+      btn.setAttribute("data-original-title", text);
+      return;
+    }
+    btn.title = text;
+    try {
+      const $ = win.jQuery;
+      if (win.is_mobile || typeof $ !== "function" || !$.fn || typeof $.fn.tooltip !== "function") return;
+      btn.setAttribute("data-toggle", "tooltip");
+      btn.setAttribute("data-placement", "top");
+      $(btn).tooltip();
+      btn.setAttribute(TIP_FLAG, "1");
+    } catch (_) {
+      btn.title = text;
+    }
+  }
+  function hidePlannerButtonLabel(btn, win = pageWindow()) {
+    if (!btn.getAttribute(TIP_FLAG)) return;
+    try {
+      win.jQuery(btn).tooltip("hide");
+    } catch (_) {
+    }
+  }
   function mountPlannerButton({ id, className, title, iconClass, onClick, onMount }) {
     const tryMount = () => {
       const row = document.querySelector(".leaflet-planner-controls");
@@ -745,15 +775,15 @@
       btn.type = "button";
       btn.className = "btn btn-default fixed-width " + className;
       btn.id = id;
-      btn.title = title;
-      btn.setAttribute("aria-label", title);
       btn.setAttribute("aria-pressed", "false");
       const icon = document.createElement("i");
       icon.className = "fa " + iconClass;
       btn.appendChild(icon);
       insertPlannerButton(row, btn);
+      setPlannerButtonLabel(btn, title);
       btn.addEventListener("click", (e) => {
         e.preventDefault();
+        hidePlannerButtonLabel(btn);
         onClick(btn, e);
       });
       if (onMount) onMount(btn);
@@ -2401,12 +2431,13 @@
         btn.type = "button";
         btn.className = "btn btn-default fixed-width dw-3d-btn";
         btn.id = "dw-3d-btn";
-        btn.title = "Toggle 3D terrain";
         btn.setAttribute("aria-pressed", "false");
         btn.innerHTML = '<i class="fa fa-cube"></i>';
         insertPlannerButton(row, btn);
+        setPlannerButtonLabel(btn, "Toggle 3D terrain");
         btn.addEventListener("click", (e) => {
           e.preventDefault();
+          hidePlannerButtonLabel(btn);
           const turningOn = !controller.isActive();
           if (turningOn) {
             controller.enable(map);
@@ -11975,11 +12006,11 @@
     });
     return { cancel: stop };
   }
-  function pageWindow() {
+  function pageWindow2() {
     return typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   }
   function toPage(value) {
-    return typeof cloneInto === "function" ? cloneInto(value, pageWindow()) : value;
+    return typeof cloneInto === "function" ? cloneInto(value, pageWindow2()) : value;
   }
   function loadPrefs() {
     let prefs = {};
@@ -12191,7 +12222,7 @@
     }
     _plan() {
       try {
-        return pageWindow().leafletPlan || null;
+        return pageWindow2().leafletPlan || null;
       } catch (_) {
         return null;
       }
@@ -12217,7 +12248,7 @@
       btn.setAttribute("aria-pressed", this._state === "idle" ? "false" : "true");
       const icon = btn.querySelector("i");
       if (icon) icon.className = this._state === "loading" ? "fa fa-spinner fa-spin" : "fa fa-map-signs";
-      btn.title = this._state === "idle" ? "Find POIs along the route" : "Clear route POIs";
+      setPlannerButtonLabel(btn, this._state === "idle" ? "Find POIs along the route" : "Clear route POIs");
     }
     _setStatus(text, error = false) {
       this._status = { text, error, note: false };
@@ -12367,13 +12398,49 @@
       if (!quiet) this._note(`Added “${name}” as a waypoint — save the route to keep it.`);
       return true;
     }
-    _waypointNear(poi) {
+    // The planner waypoint on a POI (the nearest within 15 m), if there is one.
+    _waypointAt(poi) {
       const plan = this._plan();
       const waypoints = plan && Array.isArray(plan.waypoints) ? plan.waypoints : [];
-      return waypoints.some((wp) => {
+      let found = null, nearest = 15;
+      for (const wp of waypoints) {
         const ll = wp && wp.marker && typeof wp.marker.getLatLng === "function" ? wp.marker.getLatLng() : null;
-        return !!ll && haversine([ll.lng, ll.lat], [poi.lng, poi.lat]) < 15;
-      });
+        const d = ll ? haversine([ll.lng, ll.lat], [poi.lng, poi.lat]) : Infinity;
+        if (d < nearest) {
+          found = wp;
+          nearest = d;
+        }
+      }
+      return found;
+    }
+    _waypointNear(poi) {
+      return !!this._waypointAt(poi);
+    }
+    _canRemoveWaypoints() {
+      const plan = this._plan();
+      return !!plan && typeof plan.removeWaypoint === "function";
+    }
+    // Take the waypoint on a POI off the plan again, as its Delete button would.
+    _removeWaypoint(poi) {
+      const plan = this._plan();
+      const wp = this._waypointAt(poi);
+      if (!this._canRemoveWaypoints() || !wp || wp.markerId == null || !plan.waypoints.some((w) => w && w.markerId === wp.markerId)) {
+        this._syncAdded();
+        return false;
+      }
+      const name = String(wp.name || "").trim() || poi.name || poiTypeLabel(poi);
+      try {
+        plan.removeWaypoint(wp.markerId);
+      } catch (e) {
+        console.warn("[CustomTiles] Route POIs: removeWaypoint failed", e);
+      }
+      if (plan.waypoints.some((w) => w && w.markerId === wp.markerId)) {
+        this._note("dynamic.watch didn't remove the waypoint.", true);
+        return false;
+      }
+      this._syncAdded();
+      this._note(`Removed “${name}” — Undo brings it back.`);
+      return true;
     }
     _refreshAdded() {
       const next = new Set(this._pois.filter((poi) => this._waypointNear(poi)).map((poi) => poi.id));
@@ -12447,10 +12514,17 @@
       const hidden = new Set(this._prefs.hidden);
       const chips = POI_CATEGORIES.filter((cat) => counts[cat.id]).map((cat) => `<button type="button" class="dw-poi-chip${hidden.has(cat.id) ? " dw-poi-chip--off" : ""}"` + esc` data-poi-cat="${cat.id}" aria-pressed="${hidden.has(cat.id) ? "false" : "true"}">` + `<span class="dw-poi-dot" style="background:${cat.color}"></span>` + esc`${cat.label} <span class="dw-poi-count">${counts[cat.id]}</span></button>`).join("");
       const visible = this._visiblePois();
+      const canRemove = this._canRemoveWaypoints();
       const rows = visible.slice(0, LIST_LIMIT).map((poi) => {
         const cat = CATEGORY[poi.category];
         const added = this._added.has(poi.id);
-        return esc`<li class="dw-poi-row" data-poi-row="${poi.id}">` + `<span class="dw-poi-dot" style="background:${cat.color}"></span>` + esc`<span class="dw-poi-name" title="${poiTypeLabel(poi)}">${poi.name || poiTypeLabel(poi)}</span>` + esc`<span class="dw-poi-km">${formatRouteDistance(poi.along, metric)}</span>` + esc`<button type="button" class="dw-poi-row-add" data-poi-add="${poi.id}"` + (added ? ' disabled title="Waypoint added">✓' : ' title="Add as waypoint">+') + `</button></li>`;
+        let button = esc`<button type="button" class="dw-poi-row-add" data-poi-add="${poi.id}" title="Add as waypoint">+</button>`;
+        if (added && canRemove) {
+          button = esc`<button type="button" class="dw-poi-row-add dw-poi-row-add--added" data-poi-remove="${poi.id}"` + ` title="Remove this waypoint" aria-label="Remove this waypoint"><span class="dw-poi-tick">✓</span><span class="dw-poi-untick">×</span></button>`;
+        } else if (added) {
+          button = esc`<button type="button" class="dw-poi-row-add dw-poi-row-add--added" data-poi-add="${poi.id}"` + ` disabled title="Waypoint added">✓</button>`;
+        }
+        return esc`<li class="dw-poi-row" data-poi-row="${poi.id}">` + `<span class="dw-poi-dot" style="background:${cat.color}"></span>` + esc`<span class="dw-poi-name" title="${poiTypeLabel(poi)}">${poi.name || poiTypeLabel(poi)}</span>` + esc`<span class="dw-poi-km">${formatRouteDistance(poi.along, metric)}</span>` + button + `</li>`;
       }).join("");
       const more = visible.length > LIST_LIMIT ? `<li class="dw-poi-more">+${visible.length - LIST_LIMIT} more on the map</li>` : "";
       const radiusOptions = POI_RADIUS_OPTIONS.map((r) => `<option value="${r}"${r === this._prefs.radius ? " selected" : ""}>${_escHtml(formatOffset(r, metric))}</option>`).join("");
@@ -12496,6 +12570,12 @@
         this._savePrefs();
         this._renderMarkers();
         this._renderPanel();
+        return;
+      }
+      const remove = target.closest("[data-poi-remove]");
+      if (remove) {
+        const poi = this._poiById(remove.dataset.poiRemove);
+        if (poi) this._removeWaypoint(poi);
         return;
       }
       const add = target.closest("[data-poi-add]");
@@ -14008,6 +14088,13 @@
         ".dw-poi-km { flex: 0 0 auto; color: #6b7280; font-variant-numeric: tabular-nums; }",
         ".dw-poi-row-add { flex: 0 0 auto; width: 20px; height: 20px; padding: 0; border: 1px solid #90caf9; border-radius: 4px; background: #fff; color: #1565c0; cursor: pointer; line-height: 1; }",
         ".dw-poi-row-add:disabled { border-color: #ddd; color: #2e7d32; cursor: default; }",
+        // An added row's tick removes the waypoint again; it turns into a
+        // red cross under the pointer to say so.
+        ".dw-poi-row-add--added { border-color: #c8e6c9; color: #2e7d32; }",
+        ".dw-poi-untick { display: none; }",
+        ".dw-poi-row-add--added:not(:disabled):hover { border-color: #ef9a9a; background: #ffebee; color: #c62828; }",
+        ".dw-poi-row-add--added:not(:disabled):hover .dw-poi-tick { display: none; }",
+        ".dw-poi-row-add--added:not(:disabled):hover .dw-poi-untick { display: inline; }",
         ".dw-poi-more { padding: 4px 2px; color: #6b7280; }",
         ".dw-poi-attr { font-size: 9.5px; color: #888; }",
         ".dw-poi-attr a { color: #888; }",

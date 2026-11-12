@@ -76,7 +76,7 @@ credentials; `lightpoll-token.mjs` checks public WMS URL construction.
 `route-pois.mjs` covers route-corridor geometry (distance along the route,
 out-and-back passes, tile coverage, slicing a stretch), vector-tile POI
 decoding, filtering, tile retries/caching, water and resupply gaps, following
-route edits, and adding POIs as planner waypoints. `route-profile.mjs` covers
+route edits, and adding POIs as planner waypoints and removing them again. `route-profile.mjs` covers
 resampling the route, smoothing elevations, Terrarium elevation decoding and
 fetching with stubbed requests, and the waypoint name modes.
 `route-features.mjs` covers course points: creek crossings (tile duplicates,
@@ -86,7 +86,8 @@ side roads, unmapped gaps, returning names), ClimbPro-style climb detection
 shortening, a full search with a synthetic tile and elevation profile, and
 keeping one waypoint per 100 m when adding in bulk.
 `planner-toolbar.mjs` covers how the script's toolbar buttons are inserted so
-they are spaced like dynamic.watch's own. `userscript-menu.mjs` covers the
+they are spaced like dynamic.watch's own, and how they get the site's hover
+label (with a plain title where that isn't available). `userscript-menu.mjs` covers the
 userscript-manager menu: redaction, diagnostics, Vexcel sign-out and
 change-login feedback, and preference reset.
 `release-scripts.mjs` runs the version-bump and release-notes scripts against

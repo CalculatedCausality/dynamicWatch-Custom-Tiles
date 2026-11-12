@@ -103,8 +103,9 @@ never add route points, **Add as waypoint** creates a named planner waypoint
 that the site's Undo removes, and pressing the button again clears everything.
 Climbs (each with a top), creek crossings and named track sections must be
 found on the route, a climb's popup must show its gradient and where it ends,
-the script's toolbar buttons must be spaced like the native ones, the list must
-keep room for several rows, a list click must open its popup
+the script's toolbar buttons must be spaced and labelled like the native ones,
+the tick on an added row must remove that waypoint and no other (with the
+site's Undo bringing it back), the list must keep room for several rows, a list click must open its popup
 beside the panel, and the distance name mode must produce names such as
 `4.2k Kiosk`.
 It then appends a temporary stretch along the Mooloolaba esplanade and checks

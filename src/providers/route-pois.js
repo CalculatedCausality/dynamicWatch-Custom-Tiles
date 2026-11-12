@@ -1,5 +1,5 @@
 import { CFG } from "../config.js";
-import { mountPlannerButton } from "../ui/planner-toolbar.js";
+import { mountPlannerButton, setPlannerButtonLabel } from "../ui/planner-toolbar.js";
 import { cachedFetch, gmCancel, gmGet, gmJsonGet } from "../utils/http.js";
 import { _escHtml, esc } from "../utils/html.js";
 import { decodeGeometry, mvtDecode } from "../utils/mvt.js";
@@ -729,7 +729,7 @@ export class RoutePoiController {
 		btn.setAttribute("aria-pressed", this._state === "idle" ? "false" : "true");
 		const icon = btn.querySelector("i");
 		if (icon) icon.className = this._state === "loading" ? "fa fa-spinner fa-spin" : "fa fa-map-signs";
-		btn.title = this._state === "idle" ? "Find POIs along the route" : "Clear route POIs";
+		setPlannerButtonLabel(btn, this._state === "idle" ? "Find POIs along the route" : "Clear route POIs");
 	}
 
 	_setStatus(text, error = false) {
@@ -903,13 +903,50 @@ export class RoutePoiController {
 		return true;
 	}
 
-	_waypointNear(poi) {
+	// The planner waypoint on a POI (the nearest within 15 m), if there is one.
+	_waypointAt(poi) {
 		const plan = this._plan();
 		const waypoints = plan && Array.isArray(plan.waypoints) ? plan.waypoints : [];
-		return waypoints.some((wp) => {
+		let found = null, nearest = 15;
+		for (const wp of waypoints) {
 			const ll = wp && wp.marker && typeof wp.marker.getLatLng === "function" ? wp.marker.getLatLng() : null;
-			return !!ll && haversine([ll.lng, ll.lat], [poi.lng, poi.lat]) < 15;
-		});
+			const d = ll ? haversine([ll.lng, ll.lat], [poi.lng, poi.lat]) : Infinity;
+			if (d < nearest) { found = wp; nearest = d; }
+		}
+		return found;
+	}
+
+	_waypointNear(poi) {
+		return !!this._waypointAt(poi);
+	}
+
+	_canRemoveWaypoints() {
+		const plan = this._plan();
+		return !!plan && typeof plan.removeWaypoint === "function";
+	}
+
+	// Take the waypoint on a POI off the plan again, as its Delete button would.
+	_removeWaypoint(poi) {
+		const plan = this._plan();
+		const wp = this._waypointAt(poi);
+		// dynamic.watch's removeWaypoint removes the *last* waypoint when it is
+		// given an id it doesn't know, so only ever pass one that is in the plan.
+		if (!this._canRemoveWaypoints() || !wp || wp.markerId == null ||
+			!plan.waypoints.some((w) => w && w.markerId === wp.markerId)) {
+			this._syncAdded();
+			return false;
+		}
+		const name = String(wp.name || "").trim() || poi.name || poiTypeLabel(poi);
+		try { plan.removeWaypoint(wp.markerId); } catch (e) {
+			console.warn("[CustomTiles] Route POIs: removeWaypoint failed", e);
+		}
+		if (plan.waypoints.some((w) => w && w.markerId === wp.markerId)) {
+			this._note("dynamic.watch didn't remove the waypoint.", true);
+			return false;
+		}
+		this._syncAdded();
+		this._note(`Removed “${name}” — Undo brings it back.`);
+		return true;
 	}
 
 	_refreshAdded() {
@@ -994,15 +1031,24 @@ export class RoutePoiController {
 			`<span class="dw-poi-dot" style="background:${cat.color}"></span>` +
 			esc`${cat.label} <span class="dw-poi-count">${counts[cat.id]}</span></button>`).join("");
 		const visible = this._visiblePois();
+		const canRemove = this._canRemoveWaypoints();
 		const rows = visible.slice(0, LIST_LIMIT).map((poi) => {
 			const cat = CATEGORY[poi.category];
 			const added = this._added.has(poi.id);
+			let button = esc`<button type="button" class="dw-poi-row-add" data-poi-add="${poi.id}" title="Add as waypoint">+</button>`;
+			if (added && canRemove) {
+				button = esc`<button type="button" class="dw-poi-row-add dw-poi-row-add--added" data-poi-remove="${poi.id}"` +
+					` title="Remove this waypoint" aria-label="Remove this waypoint">` +
+					`<span class="dw-poi-tick">✓</span><span class="dw-poi-untick">×</span></button>`;
+			} else if (added) {
+				button = esc`<button type="button" class="dw-poi-row-add dw-poi-row-add--added" data-poi-add="${poi.id}"` +
+					` disabled title="Waypoint added">✓</button>`;
+			}
 			return esc`<li class="dw-poi-row" data-poi-row="${poi.id}">` +
 				`<span class="dw-poi-dot" style="background:${cat.color}"></span>` +
 				esc`<span class="dw-poi-name" title="${poiTypeLabel(poi)}">${poi.name || poiTypeLabel(poi)}</span>` +
 				esc`<span class="dw-poi-km">${formatRouteDistance(poi.along, metric)}</span>` +
-				esc`<button type="button" class="dw-poi-row-add" data-poi-add="${poi.id}"` +
-				(added ? ' disabled title="Waypoint added">✓' : ' title="Add as waypoint">+') + `</button></li>`;
+				button + `</li>`;
 		}).join("");
 		const more = visible.length > LIST_LIMIT
 			? `<li class="dw-poi-more">+${visible.length - LIST_LIMIT} more on the map</li>` : "";
@@ -1073,6 +1119,12 @@ export class RoutePoiController {
 			this._savePrefs();
 			this._renderMarkers();
 			this._renderPanel();
+			return;
+		}
+		const remove = target.closest("[data-poi-remove]");
+		if (remove) {
+			const poi = this._poiById(remove.dataset.poiRemove);
+			if (poi) this._removeWaypoint(poi);
 			return;
 		}
 		const add = target.closest("[data-poi-add]");

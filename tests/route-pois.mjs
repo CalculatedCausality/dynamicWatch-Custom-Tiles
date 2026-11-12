@@ -270,6 +270,57 @@ test("adding POIs creates named planner waypoints once, without duplicates or ov
 	} finally { delete globalThis.window; }
 });
 
+test("an added row's tick removes that waypoint and never another one", () => {
+	const marker = (lat, lng) => ({ getLatLng: () => ({ lat, lng }) });
+	const asked = [];
+	const plan = {
+		waypoints: [
+			{ marker: marker(north(1)[1], 0), name: "Tap", markerId: "a" },
+			{ marker: marker(north(2)[1], 0), name: "My own waypoint", markerId: "b" },
+		],
+		waypointNameLength: 16, waypointCountMax: 50, unitsMetric: true,
+		// As on dynamic.watch: an id it doesn't know removes the last waypoint.
+		removeWaypoint(id) {
+			asked.push(id);
+			this.waypoints.splice(this.waypoints.findIndex((w) => w.markerId == id), 1);
+		},
+	};
+	globalThis.window = { leafletPlan: plan, confirm: () => true };
+	try {
+		const ctl = new RoutePoiController({});
+		ctl._renderPanel = () => {};
+		const poi = (id, km) => ({ id, name: "", type: "drinking_water", category: "water",
+			lat: north(km)[1], lng: 0, passes: [{ along: km * 1000, offset: 0 }], along: km * 1000, offset: 0 });
+		ctl._pois = [poi("at-1km", 1), poi("at-3km", 3)];
+		ctl._refreshAdded();
+		assert.deepEqual([...ctl._added], ["at-1km"]);
+
+		assert.equal(ctl._removeWaypoint(ctl._pois[1]), false, "no waypoint on this POI");
+		assert.deepEqual(asked, [], "the planner is never asked about a waypoint it doesn't have");
+		assert.equal(plan.waypoints.length, 2);
+
+		assert.equal(ctl._removeWaypoint(ctl._pois[0]), true);
+		assert.deepEqual(asked, ["a"]);
+		assert.deepEqual(plan.waypoints.map((w) => w.name), ["My own waypoint"]);
+		assert.equal(ctl._added.size, 0, "the row is no longer ticked");
+		assert.equal(ctl._status.text, "Removed “Tap” — Undo brings it back.");
+
+		// A waypoint dragged away or deleted on the map since the list was drawn.
+		ctl._added.add("at-3km");
+		assert.equal(ctl._removeWaypoint(ctl._pois[1]), false);
+		assert.equal(ctl._added.size, 0, "a stale tick is cleared instead");
+		assert.equal(plan.waypoints.length, 1);
+
+		// An older planner without removeWaypoint leaves waypoints alone.
+		delete plan.removeWaypoint;
+		ctl._pois = [poi("at-2km", 2)];
+		ctl._refreshAdded();
+		assert.equal(ctl._canRemoveWaypoints(), false);
+		assert.equal(ctl._removeWaypoint(ctl._pois[0]), false);
+		assert.equal(plan.waypoints.length, 1);
+	} finally { delete globalThis.window; }
+});
+
 test("longest gap is bounded by the route's start and end", () => {
 	assert.deepEqual(longestGap([], 10000), { from: 0, to: 10000, length: 10000 });
 	assert.deepEqual(longestGap([2000, 9000, 3000], 10000), { from: 3000, to: 9000, length: 6000 });
