@@ -18,10 +18,12 @@ concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
+# Runners are pinned to Ubuntu 24.04: the installed Playwright cannot set up
+# Chromium on the newer "latest" image (26.04). Move both together.
 jobs:
   offline:
     name: Offline tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -55,7 +57,7 @@ jobs:
     name: Release userscript
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: offline
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -84,7 +86,7 @@ jobs:
     # Manual only: third-party map services change and rate-limit, so a red
     # run here means "look at the endpoint", not "this commit is broken".
     if: github.event_name == 'workflow_dispatch' && inputs.live
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
