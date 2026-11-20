@@ -841,9 +841,13 @@ async function runTest4() {
 	// controller may be mid-loading when our final click lands — `isActive()`
 	// returns true (loading), the click is treated as "turn off", and the
 	// previous single-shot waitForFunction hung for 30s. Poll, re-click only
-	// when fully off, max 3 attempts of 15s each.
+	// when fully off. The toggles above can leave six or more overlays
+	// on at once; in headless Chromium (software WebGL) each takes about
+	// ten seconds to load, one after another, so allow three minutes.
+	// Measured 20 Nov 2026: about 100 s on a busy machine, loading
+	// steadily throughout, identical before and after the 7.18.1 changes.
 	let settled = false;
-	for (let attempt = 0; attempt < 3 && !settled; attempt++) {
+	for (let attempt = 0; attempt < 12 && !settled; attempt++) {
 		await page.evaluate(() => {
 			const ctrl = window._dw3D;
 			const btn  = document.querySelector(".dw-3d-btn");
@@ -861,7 +865,7 @@ async function runTest4() {
 	}
 	if (!settled) {
 		fail("Stress: rapid 3D + layer + camera thrash",
-			"3D never settled after 8 toggles + 3 settle attempts");
+			"3D never settled within 3 minutes of 8 toggles");
 		return;
 	}
 	await page.waitForTimeout(1_500);
