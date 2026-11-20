@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.18.0
+// @version      7.18.1
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -834,6 +834,39 @@
     return months[parseInt(m[2], 10) - 1] + " " + m[1];
   }
 
+  // src/runtime/mode-3d-sync.js
+  function rasterKey(spec) {
+    return spec ? `${spec.url}|${spec.maxzoom}` : "";
+  }
+  function planRasterOverlays(existing, specs, force = false) {
+    const wanted = /* @__PURE__ */ new Map();
+    for (const spec of specs || []) {
+      const key = rasterKey(spec);
+      if (!wanted.has(key)) wanted.set(key, spec);
+    }
+    const remove = [], keep = [], add = [];
+    for (const [key, entry] of existing || []) {
+      if (!force && wanted.has(key)) keep.push({ key, entry, spec: wanted.get(key) });
+      else remove.push({ key, entry });
+    }
+    const kept = new Set(keep.map((k) => k.key));
+    for (const [key, spec] of wanted) if (!kept.has(key)) add.push({ key, spec });
+    return { remove, keep, add, order: [...wanted.keys()] };
+  }
+  function layerMoves(want, exists) {
+    const present = (want || []).filter((id, i, all) => exists(id) && all.indexOf(id) === i);
+    if (!present.length) return [];
+    const moves = [[present[present.length - 1], void 0]];
+    for (let i = present.length - 2; i >= 0; i--) moves.push([present[i], present[i + 1]]);
+    return moves;
+  }
+  function describeMapError(event) {
+    const raw = String(event?.error?.message || event?.message || "unknown error");
+    const message = raw.replace(/\?[^\s"')]*/g, "").replace(/\s+/g, " ").trim().slice(0, 200);
+    const source = event?.sourceId ? String(event.sourceId) : "";
+    return { key: source + "|" + message.slice(0, 80), text: (source ? source + ": " : "") + message };
+  }
+
   // src/utils/intvl.js
   function hexAlpha(hex, a) {
     const m = /^#([0-9a-f]{6})$/i.exec(hex);
@@ -905,6 +938,14 @@
         }
         const script = document.createElement("script");
         script.src = `https://api.mapbox.com/mapbox-gl-js/v${CFG.MAPBOX_GL_VERSION}/mapbox-gl.js`;
+        const fail = (message) => {
+          ensureMapboxLoaded._p = null;
+          try {
+            script.remove();
+          } catch (_) {
+          }
+          reject(new Error(message));
+        };
         script.onload = () => {
           if (win.mapboxgl) {
             try {
@@ -926,9 +967,9 @@
               console.warn("[CustomTiles] addProtocol failed:", e.message);
             }
             resolve(win.mapboxgl);
-          } else reject(new Error("mapboxgl global missing after load"));
+          } else fail("mapboxgl global missing after load");
         };
-        script.onerror = () => reject(new Error("script tag load failed"));
+        script.onerror = () => fail("script tag load failed");
         document.head.appendChild(script);
       });
     }
@@ -957,21 +998,33 @@
       ensureMapboxLoaded().then((mapboxgl) => {
         if (myGen !== this._gen) return;
         this._loading = false;
-        this._mount(map);
-        this._initMbMap(map, mapboxgl);
-        this._wireMarkerCache(map);
-        this._wireSync(map);
-        this._wireBasemapTracker(map);
+        this._mapboxgl = mapboxgl;
+        try {
+          this._mount(map);
+          this._initMbMap(map, mapboxgl);
+          this._wireMarkerCache(map);
+          this._wireSync(map);
+          this._wireBasemapTracker(map);
+        } catch (e) {
+          this._teardown(map);
+          this._enableFailed(e, "couldn't start the 3D map");
+          return;
+        }
         this._active = true;
         console.info("[CustomTiles] 3D Mode enabled");
       }).catch((e) => {
         if (myGen !== this._gen) return;
         this._loading = false;
-        console.error(
-          "[CustomTiles] 3D Mode: failed to load mapbox-gl-js:",
-          e.message
-        );
+        this._enableFailed(e, "failed to load mapbox-gl-js");
       });
+    }
+    // `onEnableFailed` lets the toolbar button un-press itself.
+    _enableFailed(e, what) {
+      console.error(`[CustomTiles] 3D Mode: ${what}:`, e && e.message);
+      try {
+        if (typeof this.onEnableFailed === "function") this.onEnableFailed(e);
+      } catch (_) {
+      }
     }
     disable(map) {
       if (this._loading) {
@@ -982,6 +1035,12 @@
         return;
       }
       if (!this._active) return;
+      this._teardown(map);
+      this._active = false;
+      console.info("[CustomTiles] 3D Mode disabled");
+    }
+    // Undo everything `enable` set up. Safe on a half-built session.
+    _teardown(map) {
       clearTimeout(this._dwReloadTimer);
       this._unwireBasemapTracker(map);
       this._unwireSync(map);
@@ -989,11 +1048,22 @@
       this._unwireMarkerCache(map);
       this._unpatchLeafletProjection();
       if (this._mbMap) {
+        const mb = this._mbMap;
+        this._mbMap = null;
         try {
-          this._mbMap.remove();
+          const quiet = () => {
+          };
+          if (mb.style && typeof mb.style.on === "function") mb.style.on("error", quiet);
+          for (const id of Object.keys(mb.getStyle?.()?.sources || {})) {
+            const src = mb.getSource(id);
+            if (src && typeof src.on === "function") src.on("error", quiet);
+          }
         } catch (_) {
         }
-        this._mbMap = null;
+        try {
+          mb.remove();
+        } catch (_) {
+        }
       }
       this._popup = null;
       this._hoverBound = null;
@@ -1003,8 +1073,6 @@
       }
       this._pendingRetryCount = 0;
       this._unmount(map);
-      this._active = false;
-      console.info("[CustomTiles] 3D Mode disabled");
     }
     _mount(map) {
       this._hiddenPanes = [];
@@ -1154,6 +1222,14 @@
         // Replaces the dead dw:// addProtocol path on Mapbox v3.
         transformRequest: (url, resourceType) => this._dwTransformRequest(url, resourceType)
       });
+      const reported = /* @__PURE__ */ new Set();
+      mbMap.on("error", (e) => {
+        if (this._mbMap !== mbMap) return;
+        const { key, text } = describeMapError(e);
+        if (reported.has(key) || reported.size >= 12) return;
+        reported.add(key);
+        console.warn("[CustomTiles] 3D map: " + text);
+      });
       mbMap.on("style.load", () => {
         mbMap.setTerrain({ source: "mapbox-dem", exaggeration: 1.5 });
         try {
@@ -1171,6 +1247,14 @@
       this._mbMap = mbMap;
       this._wiredClick = /* @__PURE__ */ new Set();
       this._lastRouteSig = null;
+      this._baseKey = base ? rasterKey({ url: base.tiles[0], maxzoom: base.maxzoom }) : "";
+      this._overlayRasters = /* @__PURE__ */ new Map();
+      this._overlayCustoms = [];
+      this._overlaySeq = 0;
+      this._overlayIds = [];
+      this._shapeIds = [];
+      this._shapeSources = /* @__PURE__ */ new Map();
+      this._shapesRetryPending = false;
       this._isMoving = false;
       this._markerPanePrevVis = null;
       this._syncRequested = false;
@@ -1196,6 +1280,7 @@
       const pointFeatures = [];
       map.eachLayer((lyr) => {
         if (lyr instanceof L.Polyline && !(lyr instanceof L.Polygon)) {
+          if ((lyr.options?.pane || "overlayPane") !== "overlayPane") return;
           const latlngs = lyr.getLatLngs?.();
           if (!latlngs) return;
           const flat = (Array.isArray(latlngs[0]) ? latlngs.flat(Infinity) : latlngs).filter((p) => p && typeof p.lat === "number");
@@ -1411,29 +1496,27 @@
         }
       };
       map.eachLayer(visit);
-      const oldIds = this._shapeIds || [];
-      for (const id of oldIds) {
-        try {
-          if (mbMap.getLayer(id)) mbMap.removeLayer(id);
-        } catch (_) {
-        }
-      }
-      for (const id of oldIds) {
-        try {
-          if (mbMap.getSource(id)) mbMap.removeSource(id);
-        } catch (_) {
-        }
-      }
-      this._shapeIds = [];
       const beforeId = mbMap.getLayer("dw-route-line") ? "dw-route-line" : mbMap.getLayer("sky") ? "sky" : void 0;
+      const sources = this._shapeSources || (this._shapeSources = /* @__PURE__ */ new Map());
+      const liveSources = /* @__PURE__ */ new Set(), layerIds = [];
+      const setSource = (id, features) => {
+        const sig = JSON.stringify(features);
+        const data = { type: "FeatureCollection", features };
+        const src = mbMap.getSource(id);
+        if (!src) mbMap.addSource(id, { type: "geojson", data });
+        else if (sources.get(id) !== sig && src.setData) src.setData(data);
+        sources.set(id, sig);
+        liveSources.add(id);
+      };
+      const setLayer = (spec) => {
+        if (!mbMap.getLayer(spec.id)) mbMap.addLayer(spec, beforeId);
+        layerIds.push(spec.id);
+      };
       for (const [pane, b] of byPane) {
         if (b.polygons.length) {
           const id = `dw-shapes-poly-${pane}`;
-          mbMap.addSource(id, {
-            type: "geojson",
-            data: { type: "FeatureCollection", features: b.polygons }
-          });
-          mbMap.addLayer({
+          setSource(id, b.polygons);
+          setLayer({
             id,
             type: "fill",
             source: id,
@@ -1441,11 +1524,9 @@
               "fill-color": ["coalesce", ["get", "fillColor"], "#888"],
               "fill-opacity": ["coalesce", ["get", "fillOpacity"], 0.25]
             }
-          }, beforeId);
-          this._shapeIds.push(id);
-          const outlineId = id + "-outline";
-          mbMap.addLayer({
-            id: outlineId,
+          });
+          setLayer({
+            id: id + "-outline",
             type: "line",
             source: id,
             paint: {
@@ -1454,16 +1535,12 @@
               "line-opacity": ["coalesce", ["get", "opacity"], 0.9],
               "line-emissive-strength": 1
             }
-          }, beforeId);
-          this._shapeIds.push(outlineId);
+          });
         }
         if (b.lines.length) {
           const id = `dw-shapes-line-${pane}`;
-          mbMap.addSource(id, {
-            type: "geojson",
-            data: { type: "FeatureCollection", features: b.lines }
-          });
-          mbMap.addLayer({
+          setSource(id, b.lines);
+          setLayer({
             id,
             type: "line",
             source: id,
@@ -1474,16 +1551,12 @@
               "line-opacity": ["coalesce", ["get", "opacity"], 1],
               "line-emissive-strength": 1
             }
-          }, beforeId);
-          this._shapeIds.push(id);
+          });
         }
         if (b.points.length) {
           const id = `dw-shapes-point-${pane}`;
-          mbMap.addSource(id, {
-            type: "geojson",
-            data: { type: "FeatureCollection", features: b.points }
-          });
-          mbMap.addLayer({
+          setSource(id, b.points);
+          setLayer({
             id,
             type: "circle",
             source: id,
@@ -1494,11 +1567,9 @@
               "circle-stroke-color": "#ffffff",
               "circle-emissive-strength": 1
             }
-          }, beforeId);
-          this._shapeIds.push(id);
-          const labelId = id + "-label";
-          mbMap.addLayer({
-            id: labelId,
+          });
+          setLayer({
+            id: id + "-label",
             type: "symbol",
             source: id,
             filter: ["all", ["has", "label"], ["!=", ["get", "label"], ""]],
@@ -1515,8 +1586,7 @@
               "text-halo-width": 1,
               "text-emissive-strength": 1
             }
-          }, beforeId);
-          this._shapeIds.push(labelId);
+          });
           if (!this._wiredClick) this._wiredClick = /* @__PURE__ */ new Set();
           if (!this._wiredClick.has(id)) {
             this._wiredClick.add(id);
@@ -1535,6 +1605,24 @@
           }
         }
       }
+      const keepLayers = new Set(layerIds);
+      for (const id of this._shapeIds || []) {
+        if (keepLayers.has(id)) continue;
+        try {
+          if (mbMap.getLayer(id)) mbMap.removeLayer(id);
+        } catch (_) {
+        }
+      }
+      for (const id of [...sources.keys()]) {
+        if (liveSources.has(id)) continue;
+        try {
+          if (mbMap.getSource(id)) mbMap.removeSource(id);
+        } catch (_) {
+        }
+        sources.delete(id);
+      }
+      this._shapeIds = layerIds;
+      if (this._mapboxgl) this._wireHoverPopups(this._mapboxgl, mbMap);
     }
     // Add Mapbox sources + layers for the route + waypoints. Idempotent
     // — safe to call multiple times; existing layers/sources are
@@ -1626,17 +1714,18 @@
       }).join(";");
       if (sig === this._lastRouteSig) return;
       this._lastRouteSig = sig;
-      for (const id of ["dw-route-line", "dw-route-points", "dw-route-labels"]) {
-        try {
-          if (mbMap.getLayer(id)) mbMap.removeLayer(id);
-        } catch (_) {
-        }
+      const existing = mbMap.getSource("dw-route-line");
+      if (existing && existing.setData && mbMap.getLayer("dw-route-line")) {
+        existing.setData(line);
+        return;
       }
-      for (const id of ["dw-route-line", "dw-route-points"]) {
-        try {
-          if (mbMap.getSource(id)) mbMap.removeSource(id);
-        } catch (_) {
-        }
+      try {
+        if (mbMap.getLayer("dw-route-line")) mbMap.removeLayer("dw-route-line");
+      } catch (_) {
+      }
+      try {
+        if (existing) mbMap.removeSource("dw-route-line");
+      } catch (_) {
       }
       const beforeId = mbMap.getLayer("sky") ? "sky" : void 0;
       mbMap.addSource("dw-route-line", { type: "geojson", data: line });
@@ -1667,7 +1756,7 @@
         this._reloadHooks.add(lyr);
         const handler = () => {
           if (!this._mbMap) return;
-          this._fullResync(map, this._mbMap);
+          this._fullResync(map, this._mbMap, true);
         };
         for (const evt of events) {
           try {
@@ -1844,36 +1933,72 @@
     // Drop every previously-mirrored overlay, then re-add the
     // currently active ones. Called on layeradd/layerremove so
     // toggling a Leaflet layer mirrors live into the 3D scene.
-    _syncOverlays(map, mbMap) {
+    _syncOverlays(map, mbMap, force = false) {
       if (!this._inFullResync) this._hadPendingGetter = false;
-      return this._syncOverlaysImpl(map, mbMap);
+      return this._syncOverlaysImpl(map, mbMap, force);
     }
-    _syncOverlaysImpl(map, mbMap) {
+    // Enforce the stacking order so neither a late addLayer nor a
+    // kept-in-place source can leave the base painted ON TOP of the
+    // overlays (the "Strava heatmap not rendering above the base"
+    // symptom). Bottom-to-top:
+    //   bg → active-base → overlays → shapes → route → sky
+    _orderLayers(mb) {
+      try {
+        const want = [
+          "bg",
+          "active-base",
+          ...this._overlayIds || [],
+          ...this._shapeIds || [],
+          "dw-route-line",
+          "sky"
+        ];
+        for (const [id, before] of layerMoves(want, (id2) => !!mb.getLayer(id2))) {
+          mb.moveLayer(id, before);
+        }
+      } catch (_) {
+      }
+    }
+    _syncOverlaysImpl(map, mbMap, force = false) {
       if (!mbMap) return;
       if (!mbMap.getStyle?.()) {
-        requestAnimationFrame(() => this._syncOverlaysImpl(map, mbMap));
+        requestAnimationFrame(() => {
+          if (this._mbMap === mbMap) this._syncOverlaysImpl(map, mbMap, force);
+        });
         return;
       }
       this._hideHiddenable(map);
       this._wireReloadEvents(map, mbMap);
-      const oldIds = this._overlayIds || [];
-      for (const id of oldIds) {
-        try {
-          if (mbMap.getLayer(id)) mbMap.removeLayer(id);
-        } catch (_) {
-        }
-      }
-      for (const id of oldIds) {
-        try {
-          if (mbMap.getSource(id)) mbMap.removeSource(id);
-        } catch (_) {
-        }
-      }
-      this._overlayIds = [];
       const beforeId = mbMap.getLayer("dw-route-line") ? "dw-route-line" : mbMap.getLayer("sky") ? "sky" : void 0;
-      const specs = this._extractOverlayLayers(map);
-      specs.forEach((spec, i) => {
-        const id = `dw-overlay-${i}`;
+      const drop = (layerIds, sourceIds) => {
+        for (const id of layerIds) {
+          try {
+            if (mbMap.getLayer(id)) mbMap.removeLayer(id);
+          } catch (_) {
+          }
+        }
+        for (const id of sourceIds) {
+          try {
+            if (mbMap.getSource(id)) mbMap.removeSource(id);
+          } catch (_) {
+          }
+        }
+      };
+      const rasters = this._overlayRasters || (this._overlayRasters = /* @__PURE__ */ new Map());
+      const plan = planRasterOverlays(rasters, this._extractOverlayLayers(map), force);
+      for (const { key, entry } of plan.remove) {
+        drop([entry.id], [entry.id]);
+        rasters.delete(key);
+      }
+      for (const { entry, spec } of plan.keep) {
+        if (entry.opacity === spec.opacity) continue;
+        try {
+          mbMap.setPaintProperty(entry.id, "raster-opacity", spec.opacity);
+          entry.opacity = spec.opacity;
+        } catch (_) {
+        }
+      }
+      for (const { key, spec } of plan.add) {
+        const id = `dw-overlay-${this._overlaySeq = (this._overlaySeq || 0) + 1}`;
         try {
           mbMap.addSource(id, {
             type: "raster",
@@ -1900,23 +2025,35 @@
               "raster-emissive-strength": 1
             }
           }, beforeId);
-          this._overlayIds.push(id);
+          rasters.set(key, { id, opacity: spec.opacity });
         } catch (e) {
-          console.warn("[CustomTiles] 3D overlay mirror failed:", spec.url, e.message);
+          drop([id], [id]);
+          console.warn("[CustomTiles] 3D overlay mirror failed:", id, e.message);
         }
-      });
-      let cIdx = 0;
+      }
+      const rasterIds = plan.order.map((key) => rasters.get(key)?.id).filter(Boolean);
+      const wanted = [];
       map.eachLayer((lyr) => {
-        const style = lyr?._dwMb3DStyle;
-        if (!style) return;
-        const prefix = `dw-cust-${cIdx++}`;
+        if (lyr?._dwMb3DStyle) wanted.push(lyr);
+      });
+      const previous = this._overlayCustoms || [];
+      let same = 0;
+      if (!force) {
+        while (same < previous.length && same < wanted.length && previous[same].lyr === wanted[same] && previous[same].style === wanted[same]._dwMb3DStyle) same++;
+      }
+      for (const old of previous.slice(same)) drop(old.layerIds, old.sourceIds);
+      const customs = previous.slice(0, same);
+      for (let i = same; i < wanted.length; i++) {
+        const style = wanted[i]._dwMb3DStyle;
+        const prefix = `dw-cust-${i}`;
+        const entry = { lyr: wanted[i], style, layerIds: [], sourceIds: [] };
         const srcMap = {};
         for (const [k, src] of Object.entries(style.sources || {})) {
           const id = `${prefix}-${k}`;
           srcMap[k] = id;
           try {
             mbMap.addSource(id, src);
-            this._overlayIds.push(id);
+            entry.sourceIds.push(id);
           } catch (e) {
             console.warn("[CustomTiles] 3D custom source:", id, e.message);
           }
@@ -1929,12 +2066,17 @@
           }
           try {
             mbMap.addLayer(layerSpec, beforeId);
-            this._overlayIds.push(layerId);
+            entry.layerIds.push(layerId);
           } catch (e) {
             console.warn("[CustomTiles] 3D custom layer:", layerId, e.message);
           }
         }
-      });
+        customs.push(entry);
+      }
+      this._overlayCustoms = customs;
+      this._overlayIds = [...rasterIds, ...customs.flatMap((c) => c.layerIds)];
+      this._orderLayers(mbMap);
+      if (this._mapboxgl) this._wireHoverPopups(this._mapboxgl, mbMap);
       if (!this._hadPendingGetter) {
         this._pendingRetryCount = 0;
       } else if (!this._pendingRetry) {
@@ -2112,9 +2254,19 @@
         }
         return origLPtoLL(point);
       };
+      const ownPanBy = Object.prototype.hasOwnProperty.call(map, "panBy") ? map.panBy : null;
+      const panBy = map.panBy;
+      map.panBy = function(offset, options) {
+        if (controller._active && controller._mbMap && !controller._syncingView) return this;
+        const p = L.point(offset);
+        if (!p || !isFinite(p.x) || !isFinite(p.y)) return this;
+        return panBy.call(this, offset, options);
+      };
       this._unpatchProj = () => {
         map.containerPointToLatLng = origCPtoLL;
         map.layerPointToLatLng = origLPtoLL;
+        if (ownPanBy) map.panBy = ownPanBy;
+        else delete map.panBy;
         this._unpatchProj = null;
       };
     }
@@ -2238,11 +2390,17 @@
         try {
           const c = this._mbMap.getCenter();
           const z = this._mbMap.getZoom();
-          map.setView(
-            [c.lat, c.lng],
-            Math.round(z + 1),
-            { animate: false }
-          );
+          if (!isFinite(c.lat) || !isFinite(c.lng) || !isFinite(z)) return;
+          this._syncingView = true;
+          try {
+            map.setView(
+              [c.lat, c.lng],
+              Math.round(z + 1),
+              { animate: false }
+            );
+          } finally {
+            this._syncingView = false;
+          }
           if (!this._isMoving) {
             this._syncMarkersToMapbox(map, this._mbMap);
           }
@@ -2361,54 +2519,43 @@
     // remove-and-re-add. All wrapped in try/catch because Mapbox v3
     // throws on a stale-source mutation if the user is toggling
     // rapidly.
-    _fullResync(map, mb) {
+    _fullResync(map, mb, force = false) {
       this._hadPendingGetter = false;
       this._inFullResync = true;
       try {
         const t = this._activeBaseTiles(map);
-        if (mb.getLayer("active-base")) mb.removeLayer("active-base");
-        if (mb.getSource("active-base")) mb.removeSource("active-base");
-        if (t) {
-          mb.addSource("active-base", {
-            type: "raster",
-            tiles: t.tiles,
-            tileSize: 256,
-            maxzoom: t.maxzoom
-          });
-          const allLayers = mb.getStyle().layers;
-          const bgIdx = allLayers.findIndex((l) => l.id === "bg");
-          const afterBgId = allLayers[bgIdx + 1]?.id;
-          mb.addLayer({
-            id: "active-base",
-            type: "raster",
-            source: "active-base",
-            paint: { "raster-fade-duration": 0 }
-          }, afterBgId);
+        const key = t ? rasterKey({ url: t.tiles[0], maxzoom: t.maxzoom }) : "";
+        const have = !!mb.getSource("active-base");
+        if (force || key !== this._baseKey || have !== !!t) {
+          if (mb.getLayer("active-base")) mb.removeLayer("active-base");
+          if (have) mb.removeSource("active-base");
+          this._baseKey = "";
+          if (t) {
+            mb.addSource("active-base", {
+              type: "raster",
+              tiles: t.tiles,
+              tileSize: 256,
+              maxzoom: t.maxzoom
+            });
+            const allLayers = mb.getStyle().layers;
+            const bgIdx = allLayers.findIndex((l) => l.id === "bg");
+            const afterBgId = allLayers[bgIdx + 1]?.id;
+            mb.addLayer({
+              id: "active-base",
+              type: "raster",
+              source: "active-base",
+              paint: { "raster-fade-duration": 0 }
+            }, afterBgId);
+          }
+          this._baseKey = key;
         }
       } catch (e) {
         console.warn("[CustomTiles] 3D basemap swap failed:", e.message);
       }
-      this._syncOverlays(map, mb);
+      this._syncOverlays(map, mb, force);
       this._renderLeafletShapes(map, mb);
       this._renderRoute(map, mb);
-      try {
-        const want = [
-          "bg",
-          "active-base",
-          ...this._overlayIds || [],
-          ...this._shapeIds || [],
-          "dw-route-line",
-          "sky"
-        ];
-        for (let i = 0; i < want.length - 1; i++) {
-          const id = want[i], next = want[i + 1];
-          if (mb.getLayer(id) && mb.getLayer(next)) {
-            mb.moveLayer(id, next);
-          }
-        }
-        if (mb.getLayer("sky")) mb.moveLayer("sky");
-      } catch (_) {
-      }
+      this._orderLayers(mb);
       this._inFullResync = false;
     }
     _unwireBasemapTracker(map) {
@@ -2435,9 +2582,15 @@
         btn.innerHTML = '<i class="fa fa-cube"></i>';
         insertPlannerButton(row, btn);
         setPlannerButtonLabel(btn, "Toggle 3D terrain");
+        controller.onEnableFailed = () => {
+          btn.classList.remove("active");
+          btn.setAttribute("aria-pressed", "false");
+          setPlannerButtonLabel(btn, "3D couldn't start — click to try again");
+        };
         btn.addEventListener("click", (e) => {
           e.preventDefault();
           hidePlannerButtonLabel(btn);
+          setPlannerButtonLabel(btn, "Toggle 3D terrain");
           const turningOn = !controller.isActive();
           if (turningOn) {
             controller.enable(map);

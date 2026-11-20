@@ -15,6 +15,7 @@ import {
 } from "../bridge/mapbox-tile-bridge.js";
 import { hidePlannerButtonLabel, insertPlannerButton, setPlannerButtonLabel } from "../ui/planner-toolbar.js";
 import { _escHtml, esc, _safeColor } from "../utils/html.js";
+import { describeMapError, layerMoves, planRasterOverlays, rasterKey } from "./mode-3d-sync.js";
 import { intvlActivityTime, intvlAgo, intvlArea } from "../utils/intvl.js";
 
 const pageWin = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
@@ -70,6 +71,13 @@ function ensureMapboxLoaded() {
 			}
 			const script = document.createElement("script");
 			script.src = `https://api.mapbox.com/mapbox-gl-js/v${CFG.MAPBOX_GL_VERSION}/mapbox-gl.js`;
+			// A failed download must not be remembered: drop the promise and
+			// the dead script tag so the next press of the button tries again.
+			const fail = (message) => {
+				ensureMapboxLoaded._p = null;
+				try { script.remove(); } catch (_) {}
+				reject(new Error(message));
+			};
 			script.onload = () => {
 				if (win.mapboxgl) {
 					// Silence telemetry. The borrowed token is URL-restricted
@@ -109,9 +117,9 @@ function ensureMapboxLoaded() {
 					}
 					resolve(win.mapboxgl);
 				}
-				else reject(new Error("mapboxgl global missing after load"));
+				else fail("mapboxgl global missing after load");
 			};
-			script.onerror = () => reject(new Error("script tag load failed"));
+			script.onerror = () => fail("script tag load failed");
 			document.head.appendChild(script);
 		});
 	}
@@ -151,20 +159,33 @@ export class Mode3DController {
 		ensureMapboxLoaded().then((mapboxgl) => {
 			if (myGen !== this._gen) return;  // superseded
 			this._loading = false;
-			this._mount(map);
-			this._initMbMap(map, mapboxgl);
-			this._wireMarkerCache(map);
-			this._wireSync(map);
-			this._wireBasemapTracker(map);
+			this._mapboxgl = mapboxgl;
+			try {
+				this._mount(map);
+				this._initMbMap(map, mapboxgl);
+				this._wireMarkerCache(map);
+				this._wireSync(map);
+				this._wireBasemapTracker(map);
+			} catch (e) {
+				// e.g. WebGL unavailable. The 2D panes are already hidden
+				// by `_mount`, so undo everything or the map stays blank.
+				this._teardown(map);
+				this._enableFailed(e, "couldn't start the 3D map");
+				return;
+			}
 			this._active = true;
 			console.info("[CustomTiles] 3D Mode enabled");
 		}).catch((e) => {
 			if (myGen !== this._gen) return;
 			this._loading = false;
-			console.error(
-				"[CustomTiles] 3D Mode: failed to load mapbox-gl-js:",
-				e.message);
+			this._enableFailed(e, "failed to load mapbox-gl-js");
 		});
+	}
+
+	// `onEnableFailed` lets the toolbar button un-press itself.
+	_enableFailed(e, what) {
+		console.error(`[CustomTiles] 3D Mode: ${what}:`, e && e.message);
+		try { if (typeof this.onEnableFailed === "function") this.onEnableFailed(e); } catch (_) {}
 	}
 
 	disable(map) {
@@ -182,6 +203,13 @@ export class Mode3DController {
 			return;
 		}
 		if (!this._active) return;
+		this._teardown(map);
+		this._active = false;
+		console.info("[CustomTiles] 3D Mode disabled");
+	}
+
+	// Undo everything `enable` set up. Safe on a half-built session.
+	_teardown(map) {
 		clearTimeout(this._dwReloadTimer);
 		this._unwireBasemapTracker(map);
 		this._unwireSync(map);
@@ -189,8 +217,24 @@ export class Mode3DController {
 		this._unwireMarkerCache(map);
 		this._unpatchLeafletProjection();
 		if (this._mbMap) {
-			try { this._mbMap.remove(); } catch (_) {}
+			// Clear the reference first: tiles still decoding when the map
+			// is removed report errors afterwards, and the error listener
+			// uses this to tell them from a live map's.
+			const mb = this._mbMap;
 			this._mbMap = null;
+			// Removal detaches the style from the map, so those late
+			// errors find no listener and Mapbox prints each one in full
+			// (hundreds when 3D is switched off mid-load). Give the style
+			// and its sources a listener that swallows them.
+			try {
+				const quiet = () => {};
+				if (mb.style && typeof mb.style.on === "function") mb.style.on("error", quiet);
+				for (const id of Object.keys(mb.getStyle?.()?.sources || {})) {
+					const src = mb.getSource(id);
+					if (src && typeof src.on === "function") src.on("error", quiet);
+				}
+			} catch (_) {}
+			try { mb.remove(); } catch (_) {}
 		}
 		// `_popup` + `_hoverBound` reference the destroyed mbMap;
 		// drop them so the next enable() creates fresh ones.
@@ -206,8 +250,6 @@ export class Mode3DController {
 		}
 		this._pendingRetryCount = 0;
 		this._unmount(map);
-		this._active = false;
-		console.info("[CustomTiles] 3D Mode disabled");
 	}
 
 	_mount(map) {
@@ -425,6 +467,17 @@ export class Mode3DController {
 			transformRequest: (url, resourceType) =>
 				this._dwTransformRequest(url, resourceType),
 		});
+		// Without a listener Mapbox prints every error in full, including
+		// the hundreds a removed map reports for tiles that were still
+		// decoding. Report a live map's faults once each, briefly.
+		const reported = new Set();
+		mbMap.on("error", (e) => {
+			if (this._mbMap !== mbMap) return;
+			const { key, text } = describeMapError(e);
+			if (reported.has(key) || reported.size >= 12) return;
+			reported.add(key);
+			console.warn("[CustomTiles] 3D map: " + text);
+		});
 		mbMap.on("style.load", () => {
 			mbMap.setTerrain({ source: "mapbox-dem", exaggeration: 1.5 });
 			// Belt-and-braces resize: even with the right parent,
@@ -463,6 +516,14 @@ export class Mode3DController {
 		// MUST run on its first call.
 		this._wiredClick   = new Set();
 		this._lastRouteSig = null;
+		this._baseKey        = base ? rasterKey({ url: base.tiles[0], maxzoom: base.maxzoom }) : "";
+		this._overlayRasters = new Map();
+		this._overlayCustoms = [];
+		this._overlaySeq     = 0;
+		this._overlayIds     = [];
+		this._shapeIds       = [];
+		this._shapeSources   = new Map();
+		this._shapesRetryPending = false;
 		// Reset move-state flags so a previous session that
 		// disabled mid-move can't leave the new session thinking
 		// it's already moving (which would suppress marker sync
@@ -503,6 +564,10 @@ export class Mode3DController {
 		const pointFeatures = [];
 		map.eachLayer((lyr) => {
 			if (lyr instanceof L.Polyline && !(lyr instanceof L.Polygon)) {
+				// Lines in a layer's own pane (power lines, pipelines) are
+				// drawn by `_renderLeafletShapes`; taking them here too
+				// drew each one twice.
+				if ((lyr.options?.pane || "overlayPane") !== "overlayPane") return;
 				const latlngs = lyr.getLatLngs?.();
 				if (!latlngs) return;
 				const flat = (Array.isArray(latlngs[0]) ? latlngs.flat(Infinity) : latlngs)
@@ -737,56 +802,55 @@ export class Mode3DController {
 		};
 		map.eachLayer(visit);
 
-		// Two-pass drop. Several shape sources have multiple
-		// dependent layers (point + label, polygon fill + outline),
-		// and Mapbox throws if you try to drop a source while a
-		// layer still uses it.
-		const oldIds = this._shapeIds || [];
-		for (const id of oldIds) {
-			try { if (mbMap.getLayer(id)) mbMap.removeLayer(id); } catch (_) {}
-		}
-		for (const id of oldIds) {
-			try { if (mbMap.getSource(id)) mbMap.removeSource(id); } catch (_) {}
-		}
-		this._shapeIds = [];
-
+		// Update in place. Every unrelated marker that comes or goes on
+		// the Leaflet map lands here (the planner's hover indicator does
+		// on each mouse move), so rebuilding every source each time made
+		// the shapes flicker and re-upload for nothing. A source whose
+		// features are unchanged is left alone; a changed one gets
+		// `setData`; only panes that appeared or vanished add or remove.
 		const beforeId = mbMap.getLayer("dw-route-line") ? "dw-route-line" :
 			(mbMap.getLayer("sky") ? "sky" : undefined);
+		const sources = this._shapeSources || (this._shapeSources = new Map());
+		const liveSources = new Set(), layerIds = [];
+		const setSource = (id, features) => {
+			const sig = JSON.stringify(features);
+			const data = { type: "FeatureCollection", features };
+			const src = mbMap.getSource(id);
+			if (!src) mbMap.addSource(id, { type: "geojson", data });
+			else if (sources.get(id) !== sig && src.setData) src.setData(data);
+			sources.set(id, sig);
+			liveSources.add(id);
+		};
+		const setLayer = (spec) => {
+			if (!mbMap.getLayer(spec.id)) mbMap.addLayer(spec, beforeId);
+			layerIds.push(spec.id);
+		};
 
 		for (const [pane, b] of byPane) {
 			if (b.polygons.length) {
 				const id = `dw-shapes-poly-${pane}`;
-				mbMap.addSource(id, {
-					type: "geojson",
-					data: { type: "FeatureCollection", features: b.polygons },
-				});
-				mbMap.addLayer({
+				setSource(id, b.polygons);
+				setLayer({
 					id, type: "fill", source: id,
 					paint: {
 						"fill-color":   ["coalesce", ["get", "fillColor"], "#888"],
 						"fill-opacity": ["coalesce", ["get", "fillOpacity"], 0.25],
 					},
-				}, beforeId);
-				this._shapeIds.push(id);
-				const outlineId = id + "-outline";
-				mbMap.addLayer({
-					id: outlineId, type: "line", source: id,
+				});
+				setLayer({
+					id: id + "-outline", type: "line", source: id,
 					paint: {
 						"line-color":   ["coalesce", ["get", "color"], "#888"],
 						"line-width":   ["coalesce", ["get", "weight"], 1],
 						"line-opacity": ["coalesce", ["get", "opacity"], 0.9],
 						"line-emissive-strength": 1,
 					},
-				}, beforeId);
-				this._shapeIds.push(outlineId);
+				});
 			}
 			if (b.lines.length) {
 				const id = `dw-shapes-line-${pane}`;
-				mbMap.addSource(id, {
-					type: "geojson",
-					data: { type: "FeatureCollection", features: b.lines },
-				});
-				mbMap.addLayer({
+				setSource(id, b.lines);
+				setLayer({
 					id, type: "line", source: id,
 					layout: { "line-cap": "round", "line-join": "round" },
 					paint: {
@@ -795,16 +859,12 @@ export class Mode3DController {
 						"line-opacity": ["coalesce", ["get", "opacity"], 1],
 						"line-emissive-strength": 1,
 					},
-				}, beforeId);
-				this._shapeIds.push(id);
+				});
 			}
 			if (b.points.length) {
 				const id = `dw-shapes-point-${pane}`;
-				mbMap.addSource(id, {
-					type: "geojson",
-					data: { type: "FeatureCollection", features: b.points },
-				});
-				mbMap.addLayer({
+				setSource(id, b.points);
+				setLayer({
 					id, type: "circle", source: id,
 					paint: {
 						"circle-radius":       ["coalesce", ["get", "radius"], 5],
@@ -813,14 +873,12 @@ export class Mode3DController {
 						"circle-stroke-color": "#ffffff",
 						"circle-emissive-strength": 1,
 					},
-				}, beforeId);
-				this._shapeIds.push(id);
-				// Add a single-letter type label (caches show G/M/T/etc.,
-				// drone-style; flights/vessels carry empty labels so the
-				// symbol layer renders nothing for them).
-				const labelId = id + "-label";
-				mbMap.addLayer({
-					id: labelId, type: "symbol", source: id,
+				});
+				// A single-letter type label (caches show G/M/T/etc.;
+				// flights/vessels carry empty labels so the symbol layer
+				// renders nothing for them).
+				setLayer({
+					id: id + "-label", type: "symbol", source: id,
 					filter: ["all", ["has", "label"], ["!=", ["get", "label"], ""]],
 					layout: {
 						"text-field":            ["get", "label"],
@@ -835,11 +893,10 @@ export class Mode3DController {
 						"text-halo-width":        1,
 						"text-emissive-strength": 1,
 					},
-				}, beforeId);
-				this._shapeIds.push(labelId);
+				});
 				// One click handler per circle layer that opens
-				// whatever URL the source feature carries. Wire it
-				// once per source — Mapbox dedups by (layer, type).
+				// whatever URL the source feature carries. Wired once
+				// per layer id; Mapbox keeps it across re-adds.
 				if (!this._wiredClick) this._wiredClick = new Set();
 				if (!this._wiredClick.has(id)) {
 					this._wiredClick.add(id);
@@ -862,6 +919,21 @@ export class Mode3DController {
 				}
 			}
 		}
+		// Drop what's gone: layers first, then the sources they used.
+		const keepLayers = new Set(layerIds);
+		for (const id of this._shapeIds || []) {
+			if (keepLayers.has(id)) continue;
+			try { if (mbMap.getLayer(id)) mbMap.removeLayer(id); } catch (_) {}
+		}
+		for (const id of [...sources.keys()]) {
+			if (liveSources.has(id)) continue;
+			try { if (mbMap.getSource(id)) mbMap.removeSource(id); } catch (_) {}
+			sources.delete(id);
+		}
+		this._shapeIds = layerIds;
+		// Layers that first appear after 3D was switched on still need
+		// their hover pop-ups.
+		if (this._mapboxgl) this._wireHoverPopups(this._mapboxgl, mbMap);
 	}
 
 	// Add Mapbox sources + layers for the route + waypoints. Idempotent
@@ -984,17 +1056,17 @@ export class Mode3DController {
 		}).join(";");
 		if (sig === this._lastRouteSig) return;
 		this._lastRouteSig = sig;
-		// Only the line layer is Mapbox-rendered now — the
-		// waypoint dots + distance numbers come from Leaflet's
-		// markerPane (which we no longer hide in 3D mode) so
-		// drag-to-edit keeps working. Avoid double-rendering by
-		// dropping the dw-route-points / dw-route-labels layers.
-		for (const id of ["dw-route-line", "dw-route-points", "dw-route-labels"]) {
-			try { if (mbMap.getLayer(id)) mbMap.removeLayer(id); } catch (_) {}
+		// Only the line layer is Mapbox-rendered — the waypoint dots +
+		// distance numbers come from Leaflet's markerPane so
+		// drag-to-edit keeps working. An edited route updates the
+		// existing source in place (no remove + re-add flash).
+		const existing = mbMap.getSource("dw-route-line");
+		if (existing && existing.setData && mbMap.getLayer("dw-route-line")) {
+			existing.setData(line);
+			return;
 		}
-		for (const id of ["dw-route-line", "dw-route-points"]) {
-			try { if (mbMap.getSource(id)) mbMap.removeSource(id); } catch (_) {}
-		}
+		try { if (mbMap.getLayer("dw-route-line")) mbMap.removeLayer("dw-route-line"); } catch (_) {}
+		try { if (existing) mbMap.removeSource("dw-route-line"); } catch (_) {}
 		const beforeId = mbMap.getLayer("sky") ? "sky" : undefined;
 		mbMap.addSource("dw-route-line", { type: "geojson", data: line });
 		mbMap.addLayer({
@@ -1023,7 +1095,9 @@ export class Mode3DController {
 			this._reloadHooks.add(lyr);
 			const handler = () => {
 				if (!this._mbMap) return;
-				this._fullResync(map, this._mbMap);
+				// The layer's tiles changed, possibly behind the same
+				// URL: rebuild its source instead of keeping it.
+				this._fullResync(map, this._mbMap, true);
 			};
 			for (const evt of events) {
 				try { lyr.on(evt, handler); } catch (_) {}
@@ -1224,16 +1298,33 @@ export class Mode3DController {
 	// Drop every previously-mirrored overlay, then re-add the
 	// currently active ones. Called on layeradd/layerremove so
 	// toggling a Leaflet layer mirrors live into the 3D scene.
-	_syncOverlays(map, mbMap) {
+	_syncOverlays(map, mbMap, force = false) {
 		// Standalone entry — `_fullResync` calls the same code but
 		// owns the `_hadPendingGetter` reset because it ALSO calls
 		// `_activeBaseTiles` (which can set the flag). Re-zero it
 		// here only when invoked directly (e.g. from style.load).
 		if (!this._inFullResync) this._hadPendingGetter = false;
-		return this._syncOverlaysImpl(map, mbMap);
+		return this._syncOverlaysImpl(map, mbMap, force);
 	}
 
-	_syncOverlaysImpl(map, mbMap) {
+	// Enforce the stacking order so neither a late addLayer nor a
+	// kept-in-place source can leave the base painted ON TOP of the
+	// overlays (the "Strava heatmap not rendering above the base"
+	// symptom). Bottom-to-top:
+	//   bg → active-base → overlays → shapes → route → sky
+	_orderLayers(mb) {
+		try {
+			const want = ["bg", "active-base",
+				...(this._overlayIds || []),
+				...(this._shapeIds   || []),
+				"dw-route-line", "sky"];
+			for (const [id, before] of layerMoves(want, (id) => !!mb.getLayer(id))) {
+				mb.moveLayer(id, before);
+			}
+		} catch (_) {}
+	}
+
+	_syncOverlaysImpl(map, mbMap, force = false) {
 		if (!mbMap) return;
 		// Don't gate on `isStyleLoaded()` — Mapbox sometimes
 		// returns false *inside* the style.load callback (race
@@ -1241,7 +1332,9 @@ export class Mode3DController {
 		// wrap the actual addSource/addLayer calls in try/catch
 		// and re-run on next animation frame if Mapbox isn't ready.
 		if (!mbMap.getStyle?.()) {
-			requestAnimationFrame(() => this._syncOverlaysImpl(map, mbMap));
+			requestAnimationFrame(() => {
+				if (this._mbMap === mbMap) this._syncOverlaysImpl(map, mbMap, force);
+			});
 			return;
 		}
 		// Re-hide any panes created since the last sync (e.g.
@@ -1257,24 +1350,37 @@ export class Mode3DController {
 		// resync — which re-runs the URL getter and refetches
 		// tiles for the new capture.
 		this._wireReloadEvents(map, mbMap);
-		// Two-pass remove (layers, then sources). INTVL's vector
-		// source has a dependent fill layer; OIM future port will
-		// have multiple. Without two passes, source removal fails.
-		const oldIds = this._overlayIds || [];
-		for (const id of oldIds) {
-			try { if (mbMap.getLayer(id)) mbMap.removeLayer(id); } catch (_) {}
-		}
-		for (const id of oldIds) {
-			try { if (mbMap.getSource(id)) mbMap.removeSource(id); } catch (_) {}
-		}
-		this._overlayIds = [];
 		// Insert overlay layers BEFORE the route line so the route
 		// stays visible on top. Sky stays above everything.
 		const beforeId = mbMap.getLayer("dw-route-line") ? "dw-route-line" :
 			(mbMap.getLayer("sky") ? "sky" : undefined);
-		const specs = this._extractOverlayLayers(map);
-		specs.forEach((spec, i) => {
-			const id = `dw-overlay-${i}`;
+		const drop = (layerIds, sourceIds) => {
+			for (const id of layerIds) {
+				try { if (mbMap.getLayer(id)) mbMap.removeLayer(id); } catch (_) {}
+			}
+			for (const id of sourceIds) {
+				try { if (mbMap.getSource(id)) mbMap.removeSource(id); } catch (_) {}
+			}
+		};
+
+		// Raster overlays. This used to remove and re-add every one on
+		// each pass, so switching one overlay on or off made all the
+		// others refetch their tiles. Now only what changed is touched.
+		const rasters = this._overlayRasters || (this._overlayRasters = new Map());
+		const plan = planRasterOverlays(rasters, this._extractOverlayLayers(map), force);
+		for (const { key, entry } of plan.remove) {
+			drop([entry.id], [entry.id]);
+			rasters.delete(key);
+		}
+		for (const { entry, spec } of plan.keep) {
+			if (entry.opacity === spec.opacity) continue;
+			try {
+				mbMap.setPaintProperty(entry.id, "raster-opacity", spec.opacity);
+				entry.opacity = spec.opacity;
+			} catch (_) {}
+		}
+		for (const { key, spec } of plan.add) {
+			const id = `dw-overlay-${this._overlaySeq = (this._overlaySeq || 0) + 1}`;
 			try {
 				mbMap.addSource(id, {
 					type: "raster", tiles: [spec.url],
@@ -1297,27 +1403,41 @@ export class Mode3DController {
 						"raster-emissive-strength": 1,
 					},
 				}, beforeId);
-				this._overlayIds.push(id);
+				rasters.set(key, { id, opacity: spec.opacity });
 			} catch (e) {
-				console.warn("[CustomTiles] 3D overlay mirror failed:", spec.url, e.message);
+				drop([id], [id]);
+				console.warn("[CustomTiles] 3D overlay mirror failed:", id, e.message);
 			}
-		});
+		}
+		const rasterIds = plan.order.map((key) => rasters.get(key)?.id).filter(Boolean);
+
 		// Custom Mapbox styles attached via `_dwMb3DStyle` (e.g.
 		// INTVL's vector source). Each prefix-namespaces its
-		// sources / layer ids so multiple layers don't collide,
-		// and IDs are tracked on `_overlayIds` for the next purge.
-		let cIdx = 0;
-		map.eachLayer((lyr) => {
-			const style = lyr?._dwMb3DStyle;
-			if (!style) return;
-			const prefix = `dw-cust-${cIdx++}`;
+		// sources / layer ids by position so multiple layers don't
+		// collide. The leading run that is unchanged stays; from the
+		// first difference on, they are rebuilt.
+		const wanted = [];
+		map.eachLayer((lyr) => { if (lyr?._dwMb3DStyle) wanted.push(lyr); });
+		const previous = this._overlayCustoms || [];
+		let same = 0;
+		if (!force) {
+			while (same < previous.length && same < wanted.length &&
+				previous[same].lyr === wanted[same] &&
+				previous[same].style === wanted[same]._dwMb3DStyle) same++;
+		}
+		for (const old of previous.slice(same)) drop(old.layerIds, old.sourceIds);
+		const customs = previous.slice(0, same);
+		for (let i = same; i < wanted.length; i++) {
+			const style = wanted[i]._dwMb3DStyle;
+			const prefix = `dw-cust-${i}`;
+			const entry = { lyr: wanted[i], style, layerIds: [], sourceIds: [] };
 			const srcMap = {};
 			for (const [k, src] of Object.entries(style.sources || {})) {
 				const id = `${prefix}-${k}`;
 				srcMap[k] = id;
 				try {
 					mbMap.addSource(id, src);
-					this._overlayIds.push(id);
+					entry.sourceIds.push(id);
 				} catch (e) {
 					console.warn("[CustomTiles] 3D custom source:", id, e.message);
 				}
@@ -1330,12 +1450,18 @@ export class Mode3DController {
 				}
 				try {
 					mbMap.addLayer(layerSpec, beforeId);
-					this._overlayIds.push(layerId);
+					entry.layerIds.push(layerId);
 				} catch (e) {
 					console.warn("[CustomTiles] 3D custom layer:", layerId, e.message);
 				}
 			}
-		});
+			customs.push(entry);
+		}
+		this._overlayCustoms = customs;
+		// Bottom-up layer ids, for the stacking pass.
+		this._overlayIds = [...rasterIds, ...customs.flatMap((c) => c.layerIds)];
+		this._orderLayers(mbMap);
+		if (this._mapboxgl) this._wireHoverPopups(this._mapboxgl, mbMap);
 		// One-shot retry if any token-aware getter returned null
 		// — gives the QLD CSRF/token bootstrap time to complete on
 		// its async path. Must be a FULL resync, not _syncOverlays:
@@ -1563,9 +1689,26 @@ export class Mode3DController {
 			}
 			return origLPtoLL(point);
 		};
+		// While 3D is on, Mapbox owns the camera and Leaflet only follows
+		// it (`_handler3DMove`). Anything else that pans Leaflet — the
+		// edge auto-pan while a waypoint is dragged, a pop-up's auto-pan —
+		// would move the hidden 2D map without the 3D view, and a
+		// non-finite offset corrupts the map's position for good (after
+		// which 3D cannot start again). So only our own sync may pan,
+		// and never with a non-finite offset.
+		const ownPanBy = Object.prototype.hasOwnProperty.call(map, "panBy") ? map.panBy : null;
+		const panBy = map.panBy;
+		map.panBy = function (offset, options) {
+			if (controller._active && controller._mbMap && !controller._syncingView) return this;
+			const p = L.point(offset);
+			if (!p || !isFinite(p.x) || !isFinite(p.y)) return this;
+			return panBy.call(this, offset, options);
+		};
 		this._unpatchProj = () => {
 			map.containerPointToLatLng = origCPtoLL;
 			map.layerPointToLatLng = origLPtoLL;
+			if (ownPanBy) map.panBy = ownPanBy;
+			else delete map.panBy;
 			this._unpatchProj = null;
 		};
 	}
@@ -1714,12 +1857,16 @@ export class Mode3DController {
 			try {
 				const c = this._mbMap.getCenter();
 				const z = this._mbMap.getZoom();
+				if (!isFinite(c.lat) || !isFinite(c.lng) || !isFinite(z)) return;
 				// Mapbox z = Leaflet z - 1 because our raster sources
 				// declare tileSize: 256 while Mapbox defaults to 512.
 				// Without the +1, the mirrored basemap renders at
 				// half the user's expected scale.
-				map.setView([c.lat, c.lng], Math.round(z + 1),
-					{ animate: false });
+				this._syncingView = true;
+				try {
+					map.setView([c.lat, c.lng], Math.round(z + 1),
+						{ animate: false });
+				} finally { this._syncingView = false; }
 				// Skip the per-frame marker sync while the pane is
 				// hidden — it's invisible, no point projecting.
 				if (!this._isMoving) {
@@ -1859,7 +2006,7 @@ export class Mode3DController {
 	// remove-and-re-add. All wrapped in try/catch because Mapbox v3
 	// throws on a stale-source mutation if the user is toggling
 	// rapidly.
-	_fullResync(map, mb) {
+	_fullResync(map, mb, force = false) {
 		// Own the pending-getter reset for this whole pass so the
 		// base + overlay flag tracking are unified — otherwise
 		// `_syncOverlays` would reset the flag set by
@@ -1868,59 +2015,40 @@ export class Mode3DController {
 		this._inFullResync = true;
 		try {
 			const t = this._activeBaseTiles(map);
-			// Always tear down + re-add the base in a known order
-			// rather than `setTiles`-in-place. The reason: when
-			// QLD Historical's catalog resolves AFTER overlays
-			// have been added, an in-place addLayer (beforeId:
-			// "sky") lands between the overlays and sky — i.e.
-			// ON TOP of the overlays. Re-inserting it just above
-			// `bg` guarantees the correct stacking regardless of
-			// the order events arrived in.
-			if (mb.getLayer("active-base")) mb.removeLayer("active-base");
-			if (mb.getSource("active-base")) mb.removeSource("active-base");
-			if (t) {
-				mb.addSource("active-base", {
-					type: "raster", tiles: t.tiles,
-					tileSize: 256, maxzoom: t.maxzoom,
-				});
-				// Insert immediately after `bg` (the background
-				// solid colour). Without `bg` (it should always
-				// exist) fall back to whatever's first.
-				const allLayers = mb.getStyle().layers;
-				const bgIdx = allLayers.findIndex(l => l.id === "bg");
-				const afterBgId = allLayers[bgIdx + 1]?.id;
-				mb.addLayer({
-					id: "active-base", type: "raster",
-					source: "active-base",
-					paint: { "raster-fade-duration": 0 },
-				}, afterBgId);
+			const key = t ? rasterKey({ url: t.tiles[0], maxzoom: t.maxzoom }) : "";
+			const have = !!mb.getSource("active-base");
+			// Rebuild the base only when it really changed. It used to
+			// be torn down on every pass, so switching any overlay on or
+			// off blanked the base map and refetched all of its tiles.
+			// Stacking is enforced by `_orderLayers`, not by re-adding.
+			if (force || key !== this._baseKey || have !== !!t) {
+				if (mb.getLayer("active-base")) mb.removeLayer("active-base");
+				if (have) mb.removeSource("active-base");
+				this._baseKey = "";
+				if (t) {
+					mb.addSource("active-base", {
+						type: "raster", tiles: t.tiles,
+						tileSize: 256, maxzoom: t.maxzoom,
+					});
+					// Just above `bg`; `_orderLayers` settles the rest.
+					const allLayers = mb.getStyle().layers;
+					const bgIdx = allLayers.findIndex(l => l.id === "bg");
+					const afterBgId = allLayers[bgIdx + 1]?.id;
+					mb.addLayer({
+						id: "active-base", type: "raster",
+						source: "active-base",
+						paint: { "raster-fade-duration": 0 },
+					}, afterBgId);
+				}
+				this._baseKey = key;
 			}
 		} catch (e) {
 			console.warn("[CustomTiles] 3D basemap swap failed:", e.message);
 		}
-		this._syncOverlays(map, mb);
+		this._syncOverlays(map, mb, force);
 		this._renderLeafletShapes(map, mb);
 		this._renderRoute(map, mb);
-		// Enforce final layer order so neither a late addLayer
-		// (Strava re-mirrored after active-base was rebuilt) nor
-		// a Mapbox style-load reorder can leave the base painted
-		// ON TOP of the overlays. The "Strava heatmap not
-		// rendering above the base" symptom was exactly this
-		// race. Bottom-to-top:
-		//   bg → active-base → overlays → shapes → route → sky
-		try {
-			const want = ["bg", "active-base",
-				...(this._overlayIds || []),
-				...(this._shapeIds   || []),
-				"dw-route-line", "sky"];
-			for (let i = 0; i < want.length - 1; i++) {
-				const id = want[i], next = want[i + 1];
-				if (mb.getLayer(id) && mb.getLayer(next)) {
-					mb.moveLayer(id, next);
-				}
-			}
-			if (mb.getLayer("sky")) mb.moveLayer("sky");
-		} catch (_) {}
+		this._orderLayers(mb);
 		this._inFullResync = false;
 	}
 
@@ -1955,9 +2083,18 @@ export class Mode3DButton {
 			btn.innerHTML = '<i class="fa fa-cube"></i>';
 			insertPlannerButton(row, btn);
 			setPlannerButtonLabel(btn, "Toggle 3D terrain");
+			// 3D couldn't start (the 3D library didn't download, or the
+			// browser has no WebGL): un-press the button and say so,
+			// instead of leaving it pressed over a 2D map.
+			controller.onEnableFailed = () => {
+				btn.classList.remove("active");
+				btn.setAttribute("aria-pressed", "false");
+				setPlannerButtonLabel(btn, "3D couldn't start — click to try again");
+			};
 			btn.addEventListener("click", (e) => {
 				e.preventDefault();
 				hidePlannerButtonLabel(btn);
+				setPlannerButtonLabel(btn, "Toggle 3D terrain");
 				const turningOn = !controller.isActive();
 				if (turningOn) {
 					controller.enable(map);

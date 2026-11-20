@@ -35,7 +35,7 @@ remote outages. Each runner exits with the sum of component exit codes
 
 ```bash
 node tests/unit.mjs
-node --test tests/polling-data-layer.mjs tests/viewport-layers.mjs tests/vexcel-capture.mjs tests/vexcel-tile-batch.mjs tests/vexcel-http.mjs tests/vexcel-protocol-report.mjs tests/vexcel-cache.mjs tests/vexcel-csv.mjs tests/lightpoll-token.mjs tests/route-pois.mjs tests/route-profile.mjs tests/route-features.mjs tests/planner-toolbar.mjs tests/userscript-menu.mjs tests/release-scripts.mjs
+node --test tests/polling-data-layer.mjs tests/viewport-layers.mjs tests/vexcel-capture.mjs tests/vexcel-tile-batch.mjs tests/vexcel-http.mjs tests/vexcel-protocol-report.mjs tests/vexcel-cache.mjs tests/vexcel-csv.mjs tests/lightpoll-token.mjs tests/route-pois.mjs tests/route-profile.mjs tests/route-features.mjs tests/planner-toolbar.mjs tests/mode-3d-sync.mjs tests/userscript-menu.mjs tests/release-scripts.mjs
 node tests/check-secrets.mjs
 node tests/e2e/verify-vexcel-report.mjs
 bash tests/smoke.sh        # live endpoint liveness
@@ -87,7 +87,9 @@ shortening, a full search with a synthetic tile and elevation profile, and
 keeping one waypoint per 100 m when adding in bulk.
 `planner-toolbar.mjs` covers how the script's toolbar buttons are inserted so
 they are spaced like dynamic.watch's own, and how they get the site's hover
-label (with a plain title where that isn't available). `userscript-menu.mjs` covers the
+label (with a plain title where that isn't available). `mode-3d-sync.mjs` covers how 3D Mode
+decides which mirrored layers to keep, add or remove, the stacking order, and
+error reporting without tokens. `userscript-menu.mjs` covers the
 userscript-manager menu: redaction, diagnostics, Vexcel sign-out and
 change-login feedback, and preference reset.
 `release-scripts.mjs` runs the version-bump and release-notes scripts against

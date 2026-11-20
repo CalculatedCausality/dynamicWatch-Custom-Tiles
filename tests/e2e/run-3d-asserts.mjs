@@ -159,6 +159,41 @@ await runTest7();
 
 await runTest8();
 
+// The checks above drive drags with synthetic events, which leave
+// Leaflet believing a waypoint drag is still in progress. The checks
+// below use the real mouse, so give them a freshly loaded page.
+await freshPageWith3D();
+
+// ============================================================
+// TEST 9: Switching an overlay on or off leaves the base map
+// and the other overlays alone. Every pass used to rebuild them
+// all, so one toggle blanked the base and refetched every tile.
+// ============================================================
+
+await runTest9();
+
+// ============================================================
+// TEST 10: A layer that first appears after 3D is on still gets
+// its hover pop-up, and unrelated markers coming and going (the
+// planner's hover indicator) don't rebuild the shape sources.
+// ============================================================
+
+await runTest10();
+
+// ============================================================
+// TEST 11: Switching 3D off while it is still loading doesn't
+// flood the console with errors from the removed map.
+// ============================================================
+
+await runTest11();
+
+// ============================================================
+// TEST 12: When 3D cannot start (no WebGL), the 2D map comes
+// back and the button un-presses, instead of a blank map.
+// ============================================================
+
+await runTest12();
+
 // Report
 if (!existsSync(REPORT_DIR)) mkdirSync(REPORT_DIR, { recursive: true });
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -175,6 +210,202 @@ process.exit(failed.length ? 1 : 0);
 // ============================================================
 // Test implementations
 // ============================================================
+
+async function freshPageWith3D() {
+	await page.reload({ waitUntil: "domcontentloaded", timeout: 45_000 });
+	await page.waitForSelector(".dw-3d-btn", { timeout: 30_000 });
+	await page.waitForFunction(() => (window.leafletPlan?.lines || []).flat().some((s) => s?.polyline),
+		undefined, { timeout: 30_000 });
+	// Let a remembered 3D state switch itself back on before deciding.
+	await page.waitForTimeout(1_500);
+	await page.evaluate(() => {
+		document.querySelectorAll(".modal, .modal-backdrop").forEach(el => el.remove());
+		document.body.classList.remove("modal-open");
+		const btn = document.querySelector(".dw-3d-btn");
+		if (!btn.classList.contains("active")) btn.click();
+	});
+	await page.waitForFunction(() => window._dwMb && window._dwMb.isStyleLoaded?.(), undefined, { timeout: 60_000 });
+	await page.waitForTimeout(2_000);
+}
+
+// Function declarations: the tests above run before this point in the file.
+function settled3D(timeout = 40_000) {
+	return page.waitForFunction(
+		() => window._dwMb && window._dwMb.isStyleLoaded?.(), undefined, { timeout })
+		.then(() => true).catch(() => false);
+}
+function setOverlay(name, on) {
+	return page.evaluate(([n, show]) => {
+		const ctrl = window._dwLayerCtrl;
+		const entry = ctrl._layers.find((l) => l.name === n && l.overlay);
+		if (!entry) return false;
+		if (show) ctrl._map.addLayer(entry.layer);
+		else ctrl._map.removeLayer(entry.layer);
+		return true;
+	}, [name, on]);
+}
+
+async function runTest9() {
+	const name = "Overlay toggles keep the base map and other overlays";
+	for (const overlay of ["Strava Heatmap", "OpenSeaMap", "Mobile Coverage"]) await setOverlay(overlay, false);
+	await page.waitForTimeout(600);
+	if (!await settled3D()) { fail(name, "3D didn't settle before the test"); return; }
+	await page.evaluate(() => {
+		const mb = window._dwMb;
+		window.__dwBase = mb.getSource("active-base");
+		window.__dwAdds = [];
+		window.__dwOrigAdd = mb.addSource.bind(mb);
+		mb.addSource = (id, spec) => { window.__dwAdds.push(id); return window.__dwOrigAdd(id, spec); };
+	});
+	await setOverlay("OpenSeaMap", true);
+	await page.waitForTimeout(700);
+	await settled3D();
+	const first = await page.evaluate(() => {
+		const mb = window._dwMb;
+		window.__dwFirst = mb.getStyle().layers.map((l) => l.id).find((id) => /^dw-overlay-/.test(id));
+		window.__dwFirstSource = mb.getSource(window.__dwFirst);
+		return { id: window.__dwFirst, sameBase: mb.getSource("active-base") === window.__dwBase };
+	});
+	await setOverlay("Mobile Coverage", true);
+	await page.waitForTimeout(700);
+	await settled3D();
+	const second = await page.evaluate(() => {
+		const mb = window._dwMb, ids = mb.getStyle().layers.map((l) => l.id);
+		return {
+			sameBase: mb.getSource("active-base") === window.__dwBase,
+			sameFirst: !!window.__dwFirst && mb.getSource(window.__dwFirst) === window.__dwFirstSource,
+			overlays: ids.filter((id) => /^dw-overlay-/.test(id)).length,
+			baseAdds: window.__dwAdds.filter((id) => id === "active-base").length,
+			order: ids,
+		};
+	});
+	await setOverlay("OpenSeaMap", false);
+	await setOverlay("Mobile Coverage", false);
+	await page.waitForTimeout(700);
+	await settled3D();
+	const after = await page.evaluate(() => {
+		const mb = window._dwMb;
+		mb.addSource = window.__dwOrigAdd;
+		return {
+			sameBase: mb.getSource("active-base") === window.__dwBase,
+			overlays: mb.getStyle().layers.filter((l) => /^dw-overlay-/.test(l.id)).length,
+		};
+	});
+	const baseIdx = second.order.indexOf("active-base");
+	const above = second.order.every((id, i) => !/^dw-overlay-/.test(id) || i > baseIdx);
+	const problems = [];
+	if (!first.id) problems.push("first overlay never mirrored");
+	if (!first.sameBase || !second.sameBase || !after.sameBase || second.baseAdds) problems.push("base map source was rebuilt");
+	if (!second.sameFirst) problems.push("the first overlay was rebuilt when the second was added");
+	if (second.overlays !== 2) problems.push(`expected 2 overlays, found ${second.overlays}`);
+	if (after.overlays !== 0) problems.push(`${after.overlays} overlay(s) left after removal`);
+	if (!above) problems.push(`overlay below the base: ${second.order.join(" > ")}`);
+	if (problems.length) fail(name, problems.join("; "));
+	else pass(`${name} (base kept across 4 toggles, 2 overlays stacked above it)`);
+}
+
+async function runTest10() {
+	const name = "Late layers get hover pop-ups; marker churn doesn't rebuild shapes";
+	await setOverlay("Geocaches", true);
+	await page.waitForTimeout(2500);
+	await settled3D();
+	const added = await page.evaluate(() => {
+		const mb = window._dwMb, map = window._dwMap;
+		if (!map.getPane("dwGeocachingPane")) return false;
+		mb.jumpTo({ bearing: 0, pitch: 45 });
+		const ll = mb.unproject([900, 560]);
+		const marker = L.marker([ll.lat, ll.lng], { pane: "dwGeocachingPane", opacity: 0 });
+		marker._dwData = { name: "Probe cache", code: "GC1TEST", radius: 9 };
+		marker.addTo(map);
+		window.__dwProbe = marker;
+		return true;
+	});
+	if (!added) { fail(name, "Geocaches pane missing"); return; }
+	await page.waitForTimeout(2500);
+	const at = await page.evaluate(() => {
+		const ll = window.__dwProbe.getLatLng(), p = window._dwMb.project([ll.lng, ll.lat]);
+		const box = document.querySelector("#dw-mb-container canvas").getBoundingClientRect();
+		return [box.left + p.x, box.top + p.y];
+	});
+	await page.mouse.move(at[0] - 40, at[1] - 40);
+	await page.mouse.move(at[0], at[1], { steps: 8 });
+	await page.waitForTimeout(800);
+	const popup = await page.evaluate(() => document.querySelector(".dw-mb-popup")?.textContent.trim() || "");
+	await page.mouse.move(800, 60);
+	const rebuilds = await page.evaluate(async () => {
+		const mb = window._dwMb, map = window._dwMap;
+		let adds = 0;
+		const orig = mb.addSource.bind(mb);
+		mb.addSource = (id, spec) => { if (/^dw-shapes|^dw-route/.test(id)) adds++; return orig(id, spec); };
+		for (let i = 0; i < 4; i++) {
+			const m = L.circleMarker(map.getCenter(), { radius: 4 }).addTo(map);
+			await new Promise((r) => setTimeout(r, 250));
+			map.removeLayer(m);
+			await new Promise((r) => setTimeout(r, 250));
+		}
+		await new Promise((r) => setTimeout(r, 1200));
+		mb.addSource = orig;
+		const still = mb.queryRenderedFeatures({ layers: ["dw-shapes-point-dwGeocachingPane"] })
+			.some((f) => f.properties.code === "GC1TEST");
+		map.removeLayer(window.__dwProbe);
+		return { adds, still };
+	});
+	await setOverlay("Geocaches", false);
+	await page.waitForTimeout(800);
+	const problems = [];
+	if (!/Probe cache/.test(popup)) problems.push(`no hover pop-up on a layer added after 3D (got "${popup}")`);
+	if (rebuilds.adds) problems.push(`${rebuilds.adds} shape source rebuilds from unrelated markers`);
+	if (!rebuilds.still) problems.push("the probe dot vanished");
+	if (problems.length) fail(name, problems.join("; "));
+	else pass(`${name} (pop-up "${popup.slice(0, 20)}", 0 rebuilds)`);
+}
+
+async function runTest11() {
+	const name = "Switching 3D off mid-load leaves no error flood";
+	const press = () => page.evaluate(() => document.querySelector(".dw-3d-btn").click());
+	if (!await settled3D()) { fail(name, "3D didn't settle before the test"); return; }
+	const errorsBefore = consoleLogs.filter((l) => l.type === "error" && /Could not load image/.test(l.text)).length;
+	await press();                       // off
+	await page.waitForTimeout(150);
+	await press();                       // on
+	await page.waitForTimeout(600);
+	await press();                       // off again, mid-load
+	await page.waitForTimeout(4000);
+	const flood = consoleLogs.filter((l) => l.type === "error" && /Could not load image/.test(l.text)).length - errorsBefore;
+	await press();                       // back on for the next test
+	const back = await settled3D(60_000);
+	if (flood > 0) fail(name, `${flood} "Could not load image" errors from the removed map`);
+	else if (!back) fail(name, "3D didn't come back afterwards");
+	else pass(`${name} (0 errors)`);
+}
+
+async function runTest12() {
+	const name = "A failed 3D start restores the 2D map and un-presses the button";
+	const press = () => page.evaluate(() => document.querySelector(".dw-3d-btn").click());
+	await press();                       // off
+	await page.waitForTimeout(1200);
+	await page.evaluate(() => {
+		window.__dwRealMap = window.mapboxgl.Map;
+		window.mapboxgl.Map = function () { throw new Error("Failed to initialize WebGL"); };
+	});
+	await press();
+	await page.waitForTimeout(1500);
+	const broken = await page.evaluate(() => ({
+		pressed: document.querySelector(".dw-3d-btn").classList.contains("active"),
+		hidden: window._dwMap.getContainer().classList.contains("dw-3d-active"),
+		tiles: getComputedStyle(window._dwMap.getPane("tilePane")).opacity,
+		leftover: !!document.getElementById("dw-mb-container"),
+	}));
+	await page.evaluate(() => { window.mapboxgl.Map = window.__dwRealMap; });
+	await press();
+	const recovered = await settled3D(60_000);
+	const problems = [];
+	if (broken.pressed) problems.push("button stayed pressed");
+	if (broken.hidden || broken.tiles !== "1" || broken.leftover) problems.push(`2D map not restored (${JSON.stringify(broken)})`);
+	if (!recovered) problems.push("3D didn't start on the next press");
+	if (problems.length) fail(name, problems.join("; "));
+	else pass(`${name} (and the next press starts 3D)`);
+}
 
 async function runTest1() {
 	// Capture marker positions BEFORE rotation as a sanity reference.
