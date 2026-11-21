@@ -19,6 +19,7 @@ import {
 	_slugify,
 } from './providers/qld-cadastre.js';
 import { _parseAuStreetAddress, _pickJurisdiction } from './providers/cadastre-au.js';
+import { _formatLandUseTooltip, _formatStateLandTooltip, _landArea, _landUseClass, stateLandDynamicLayers, STATE_LAND_TENURES } from './providers/qld-land.js';
 import { _formatMineTooltip, _formatShaftTooltip, _formatLeaseTooltip, _mineYear, _miningSectionHtml } from './providers/qld-mining.js';
 import { _quadToMatrix3d, _triAffine, _histMapSheet, _histMapsSectionHtml } from './providers/qld-historical-maps.js';
 import { oimIcon } from './providers/openinframap.js';
@@ -119,6 +120,7 @@ export function bootUserscript() {
 			_formatCadastreTooltip, _formatAddressLine,
 			_parseAuStreetAddress, _pickJurisdiction,
 			_formatMineTooltip, _formatShaftTooltip, _formatLeaseTooltip, _mineYear, _miningSectionHtml,
+			_formatLandUseTooltip, _formatStateLandTooltip, _landArea, _landUseClass, stateLandDynamicLayers, STATE_LAND_TENURES,
 			_quadToMatrix3d, _triAffine, _histMapSheet, _histMapsSectionHtml,
 			_deviAppUrl, _fmtSccDate, _formatSccTooltip, _formatSccPopup,
 			_sccDefaultState, _sccLoadState,

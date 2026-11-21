@@ -14,6 +14,8 @@ export function arcgisIdentify(map, latlng, opts, cb) {
 		`?geometry=${geometry}` +
 		`&geometryType=esriGeometryPoint&sr=4326` +
 		`&layers=${opts.layers}` +
+		// Limits a sublayer to the features an overlay actually draws.
+		(opts.layerDefs ? `&layerDefs=${encodeURIComponent(JSON.stringify(opts.layerDefs))}` : "") +
 		`&tolerance=${opts.tolerance || 3}` +
 		`&mapExtent=${mapExtent}` +
 		`&imageDisplay=${imageDisplay}` +

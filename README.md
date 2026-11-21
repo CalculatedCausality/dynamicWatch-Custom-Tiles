@@ -49,6 +49,8 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 | Layer | Notes |
 |---|---|
 | **Australia Cadastre** | Property/parcel boundaries for **every state & territory** (QLD, NSW, VIC, SA, WA, TAS, ACT, NT). Click a parcel for lot/plan, area, locality, and — where a street address resolves — recent sale history from OnTheHouse. Rich lot/plan+address for QLD/NSW/VIC/SA/TAS/ACT; WA/NT show locality from the national dataset |
+| **State Land** | Queensland land the State owns, from the cadastre's tenure records, each kind in its own colour: **national park** (green), **state forest, forest reserve and timber reserve** (brown), **reserves** set aside for a community purpose (teal), **unallocated State land** (orange) and State land **held under lease** (yellow). Hover for the name, kind, lot/plan, area and locality. Appears from zoom 11. A lease is occupied by its holder, so yellow does not mean open to the public |
+| **Land Use** | What each piece of Queensland is used for, from the Queensland Land Use Mapping Program, in the program's own colours (residential red, nature conservation beige, grazing pale, forestry green, water blue…). Hover for the class, its national land-use code and the year it was mapped (2011–2017 depending on the region, so recent subdivisions are missing) |
 | **SCC Applications** | Sunshine Coast Council development/building/plumbing applications as colour-coded markers; an on-map submenu picks current vs decided sets; popups carry the full record, property history, documents, and a deep link into Development.i |
 | **QPWS Estate** | Protected areas, walking tracks, great walks, MTB/horse/trail-bike trails; hover for name + type |
 | **QLD Relief** | Hillshade overlay at ~45% opacity for terrain context |
@@ -152,8 +154,10 @@ A few layers show inline tooltips on hover:
 - **Mine Shafts** — what the feature is (e.g. "Vertical shaft"), mine name, commodity, remediation status, and year of works
 - **Historic Mines** — mine site name, commodity, mine status, other commodities, depth of workings, locality, and position accuracy
 - **Historic Mining Leases** and **Old Lease Points** — permit number, type, status, years, minerals, former number, and holder
+- **State Land** — name, kind of tenure, lot/plan, area, and locality
+- **Land Use** — land-use class, national code, and year mapped
 
-With any mining overlay on, **right-click** (or long-press on a phone) a spot and the location menu lists every mine, shaft and lease recorded there, not only the one under the pointer.
+With any mining overlay, State Land or Land Use on, **right-click** (or long-press on a phone) a spot and the location menu lists everything recorded there, not only the one under the pointer.
 - **INTVL Global Map** — territory size, the owner's colour swatch, and the precise recording time decoded from the activity's cuid
 
 ### POIs along your route
@@ -261,6 +265,7 @@ Quick-reference table — what you need to log in to for each layer to render.
 | Marine Vessels | No | MarineTraffic anonymous endpoint | Cloudflare-protected; can drop out |
 | Waze Traffic | No | Waze live-map georss (reCAPTCHA-gated) | Token minted in a hidden `embed.waze.com` iframe; activates at z≥9. Manual override: `GM_setValue("dw_waze_token_manual", "<token>")` |
 | INTVL Global Map | No | Public Mapbox Vector Tile CDN | |
+| State Land, Land Use | No | Queensland Government ArcGIS (cadastre tenure; QLUMP land use) | Same host as the cadastre |
 | Aussie Bushwalking | No | aussiebushwalking.com's walk-map vector tiles | Read only while the overlay is on |
 | Geocaches | No | Groundspeak's public tile-info + map.details endpoints | No login. UTFGrid drives placement; lazy map.details fetch enriches on click. |
 
@@ -325,6 +330,12 @@ bash tests/run.sh --ci   # plain text output
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
 - **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, refreshing names, Build Up Ahead (adding, one-step Undo, replacing only its own waypoints), list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.21.0
+
+- New **State Land** overlay: national parks, state forests, reserves, unallocated State land and State leases across Queensland, each in its own colour.
+- New **Land Use** overlay: what each piece of Queensland is used for, from the Queensland Land Use Mapping Program.
+- Both are in the Property group, off by default, and list what is at a spot on right-click or long-press.
 
 ### Release notes — 7.20.0
 

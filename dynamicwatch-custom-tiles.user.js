@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.20.0
+// @version      7.21.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -161,6 +161,8 @@
     LAYER_MINE_LEASES: "Historic Mining Leases",
     LAYER_LEASE_POINTS: "Old Lease Points",
     LAYER_HIST_MAPS: "Historic Map Sheets",
+    LAYER_LAND_USE: "Land Use",
+    LAYER_STATE_LAND: "State Land",
     LAYER_TOPO: "QLD Topo",
     LAYER_INTVL_GLOBAL: "INTVL Global Map",
     LAYER_GEOCACHING: "Geocaches",
@@ -325,6 +327,15 @@
     QLD_LEASE_POINTS_LAYER_IDS: "195,210",
     QLD_LEASE_POINTS_MIN_ZOOM: 13,
     QLD_LEASES_HOVER_MIN_ZOOM: 11,
+    // Queensland Land Use Mapping Program: the latest land use of every
+    // polygon in the state (mapped 2011–2017 depending on region), layer 0.
+    QLD_LAND_USE_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/PlanningCadastre/LandUse/MapServer",
+    QLD_LAND_USE_HOVER_MIN_ZOOM: 11,
+    // State-owned land = the cadastre's Tenure layer (13), filtered to the
+    // State's tenures. The server only draws it below 1:500,000.
+    QLD_STATE_LAND_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/PlanningCadastre/LandParcelPropertyFramework/MapServer",
+    QLD_STATE_LAND_LAYER_ID: 13,
+    QLD_STATE_LAND_MIN_ZOOM: 11,
     // Historical printed map sheets index (parish/town/topographic/
     // exploration/… scans, 1860s-2012). Footprint overlay + click lists
     // the sheets covering a point, each with a scan link; a scan can be
@@ -401,7 +412,14 @@
   var DW_OVERLAY_GROUPS = [
     {
       header: "Property",
-      names: [CFG.LAYER_CADASTRE, CFG.LAYER_SCC_APPS, CFG.LAYER_QPWS, CFG.LAYER_RELIEF]
+      names: [
+        CFG.LAYER_CADASTRE,
+        CFG.LAYER_STATE_LAND,
+        CFG.LAYER_LAND_USE,
+        CFG.LAYER_SCC_APPS,
+        CFG.LAYER_QPWS,
+        CFG.LAYER_RELIEF
+      ]
     },
     {
       header: "Infrastructure",
@@ -584,7 +602,8 @@
       y: latlng.lat,
       spatialReference: { wkid: 4326 }
     }));
-    const url = `${opts.baseUrl}/identify?geometry=${geometry}&geometryType=esriGeometryPoint&sr=4326&layers=${opts.layers}&tolerance=${opts.tolerance || 3}&mapExtent=${mapExtent}&imageDisplay=${imageDisplay}&returnGeometry=false&f=json`;
+    const url = `${opts.baseUrl}/identify?geometry=${geometry}&geometryType=esriGeometryPoint&sr=4326&layers=${opts.layers}` + // Limits a sublayer to the features an overlay actually draws.
+    (opts.layerDefs ? `&layerDefs=${encodeURIComponent(JSON.stringify(opts.layerDefs))}` : "") + `&tolerance=${opts.tolerance || 3}&mapExtent=${mapExtent}&imageDisplay=${imageDisplay}&returnGeometry=false&f=json`;
     gmJsonGet(url, (err, data) => {
       if (err) {
         cb(err, null);
@@ -2992,7 +3011,7 @@
       },
       getTileUrl(coords) {
         const bb = tileToBBox4326(coords.z, coords.x, coords.y);
-        return `${opts.baseUrl}/export?bbox=${bb.minLon},${bb.minLat},${bb.maxLon},${bb.maxLat}&bboxSR=4326&imageSR=4326` + (opts.showLayers != null ? `&layers=show:${opts.showLayers}` : "") + `&size=${tileSize},${tileSize}&format=png32&transparent=true&f=image`;
+        return `${opts.baseUrl}/export?bbox=${bb.minLon},${bb.minLat},${bb.maxLon},${bb.maxLat}&bboxSR=4326&imageSR=4326` + (opts.showLayers != null ? `&layers=show:${opts.showLayers}` : "") + `&size=${tileSize},${tileSize}&format=png32&transparent=true&f=image${opts.extraParams || ""}`;
       }
     });
     const inst = new Layer("", {
@@ -3005,7 +3024,7 @@
       pane: opts.pane
     });
     const showParam = opts.showLayers != null ? `&layers=show:${opts.showLayers}` : "";
-    inst._dwMb3DUrl = `${opts.baseUrl}/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=${tileSize},${tileSize}&format=png32&transparent=true&f=image${showParam}`;
+    inst._dwMb3DUrl = `${opts.baseUrl}/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=${tileSize},${tileSize}&format=png32&transparent=true&f=image${showParam}${opts.extraParams || ""}`;
     return inst;
   }
 
@@ -11275,6 +11294,210 @@
     return { HistoricMinesLayerProvider: HistoricMinesLayerProvider2, MineShaftsLayerProvider: MineShaftsLayerProvider2, HistoricLeasesLayerProvider: HistoricLeasesLayerProvider2, LeasePointsLayerProvider: LeasePointsLayerProvider2 };
   }
 
+  // src/providers/qld-land.js
+  function _landVal(v) {
+    if (v === null || v === void 0) return "";
+    const s = String(v).trim();
+    return s && s.toLowerCase() !== "null" && s.toLowerCase() !== "none" ? s : "";
+  }
+  function _landPick(a, keys) {
+    for (const k of keys) {
+      const v = _landVal(a[k]);
+      if (v) return v;
+    }
+    return "";
+  }
+  var LAND_USE_CLASSES = [
+    [8, "Nature conservation"],
+    [14, "Managed resource protection"],
+    [19, "Other minimal use"],
+    [20, "Grazing native vegetation"],
+    [23, "Production forestry"],
+    [28, "Plantation forestry"],
+    [35, "Grazing modified pastures"],
+    [44, "Cropping"],
+    [54, "Perennial horticulture"],
+    [59, "Seasonal horticulture"],
+    [65, "Land in transition"],
+    [70, "Irrigated plantation forestry"],
+    [76, "Irrigated modified pastures"],
+    [86, "Irrigated cropping"],
+    [96, "Irrigated perennial horticulture"],
+    [102, "Irrigated seasonal horticulture"],
+    [108, "Irrigated land in transition"],
+    [113, "Intensive horticulture"],
+    [123, "Intensive animal husbandry"],
+    [132, "Manufacturing and industrial"],
+    [138, "Residential"],
+    [144, "Services"],
+    [151, "Utilities"],
+    [157, "Transport and communication"],
+    [162, "Mining"],
+    [168, "Waste treatment and disposal"],
+    [173, "Lake"],
+    [177, "Reservoir/dam"],
+    [181, "River"],
+    [185, "Channel/aqueduct"],
+    [190, "Marsh/wetland"],
+    [194, "Estuary/coastal waters"]
+  ];
+  function _landUseClass(code) {
+    const n = Number(code);
+    if (!Number.isInteger(n) || n < 1) return "";
+    const hit = LAND_USE_CLASSES.find(([last]) => n <= last);
+    return hit ? hit[1] : "";
+  }
+  function _formatLandUseTooltip(attrs) {
+    const a = attrs || {};
+    const cls = _landUseClass(_landPick(a, ["QLUMP_Code", "qlump_code"]));
+    const detail = _landPick(a, ["Tertiary", "tertiary"]) || _landPick(a, ["Secondary", "secondary"]);
+    const commodity = _landPick(a, ["COMMODITY", "commodity"]);
+    const alum = _landPick(a, ["ALUM_Code", "alum_code"]);
+    const year = _landPick(a, ["Year", "year"]);
+    const lines = [esc`<b>${cls || detail || "Land use"}</b>`];
+    if (detail && cls && detail.toLowerCase() !== cls.toLowerCase()) lines.push(_escHtml(detail));
+    if (commodity) lines.push(_escHtml(commodity));
+    const sub = [alum ? "ALUM " + alum : "", year ? "mapped " + year : ""].filter(Boolean).join(" · ");
+    if (sub) lines.push(esc`<span class="dw-cad-sub">${sub}</span>`);
+    return lines.join("<br>");
+  }
+  var STATE_LAND_TENURES = [
+    { tenure: "National Park", rgb: [21, 128, 61], note: "National park" },
+    { tenure: "State Forest", rgb: [133, 77, 14], note: "State forest" },
+    { tenure: "Forest Reserve", rgb: [133, 77, 14], note: "Forest reserve" },
+    { tenure: "Timber Reserve", rgb: [133, 77, 14], note: "Timber reserve" },
+    { tenure: "Reserve", rgb: [13, 148, 136], note: "Reserve set aside for a community purpose" },
+    { tenure: "State Land", rgb: [234, 88, 12], note: "Unallocated State land" },
+    { tenure: "Lands Lease", rgb: [202, 138, 4], note: "State land held under lease" }
+  ];
+  var STATE_LAND_WHERE = "tenure IN (" + STATE_LAND_TENURES.map((t) => `'${t.tenure}'`).join(",") + ")";
+  function stateLandDynamicLayers() {
+    return JSON.stringify([{
+      id: CFG.QLD_STATE_LAND_LAYER_ID,
+      source: { type: "mapLayer", mapLayerId: CFG.QLD_STATE_LAND_LAYER_ID },
+      definitionExpression: STATE_LAND_WHERE,
+      drawingInfo: { renderer: {
+        type: "uniqueValue",
+        field1: "tenure",
+        uniqueValueInfos: STATE_LAND_TENURES.map((t) => ({
+          value: t.tenure,
+          label: t.tenure,
+          symbol: {
+            type: "esriSFS",
+            style: "esriSFSSolid",
+            color: [...t.rgb, 110],
+            outline: {
+              type: "esriSLS",
+              style: "esriSLSSolid",
+              color: [...t.rgb.map((c) => Math.round(c * 0.7)), 235],
+              width: 0.8
+            }
+          }
+        }))
+      } }
+    }]);
+  }
+  function _landArea(value) {
+    const m2 = Number(_landVal(value));
+    if (!Number.isFinite(m2) || m2 <= 0) return "";
+    if (m2 < 1e4) return Math.round(m2).toLocaleString("en-AU") + " m²";
+    const ha = m2 / 1e4;
+    return (ha >= 100 ? Math.round(ha) : Number(ha.toFixed(1))).toLocaleString("en-AU") + " ha";
+  }
+  function _formatStateLandTooltip(attrs) {
+    const a = attrs || {};
+    const tenure = _landPick(a, ["Tenure", "tenure"]);
+    const known = STATE_LAND_TENURES.find((t) => t.tenure === tenure);
+    const name = _landPick(a, ["Name", "feat_name"]);
+    const alias = _landPick(a, ["Alias", "alias_name"]);
+    const lotplan = _landPick(a, ["Lot/plan", "lotplan"]);
+    const area = _landArea(_landPick(a, ["Lot area (m²)", "lot_area"]));
+    const locality = _landPick(a, ["Locality", "locality"]);
+    const kind = known ? known.note : tenure;
+    const lines = [esc`<b>${name || kind || "State land"}</b>`];
+    if (name && kind) lines.push(_escHtml(kind));
+    if (alias && alias.toLowerCase() !== name.toLowerCase() && !/\barea\b|\d\s*ha\b/i.test(alias)) {
+      lines.push(esc`Also known as ${alias}`);
+    }
+    const sub = [lotplan ? "Lot " + lotplan : "", area, locality].filter(Boolean).join(" · ");
+    if (sub) lines.push(esc`<span class="dw-cad-sub">${sub}</span>`);
+    return lines.join("<br>");
+  }
+  function landIdentifySources() {
+    return [
+      {
+        layerName: CFG.LAYER_STATE_LAND,
+        heading: "State land",
+        baseUrl: CFG.QLD_STATE_LAND_SERVICE,
+        layers: "all:" + CFG.QLD_STATE_LAND_LAYER_ID,
+        tolerance: 1,
+        minZoom: CFG.QLD_STATE_LAND_MIN_ZOOM,
+        layerDefs: { [CFG.QLD_STATE_LAND_LAYER_ID]: STATE_LAND_WHERE },
+        format: _formatStateLandTooltip
+      },
+      {
+        layerName: CFG.LAYER_LAND_USE,
+        heading: "Land use",
+        baseUrl: CFG.QLD_LAND_USE_SERVICE,
+        layers: "all:0",
+        tolerance: 1,
+        minZoom: CFG.QLD_LAND_USE_HOVER_MIN_ZOOM,
+        format: _formatLandUseTooltip
+      }
+    ];
+  }
+  function createQldLandProviders({ makeHoverIdentify: makeHoverIdentify2 }) {
+    const offHover = (layer) => {
+      if (layer._dwHoverOff) {
+        layer._dwHoverOff();
+        layer._dwHoverOff = null;
+      }
+    };
+    const [stateSrc, useSrc] = landIdentifySources();
+    const installStateHover = makeHoverIdentify2({
+      baseUrl: stateSrc.baseUrl,
+      layers: stateSrc.layers,
+      layerDefs: stateSrc.layerDefs,
+      tolerance: 1,
+      minZoom: CFG.QLD_STATE_LAND_MIN_ZOOM,
+      tipClass: "dw-qpws-tip",
+      formatTooltip: _formatStateLandTooltip
+    });
+    const StateLandLayerProvider2 = arcgisExportProvider({
+      baseUrl: CFG.QLD_STATE_LAND_SERVICE,
+      extraParams: "&dynamicLayers=" + encodeURIComponent(stateLandDynamicLayers()),
+      pane: "dwStateLandPane",
+      paneZIndex: 386,
+      opacity: 0.85,
+      minZoom: CFG.QLD_STATE_LAND_MIN_ZOOM,
+      maxZoom: 25,
+      attribution: 'Tenure &copy; <a href="https://www.data.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (Resources)</a>',
+      onAdd: (layer, map) => installStateHover(layer, map),
+      onRemove: offHover
+    });
+    const installUseHover = makeHoverIdentify2({
+      baseUrl: useSrc.baseUrl,
+      layers: useSrc.layers,
+      tolerance: 1,
+      minZoom: CFG.QLD_LAND_USE_HOVER_MIN_ZOOM,
+      tipClass: "dw-qpws-tip",
+      formatTooltip: _formatLandUseTooltip
+    });
+    const LandUseLayerProvider2 = arcgisExportProvider({
+      baseUrl: CFG.QLD_LAND_USE_SERVICE,
+      showLayers: "0",
+      pane: "dwLandUsePane",
+      paneZIndex: 385,
+      opacity: 0.55,
+      minZoom: 7,
+      maxZoom: 25,
+      attribution: 'Land use &copy; <a href="https://www.qld.gov.au/environment/land/management/mapping/statewide-monitoring/qlump" target="_blank" rel="noreferrer">State of Queensland (QLUMP)</a>',
+      onAdd: (layer, map) => installUseHover(layer, map),
+      onRemove: offHover
+    });
+    return { StateLandLayerProvider: StateLandLayerProvider2, LandUseLayerProvider: LandUseLayerProvider2 };
+  }
+
   // src/utils/route-geometry.js
   var EARTH_R = 63710088e-1;
   var RAD = Math.PI / 180;
@@ -13874,6 +14097,7 @@
   var pageWin3 = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   var { QpwsLayerProvider, NationalParksLayerProvider } = createQldEnvironmentProviders({ makeHoverIdentify, gmJsonGet });
   var { HistoricMinesLayerProvider, MineShaftsLayerProvider, HistoricLeasesLayerProvider, LeasePointsLayerProvider } = createQldMiningProviders({ makeHoverIdentify });
+  var { StateLandLayerProvider, LandUseLayerProvider } = createQldLandProviders({ makeHoverIdentify });
   var CustomTilesApp = class {
     constructor() {
       this.qldToken = new QldTokenManager({
@@ -14062,6 +14286,8 @@
         addOverlay(CFG.LAYER_MINE_LEASES, new HistoricLeasesLayerProvider());
         addOverlay(CFG.LAYER_LEASE_POINTS, new LeasePointsLayerProvider());
         addOverlay(CFG.LAYER_HIST_MAPS, new HistoricalMapsIndexProvider());
+        addOverlay(CFG.LAYER_STATE_LAND, new StateLandLayerProvider());
+        addOverlay(CFG.LAYER_LAND_USE, new LandUseLayerProvider());
         addOverlay(
           CFG.LAYER_INTVL_GLOBAL,
           new IntvlGlobalTilesLayerProvider()
@@ -14437,12 +14663,13 @@
           );
         });
       }
-      for (const src of miningIdentifySources()) {
+      for (const src of [...miningIdentifySources(), ...landIdentifySources()]) {
         const lyr = this.layers[src.layerName];
         if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
         arcgisIdentify(map, latlng, {
           baseUrl: src.baseUrl,
           layers: src.layers,
+          layerDefs: src.layerDefs,
           tolerance: noHover ? src.tolerance * 2 : src.tolerance
         }, (err, _feat, raw) => {
           if (err || !isCurrent()) return;
@@ -15223,6 +15450,12 @@
         _formatLeaseTooltip,
         _mineYear,
         _miningSectionHtml,
+        _formatLandUseTooltip,
+        _formatStateLandTooltip,
+        _landArea,
+        _landUseClass,
+        stateLandDynamicLayers,
+        STATE_LAND_TENURES,
         _quadToMatrix3d,
         _triAffine,
         _histMapSheet,

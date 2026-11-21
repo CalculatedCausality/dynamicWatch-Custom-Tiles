@@ -1401,6 +1401,69 @@ t("map-sheet alignment: stored points are validated and the store is trimmed", (
 	assert(!("u29" in hist._histAlignUpdated(all, "u29", null, 99)), "reset forgets the sheet");
 });
 
+t("Land Use and State Land are registered in the Property group", () => {
+	eq(dw.CFG.LAYER_LAND_USE, "Land Use");
+	eq(dw.CFG.LAYER_STATE_LAND, "State Land");
+	const prop = dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Property");
+	assert(prop.names.includes("Land Use") && prop.names.includes("State Land"), "not in Property group");
+});
+
+t("_landUseClass maps QLUMP codes onto the service's 32 classes", () => {
+	eq(dw._landUseClass("1"), "Nature conservation");
+	eq(dw._landUseClass(20), "Grazing native vegetation");
+	eq(dw._landUseClass("134"), "Residential");
+	eq(dw._landUseClass("140"), "Services");
+	eq(dw._landUseClass(194), "Estuary/coastal waters");
+	for (const bad of [0, 195, "x", "", null, 1.5]) eq(dw._landUseClass(bad), "", "code " + bad);
+});
+
+t("_formatLandUseTooltip shows class, code and year; escapes", () => {
+	// Real /identify attributes at Mapleton.
+	const html = dw._formatLandUseTooltip({ "OBJECTID": "34784", "Year": "2011", "QLUMP_Code": "20", "ALUM_Code": "2.1.0", "Tertiary": "Null" });
+	assert(html.includes("<b>Grazing native vegetation</b>"), html);
+	assert(html.includes("ALUM 2.1.0 · mapped 2011"), html);
+	const fine = dw._formatLandUseTooltip({ "QLUMP_Code": "134", "Tertiary": "Urban residential", "COMMODITY": "<b>x" });
+	assert(fine.includes("<b>Residential</b><br>Urban residential"), fine);
+	assert(fine.includes("&lt;b&gt;x"), "commodity not escaped");
+	eq(dw._formatLandUseTooltip({}), "<b>Land use</b>");
+});
+
+t("_landArea gives m² for small lots and hectares above one hectare", () => {
+	eq(dw._landArea("742"), "742 m²");
+	eq(dw._landArea("125410"), "12.5 ha");
+	eq(dw._landArea("25000000"), "2,500 ha");
+	eq(dw._landArea("0"), "");
+	eq(dw._landArea("Null"), "");
+});
+
+t("_formatStateLandTooltip names the land and explains the tenure; escapes", () => {
+	// Real /identify attributes at Gympie.
+	const html = dw._formatStateLandTooltip({
+		"Lot/plan": "472SP112670", "Tenure": "Lands Lease", "Lot area (m²)": "11400",
+		"Name": "Ncl Junction Gympie Deviation Railway", "Alias": "Old Gympie To Monkland", "Locality": "Gympie",
+	});
+	assert(html.includes("<b>Ncl Junction Gympie Deviation Railway</b>"), html);
+	assert(html.includes("State land held under lease"), html);
+	assert(html.includes("Also known as Old Gympie To Monkland"), html);
+	assert(html.includes("Lot 472SP112670 · 1.1 ha · Gympie"), html);
+	eq(dw._formatStateLandTooltip({ "Tenure": "State Land" }), "<b>Unallocated State land</b>");
+	// Real attributes for Mapleton National Park: the alias is an area note, not a name.
+	const park = dw._formatStateLandTooltip({ "Name": "Mapleton National Park", "Tenure": "National Park",
+		"Alias": "Total Area Abt6455ha", "Lot/plan": "1239NPW1105", "Lot area (m²)": "64080000", "Locality": "Gheerulla" });
+	assert(!park.includes("Also known as"), park);
+	assert(park.includes("Lot 1239NPW1105 · 6,408 ha · Gheerulla"), park);
+	assert(dw._formatStateLandTooltip({ "Name": "<i>" }).includes("&lt;i&gt;"), "name not escaped");
+});
+
+t("stateLandDynamicLayers filters to the State's tenures and colours each", () => {
+	const [layer] = JSON.parse(dw.stateLandDynamicLayers());
+	eq(layer.source.mapLayerId, 13);
+	for (const t of dw.STATE_LAND_TENURES) assert(layer.definitionExpression.includes(`'${t.tenure}'`), t.tenure);
+	assert(!layer.definitionExpression.includes("Freehold"), "freehold must not be drawn");
+	eq(layer.drawingInfo.renderer.uniqueValueInfos.length, dw.STATE_LAND_TENURES.length);
+	for (const u of layer.drawingInfo.renderer.uniqueValueInfos) eq(u.symbol.color.length, 4);
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

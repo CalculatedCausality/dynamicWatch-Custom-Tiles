@@ -130,6 +130,8 @@ export const CFG = {
 	LAYER_MINE_LEASES: "Historic Mining Leases",
 	LAYER_LEASE_POINTS: "Old Lease Points",
 	LAYER_HIST_MAPS: "Historic Map Sheets",
+	LAYER_LAND_USE: "Land Use",
+	LAYER_STATE_LAND: "State Land",
 	LAYER_TOPO:    "QLD Topo",
 	LAYER_INTVL_GLOBAL: "INTVL Global Map",
 	LAYER_GEOCACHING: "Geocaches",
@@ -333,6 +335,20 @@ export const CFG = {
 	QLD_LEASE_POINTS_MIN_ZOOM: 13,
 	QLD_LEASES_HOVER_MIN_ZOOM: 11,
 
+	// Queensland Land Use Mapping Program: the latest land use of every
+	// polygon in the state (mapped 2011–2017 depending on region), layer 0.
+	QLD_LAND_USE_SERVICE:
+		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+		"PlanningCadastre/LandUse/MapServer",
+	QLD_LAND_USE_HOVER_MIN_ZOOM: 11,
+	// State-owned land = the cadastre's Tenure layer (13), filtered to the
+	// State's tenures. The server only draws it below 1:500,000.
+	QLD_STATE_LAND_SERVICE:
+		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+		"PlanningCadastre/LandParcelPropertyFramework/MapServer",
+	QLD_STATE_LAND_LAYER_ID: 13,
+	QLD_STATE_LAND_MIN_ZOOM: 11,
+
 	// Historical printed map sheets index (parish/town/topographic/
 	// exploration/… scans, 1860s-2012). Footprint overlay + click lists
 	// the sheets covering a point, each with a scan link; a scan can be
@@ -434,7 +450,8 @@ export const DW_LAYER_GROUPS = [
 export const DW_OVERLAY_GROUPS = [
 	{
 		header: "Property",
-		names:  [CFG.LAYER_CADASTRE, CFG.LAYER_SCC_APPS, CFG.LAYER_QPWS, CFG.LAYER_RELIEF],
+		names:  [CFG.LAYER_CADASTRE, CFG.LAYER_STATE_LAND, CFG.LAYER_LAND_USE, CFG.LAYER_SCC_APPS,
+		         CFG.LAYER_QPWS, CFG.LAYER_RELIEF],
 	},
 	{
 		header: "Infrastructure",

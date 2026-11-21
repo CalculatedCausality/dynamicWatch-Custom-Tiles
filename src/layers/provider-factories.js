@@ -145,7 +145,7 @@ export function makeArcgisExportTileLayer(opts) {
 				`&bboxSR=4326&imageSR=4326` +
 				(opts.showLayers != null ? `&layers=show:${opts.showLayers}` : "") +
 				`&size=${tileSize},${tileSize}` +
-				`&format=png32&transparent=true&f=image`
+				`&format=png32&transparent=true&f=image${opts.extraParams || ""}`
 			);
 		},
 	});
@@ -164,6 +164,6 @@ export function makeArcgisExportTileLayer(opts) {
 		`${opts.baseUrl}/export?bbox={bbox-epsg-3857}` +
 		`&bboxSR=3857&imageSR=3857` +
 		`&size=${tileSize},${tileSize}` +
-		`&format=png32&transparent=true&f=image${showParam}`;
+		`&format=png32&transparent=true&f=image${showParam}${opts.extraParams || ""}`;
 	return inst;
 }

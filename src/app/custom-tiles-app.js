@@ -56,6 +56,7 @@ import {
 import { AussieBushwalkingLayerProvider } from "../providers/aussie-bushwalking.js";
 import { createQldEnvironmentProviders } from "../providers/qld-environment.js";
 import { _miningSectionHtml, createQldMiningProviders, miningIdentifySources } from "../providers/qld-mining.js";
+import { createQldLandProviders, landIdentifySources } from "../providers/qld-land.js";
 import { RoutePoiController } from "../providers/route-pois.js";
 import {
 	HistoricalMapsIndexProvider,
@@ -84,6 +85,8 @@ const { QpwsLayerProvider, NationalParksLayerProvider } =
 	createQldEnvironmentProviders({ makeHoverIdentify, gmJsonGet });
 const { HistoricMinesLayerProvider, MineShaftsLayerProvider, HistoricLeasesLayerProvider, LeasePointsLayerProvider } =
 	createQldMiningProviders({ makeHoverIdentify });
+const { StateLandLayerProvider, LandUseLayerProvider } =
+	createQldLandProviders({ makeHoverIdentify });
 
 /* -- Application ------------------------------------------------------- */
 
@@ -309,6 +312,8 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_MINE_LEASES, new HistoricLeasesLayerProvider());
 			addOverlay(CFG.LAYER_LEASE_POINTS, new LeasePointsLayerProvider());
 			addOverlay(CFG.LAYER_HIST_MAPS, new HistoricalMapsIndexProvider());
+			addOverlay(CFG.LAYER_STATE_LAND, new StateLandLayerProvider());
+			addOverlay(CFG.LAYER_LAND_USE, new LandUseLayerProvider());
 			addOverlay(CFG.LAYER_INTVL_GLOBAL,
 				new IntvlGlobalTilesLayerProvider());
 
@@ -794,15 +799,16 @@ export class CustomTilesApp {
 			});
 		}
 
-		// MINING — everything the three mining overlays hold at this point.
+		// MINING and LAND — everything these overlays hold at this point.
 		// The hover tooltip shows one feature and needs a mouse; this lists
 		// them all (a goldfield has leases, workings and shafts stacked) and
 		// is the only way to read them on a phone.
-		for (const src of miningIdentifySources()) {
+		for (const src of [...miningIdentifySources(), ...landIdentifySources()]) {
 			const lyr = this.layers[src.layerName];
 			if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
 			arcgisIdentify(map, latlng, {
-				baseUrl: src.baseUrl, layers: src.layers, tolerance: noHover ? src.tolerance * 2 : src.tolerance,
+				baseUrl: src.baseUrl, layers: src.layers, layerDefs: src.layerDefs,
+				tolerance: noHover ? src.tolerance * 2 : src.tolerance,
 			}, (err, _feat, raw) => {
 				if (err || !isCurrent()) return;
 				const html = _miningSectionHtml(src, (raw && raw.results) || []);
