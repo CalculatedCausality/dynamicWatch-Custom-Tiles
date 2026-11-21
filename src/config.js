@@ -132,6 +132,7 @@ export const CFG = {
 	LAYER_TOPO:    "QLD Topo",
 	LAYER_INTVL_GLOBAL: "INTVL Global Map",
 	LAYER_GEOCACHING: "Geocaches",
+	LAYER_ABW: "Aussie Bushwalking",
 	// Single layer-panel entry; which Development.i sublayers show
 	// (dev/building/plumbing × current/decided) is picked in the on-map
 	// submenu that appears while the overlay is active. Selection is
@@ -371,7 +372,15 @@ export const CFG = {
 	OPENFREEMAP_TILEJSON: "https://tiles.openfreemap.org/planet",
 	ROUTE_POI_TILE_ZOOM: 14,
 	ROUTE_POI_MAX_TILES: 400,
+	// Aussie Bushwalking's walk map tiles (MVT, keyless): the walks in view.
+	ABW_ORIGIN: "https://www.aussiebushwalking.com",
+	ABW_TILES: "https://www.aussiebushwalking.com/tiles/abw",
+	ABW_MIN_ZOOM: 10,
+	ABW_MAX_NATIVE_Z: 15,
+
 	ROUTE_POI_PREFS_KEY: "dw_route_poi_prefs",
+	// Which waypoints the script itself added, per saved route.
+	ROUTE_POI_ADDED_KEY: "dw_route_poi_added",
 
 	// Route elevation profile (climbs): AWS Terrain Tiles, Terrarium PNG, keyless.
 	ROUTE_ELEVATION_TILE: "https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png",
@@ -421,6 +430,10 @@ export const DW_OVERLAY_GROUPS = [
 	{
 		header: "Environment",
 		names:  [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS],
+	},
+	{
+		header: "Walks",
+		names:  [CFG.LAYER_ABW],
 	},
 	{
 		header: "Mining",

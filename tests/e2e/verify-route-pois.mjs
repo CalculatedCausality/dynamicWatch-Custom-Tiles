@@ -301,6 +301,58 @@ try {
 	check(await page.evaluate(() => !Object.values(window.leafletPlan.map._layers)
 		.some((l) => l.options && l.options.dashArray === "10 8")), "a new search clears the old gap highlight");
 
+	// Names follow the name setting, and "Build Up Ahead" adds, replaces and
+	// undoes as one step. Still nothing is saved.
+	page.on("dialog", (dialog) => dialog.accept());
+	const wpNames = () => page.evaluate(() => window.leafletPlan.waypoints.map((w) => w.name));
+	const panelStatus = () => page.evaluate(() => document.querySelector(".dw-poi-status")?.textContent || "");
+	const waitResult = async () => {
+		await page.waitForFunction(() => /within .* route|Up Ahead|Updated/.test(document.querySelector(".dw-poi-status")?.textContent || "") &&
+			document.querySelector('[data-poi-act="build"]'), undefined, { timeout: 30_000 });
+	};
+	const own = await wpNames();
+	await page.locator(".dw-poi-row", { has: page.locator(".dw-poi-row-add:not(.dw-poi-row-add--added)") }).first()
+		.locator(".dw-poi-row-add").click();
+	const plain = (await wpNames()).at(-1);
+	await page.selectOption("[data-poi-names]", "km");
+	const offer = await page.locator('[data-poi-act="update-names"]').textContent().catch(() => "");
+	await page.click('[data-poi-act="update-names"]');
+	const refreshed = (await wpNames()).at(-1);
+	check(offer === "Update 1 name" && /^\d+(\.\d)?k \S/.test(refreshed) && refreshed !== plain &&
+		!(await page.locator('[data-poi-act="update-names"]').count()),
+	"a waypoint name is refreshed to match the name setting", `"${plain}" → "${refreshed}"`);
+
+	const countBefore = (await wpNames()).length;
+	await page.click('[data-poi-act="build"]');
+	const builtStatus = await panelStatus();
+	const builtCount = (await wpNames()).length;
+	const addedCount = Number((/^Up Ahead built: (\d+) added/.exec(builtStatus) || [])[1]);
+	check(addedCount > 5 && builtCount === countBefore + addedCount && /one Undo reverts it/.test(builtStatus),
+		"Build Up Ahead adds what's shown in one go", builtStatus);
+	check(JSON.stringify((await wpNames()).slice(0, own.length)) === JSON.stringify(own),
+		"your own waypoints are untouched by the build");
+	await page.click("#undo");
+	const undoneBuild = await page.waitForFunction((count) => window.leafletPlan.waypoints.length === count, countBefore, { timeout: 10_000 })
+		.then(() => true).catch(() => false);
+	check(undoneBuild, "one planner Undo reverts the whole build", `${builtCount} → ${(await wpNames()).length} waypoints`);
+	await page.waitForTimeout(3500);
+	await waitResult();
+
+	await page.click('[data-poi-act="build"]');
+	const rebuilt = (await wpNames()).length;
+	await page.click('[data-poi-act="build"]');
+	const again = await panelStatus();
+	await page.click('.dw-poi-chip[data-poi-cat="track"]');
+	await page.click('[data-poi-act="build"]');
+	const trimmedStatus = await panelStatus();
+	const removedCount = Number((/(\d+) removed/.exec(trimmedStatus) || [])[1]);
+	const trimmed = await wpNames();
+	await page.click('.dw-poi-chip[data-poi-cat="track"]');
+	check(again === "Up Ahead already matches what's shown." && removedCount > 0 && trimmed.length === rebuilt - removedCount &&
+		own.every((name) => trimmed.includes(name)),
+	"building again replaces only the waypoints it added (a hidden kind is taken away)", trimmedStatus);
+	await page.selectOption("[data-poi-names]", "name");
+
 	await page.click("#dw-poi-btn");
 	const cleared = await page.evaluate(() => ({
 		panel: !!document.querySelector(".dw-poi-panel"),

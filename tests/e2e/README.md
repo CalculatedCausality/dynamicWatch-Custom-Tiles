@@ -103,6 +103,9 @@ never add route points, **Add as waypoint** creates a named planner waypoint
 that the site's Undo removes, and pressing the button again clears everything.
 Climbs (each with a top), creek crossings and named track sections must be
 found on the route, a climb's popup must show its gradient and where it ends,
+**Update names** must refresh a waypoint's name when the name setting changes,
+**Build Up Ahead** must add what's shown, be reverted by one press of the
+site's Undo, and on a second build remove only its own waypoints,
 the script's toolbar buttons must be spaced and labelled like the native ones,
 the tick on an added row must remove that waypoint and no other (with the
 site's Undo bringing it back), the list must keep room for several rows, a list click must open its popup

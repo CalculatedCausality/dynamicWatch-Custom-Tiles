@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.18.1
+// @version      7.19.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -53,6 +53,7 @@
 // @connect      tiles02.geocaching.com
 // @connect      tiles03.geocaching.com
 // @connect      tiles04.geocaching.com
+// @connect      www.aussiebushwalking.com
 // @connect      api.mapbox.com
 // @connect      s3.amazonaws.com
 // @connect      elevation-tiles-prod.s3.amazonaws.com
@@ -162,6 +163,7 @@
     LAYER_TOPO: "QLD Topo",
     LAYER_INTVL_GLOBAL: "INTVL Global Map",
     LAYER_GEOCACHING: "Geocaches",
+    LAYER_ABW: "Aussie Bushwalking",
     // Single layer-panel entry; which Development.i sublayers show
     // (dev/building/plumbing × current/decided) is picked in the on-map
     // submenu that appears while the overlay is active. Selection is
@@ -348,7 +350,14 @@
     OPENFREEMAP_TILEJSON: "https://tiles.openfreemap.org/planet",
     ROUTE_POI_TILE_ZOOM: 14,
     ROUTE_POI_MAX_TILES: 400,
+    // Aussie Bushwalking's walk map tiles (MVT, keyless): the walks in view.
+    ABW_ORIGIN: "https://www.aussiebushwalking.com",
+    ABW_TILES: "https://www.aussiebushwalking.com/tiles/abw",
+    ABW_MIN_ZOOM: 10,
+    ABW_MAX_NATIVE_Z: 15,
     ROUTE_POI_PREFS_KEY: "dw_route_poi_prefs",
+    // Which waypoints the script itself added, per saved route.
+    ROUTE_POI_ADDED_KEY: "dw_route_poi_added",
     // Route elevation profile (climbs): AWS Terrain Tiles, Terrarium PNG, keyless.
     ROUTE_ELEVATION_TILE: "https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png",
     ROUTE_ELEVATION_ZOOM: 12,
@@ -388,6 +397,10 @@
     {
       header: "Environment",
       names: [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS]
+    },
+    {
+      header: "Walks",
+      names: [CFG.LAYER_ABW]
     },
     {
       header: "Mining",
@@ -1693,6 +1706,10 @@
       bind("dw-shapes-point-dwMarinePane", (f) => {
         const p = f.properties || {};
         return _escHtml(p.label || p.name || "Vessel");
+      });
+      bind("dw-shapes-point-dwAbwPane", (f) => {
+        const p = f.properties || {};
+        return _escHtml(p.name || "Walk");
       });
       bind("dw-shapes-point-dwWazePane", (f) => {
         const p = f.properties || {};
@@ -10365,6 +10382,8 @@
                 } catch (e) {
                   failedAny = true;
                 }
+              } else if (opts.missingIsEmpty && !err && r && (r.status === 404 || r.status === 204)) {
+                this._cacheTile(tk, []);
               } else {
                 failedAny = true;
               }
@@ -10868,6 +10887,101 @@
               esc`<b>${t.name || st.label}</b>` + extra,
               { className: "dw-infra-tip", sticky: true }
             ).addTo(group);
+          }
+        }
+      });
+    }
+  };
+
+  // src/providers/aussie-bushwalking.js
+  var DIFFICULTY_COLORS = {
+    "Very Easy": "#1e4f9c",
+    Easy: "#ac1c64",
+    Medium: "#f0a830",
+    Hard: "#e12e2a",
+    "Very Hard": "#231f20"
+  };
+  function abwDifficultyColor(difficulty) {
+    return DIFFICULTY_COLORS[difficulty] || "#6b7280";
+  }
+  function abwWalkUrl(path) {
+    const p = String(path || "");
+    return /^\/[A-Za-z0-9][A-Za-z0-9/_\-.%]*$/.test(p) ? CFG.ABW_ORIGIN + p : "";
+  }
+  var clean = (value, max) => String(value == null ? "" : value).replace(/\s+/g, " ").trim().slice(0, max);
+  function abwSummary(props) {
+    return [clean(props.Distance, 40), clean(props.Difficulty, 20), clean(props.Duration, 30)].filter(Boolean).join(" · ");
+  }
+  function abwPopupHtml(props) {
+    const url = abwWalkUrl(props.Url);
+    const summary = abwSummary(props);
+    const region = clean(props.Region, 120);
+    let description = clean(props.Description, 400);
+    if (description.length === 400) description = description.slice(0, 397) + "…";
+    return `<div class="dw-abw-pop">` + esc`<b>${clean(props.Name, 120) || "Walk"}</b>` + (summary ? esc`<div>${summary}</div>` : "") + (region ? esc`<div class="dw-abw-sub">${region}</div>` : "") + (description ? esc`<div class="dw-abw-desc">${description}</div>` : "") + (url ? esc`<div><a href="${url}" target="_blank" rel="noopener noreferrer">Open on Aussie Bushwalking ↗</a></div>` : "") + `</div>`;
+  }
+  function abwToElements(layerName, props, geometryType, rings) {
+    if (props.Id == null) return null;
+    if (layerName === "abwTracks" && geometryType === 2) {
+      return rings.filter((ring) => ring.length > 1).map((ring) => ({ type: "way", geometry: ring, tags: props }));
+    }
+    if (layerName === "abw" && geometryType === 1 && rings[0] && rings[0][0]) {
+      const p = rings[0][0];
+      return [{ type: "node", lat: p.lat, lon: p.lon, tags: props, _id: "abw" + props.Id }];
+    }
+    return null;
+  }
+  var AussieBushwalkingLayerProvider = class extends LayerProvider {
+    create() {
+      const pin = (color) => L.divIcon({
+        className: "dw-abw-icon",
+        html: `<span class="dw-abw-pin" style="background:${color}"></span>`,
+        iconSize: [14, 14],
+        iconAnchor: [7, 7],
+        popupAnchor: [0, -7],
+        tooltipAnchor: [0, -7]
+      });
+      return makeVectorTileLayer({
+        label: "AussieBushwalking",
+        pane: "dwAbwPane",
+        paneZIndex: 415,
+        minZoom: CFG.ABW_MIN_ZOOM,
+        padBounds: 0.1,
+        maxNativeZoom: CFG.ABW_MAX_NATIVE_Z,
+        attribution: 'Walks © <a href="https://www.aussiebushwalking.com/" target="_blank" rel="noreferrer">Aussie Bushwalking</a> contributors',
+        tileUrl: (z, x, y) => `${CFG.ABW_TILES}/${z}/${x}/${y}`,
+        // Tiles with no walks come back as 404.
+        missingIsEmpty: true,
+        toElements: abwToElements,
+        render: (group, elements) => {
+          for (const el of elements) {
+            if (el.type !== "way") continue;
+            const color = abwDifficultyColor(el.tags.Difficulty);
+            const latlngs = el.geometry.map((g) => [g.lat, g.lon]);
+            L.polyline(latlngs, { pane: "dwAbwPane", color: "#fff", weight: 6, opacity: 0.85, interactive: false }).addTo(group);
+            L.polyline(latlngs, { pane: "dwAbwPane", color, weight: 3, opacity: 0.95 }).bindTooltip(
+              esc`<b>${el.tags.Name || "Walk"}</b><br>${abwSummary(el.tags)}`,
+              { className: "dw-abw-tip", sticky: true }
+            ).bindPopup(() => abwPopupHtml(el.tags), { className: "dw-abw-popup", maxWidth: 280, autoPan: false }).addTo(group);
+          }
+          for (const el of elements) {
+            if (el.type !== "node") continue;
+            const marker = L.marker([el.lat, el.lon], {
+              icon: pin(abwDifficultyColor(el.tags.Difficulty)),
+              pane: "dwAbwPane",
+              keyboard: false
+            });
+            marker._dwData = {
+              name: el.tags.Name || "Walk",
+              label: "",
+              url: abwWalkUrl(el.tags.Url),
+              color: abwDifficultyColor(el.tags.Difficulty),
+              radius: 6
+            };
+            marker.bindTooltip(
+              esc`<b>${el.tags.Name || "Walk"}</b><br>${abwSummary(el.tags)}`,
+              { className: "dw-abw-tip", direction: "top" }
+            ).bindPopup(() => abwPopupHtml(el.tags), { className: "dw-abw-popup", maxWidth: 280, autoPan: false }).addTo(group);
           }
         }
       });
@@ -11914,6 +12028,15 @@
     { id: "name", label: "Name only" },
     { id: "km", label: "Distance + name" }
   ];
+  var DISTANCE_PREFIX = /^(\d+(?:\.\d)?(?:k|mi)) (.*)$/;
+  function fitName(poi, room, metric) {
+    let base;
+    if (poi.climb && poi.type === "climb") base = climbLabel(poi.climb, metric, room);
+    else if (poi.climb && poi.type === "climb_top") base = climbTopLabel(poi.climb, metric, room);
+    else base = (poi.name || poiTypeLabel(poi)).replace(/\s+/g, " ").trim();
+    if (base.length > room) base = abbreviate(base);
+    return base.slice(0, room);
+  }
   function waypointLabel(poi, { mode = "name", along = poi.along, metric = true, maxLength = 16 } = {}) {
     const max = Math.max(1, maxLength);
     let prefix = "";
@@ -11921,13 +12044,43 @@
       const d = along / (metric ? 1e3 : 1609.344);
       prefix = (d < 10 ? d.toFixed(1) : String(Math.round(d))) + (metric ? "k" : "mi") + " ";
     }
-    const room = Math.max(1, max - prefix.length);
-    let base;
-    if (poi.climb && poi.type === "climb") base = climbLabel(poi.climb, metric, room);
-    else if (poi.climb && poi.type === "climb_top") base = climbTopLabel(poi.climb, metric, room);
-    else base = (poi.name || poiTypeLabel(poi)).replace(/\s+/g, " ").trim();
-    if (base.length > room) base = abbreviate(base);
-    return (prefix + base.slice(0, room)).slice(0, max).trim();
+    return (prefix + fitName(poi, Math.max(1, max - prefix.length), metric)).slice(0, max).trim();
+  }
+  function looksGenerated(name, poi, { metric = true, maxLength = 16 } = {}) {
+    const max = Math.max(1, maxLength);
+    const text = String(name || "").trim();
+    if (!text) return false;
+    const m = DISTANCE_PREFIX.exec(text);
+    if (m && m[2] === fitName(poi, Math.max(1, max - m[1].length - 1), metric).trim()) return true;
+    return text === fitName(poi, max, metric).trim();
+  }
+  function planUpAhead(pois, waypoints) {
+    const on = /* @__PURE__ */ new Map();
+    const placed = /* @__PURE__ */ new Set();
+    for (const wp of waypoints || []) {
+      let best = null, nearest = 15;
+      for (const poi of pois || []) {
+        const d = haversine([wp.lng, wp.lat], [poi.lng, poi.lat]);
+        if (d < nearest) {
+          best = poi;
+          nearest = d;
+        }
+      }
+      if (!best) continue;
+      const current = on.get(best.id);
+      if (!current || current.mine && !wp.mine) on.set(best.id, wp);
+    }
+    const taken = (pois || []).filter((poi) => on.has(poi.id) && !on.get(poi.id).mine);
+    const candidates = (pois || []).filter((poi) => !on.has(poi.id) || on.get(poi.id).mine);
+    const chosen = thinClusters(candidates, taken);
+    const add = [];
+    for (const poi of chosen) {
+      const wp = on.get(poi.id);
+      if (wp) placed.add(wp.id);
+      else add.push(poi);
+    }
+    const remove = (waypoints || []).filter((wp) => wp.mine && !placed.has(wp.id));
+    return { add, remove, kept: placed.size, skipped: candidates.length - chosen.length };
   }
   var CATEGORY_PRIORITY = {
     water: 0,
@@ -12179,6 +12332,24 @@
       nameMode: NAME_MODES.some((m) => m.id === nameMode) ? nameMode : "name"
     };
   }
+  var MAX_REMEMBERED_ROUTES = 40;
+  function loadAddedLedger() {
+    try {
+      const all = JSON.parse(GM_getValue(CFG.ROUTE_POI_ADDED_KEY, "{}"));
+      return all && typeof all === "object" && !Array.isArray(all) ? all : {};
+    } catch (_) {
+      return {};
+    }
+  }
+  function saveAddedLedger(all) {
+    const keys = Object.keys(all).filter((key) => Array.isArray(all[key]) && all[key].length);
+    const trimmed = {};
+    for (const key of keys.slice(-MAX_REMEMBERED_ROUTES)) trimmed[key] = all[key].slice(-400);
+    try {
+      GM_setValue(CFG.ROUTE_POI_ADDED_KEY, JSON.stringify(trimmed));
+    } catch (_) {
+    }
+  }
   var LIST_LIMIT = 300;
   var CONFIRM_ADD_ALL_OVER = 20;
   var ROUTE_WATCH_MS = 1500;
@@ -12205,6 +12376,7 @@
       this._pendingSig = null;
       this._scrollReset = false;
       this._hasElevation = false;
+      this._ledger = null;
       this._onMapLayers = () => {
         clearTimeout(this._syncTimer);
         this._syncTimer = setTimeout(() => this._syncAdded(), 200);
@@ -12516,6 +12688,139 @@
       if (marker) marker.openPopup();
     }
     // -- Waypoints ----------------------------------------------------------
+    // -- Which waypoints are the script's own ---------------------------------
+    _routeKey() {
+      const plan = this._plan();
+      return plan && plan.routeId ? String(plan.routeId) : "new";
+    }
+    _mine() {
+      const key = this._routeKey();
+      if (this._ledger && this._ledger.key === key) return this._ledger.list;
+      const all = loadAddedLedger();
+      let list = Array.isArray(all[key]) ? all[key] : [];
+      if (key !== "new" && !list.length && Array.isArray(all.new)) {
+        const here = this._waypointList();
+        list = all.new.filter((e) => here.some((wp) => this._sameWaypoint(e, wp)));
+        if (list.length) {
+          all[key] = list;
+          delete all.new;
+          saveAddedLedger(all);
+        }
+      }
+      this._ledger = { key, list: list.filter((e) => Array.isArray(e) && e.length === 3) };
+      return this._ledger.list;
+    }
+    _saveMine() {
+      if (!this._ledger) return;
+      const all = loadAddedLedger();
+      delete all[this._ledger.key];
+      all[this._ledger.key] = this._ledger.list;
+      saveAddedLedger(all);
+    }
+    _sameWaypoint(entry, wp) {
+      return entry[2] === wp.name && haversine([entry[1], entry[0]], [wp.lng, wp.lat]) < 3;
+    }
+    _recordMine(lat, lng, name) {
+      const list = this._mine().filter((e) => haversine([e[1], e[0]], [lng, lat]) >= 3);
+      list.push([Number(lat.toFixed(6)), Number(lng.toFixed(6)), name]);
+      this._ledger.list = list;
+      this._saveMine();
+    }
+    _forgetMine(lat, lng) {
+      const list = this._mine();
+      const kept = list.filter((e) => haversine([e[1], e[0]], [lng, lat]) >= 3);
+      if (kept.length === list.length) return;
+      this._ledger.list = kept;
+      this._saveMine();
+    }
+    // The planner's waypoints as plain records; `mine` when the script added
+    // it and it hasn't been renamed or moved since.
+    _waypointList() {
+      const plan = this._plan();
+      const out = [];
+      for (const wp of plan && Array.isArray(plan.waypoints) ? plan.waypoints : []) {
+        const ll = wp && wp.marker && typeof wp.marker.getLatLng === "function" ? wp.marker.getLatLng() : null;
+        if (!ll) continue;
+        out.push({ id: wp.markerId, lat: ll.lat, lng: ll.lng, name: String(wp.name || ""), wp });
+      }
+      return out;
+    }
+    _waypointRecords() {
+      const mine = this._mine();
+      return this._waypointList().map((rec) => ({ ...rec, mine: mine.some((e) => this._sameWaypoint(e, rec)) }));
+    }
+    _nameOptions() {
+      const plan = this._plan();
+      return { metric: this._metric(), maxLength: Number(plan && plan.waypointNameLength) || 16 };
+    }
+    // Waypoints on a POI whose name the script wrote (or would have written)
+    // and that no longer match: the route changed before them, or the name
+    // setting did. Each as { rec, poi, name } with the name it should have.
+    _staleNames() {
+      const plan = this._plan();
+      if (!plan || !this._pois.length) return [];
+      const opts = this._nameOptions();
+      const stale = [];
+      for (const rec of this._waypointRecords()) {
+        let poi = null, nearest = 15;
+        for (const p of this._pois) {
+          const d = haversine([rec.lng, rec.lat], [p.lng, p.lat]);
+          if (d < nearest) {
+            poi = p;
+            nearest = d;
+          }
+        }
+        if (!poi || !(rec.mine || looksGenerated(rec.name, poi, opts))) continue;
+        const name = waypointLabel(poi, { mode: this._prefs.nameMode, ...opts });
+        if (name !== rec.name) stale.push({ rec, poi, name });
+      }
+      return stale;
+    }
+    _renameWaypoint(rec, name) {
+      const wp = rec.wp;
+      try {
+        wp.name = name;
+        const marker = wp.marker;
+        if (marker && typeof marker.getTooltip === "function" && marker.getTooltip()) marker.setTooltipContent(name);
+        else if (marker && typeof marker.bindTooltip === "function") marker.bindTooltip(name);
+      } catch (e) {
+        console.warn("[CustomTiles] Route POIs: rename failed", e);
+        return false;
+      }
+      if (rec.mine) this._recordMine(rec.lat, rec.lng, name);
+      return true;
+    }
+    // Run several waypoint changes as one Undo step. The planner records an
+    // undo point for each change it makes; keep only the first.
+    _oneUndoStep(fn) {
+      const plan = this._plan();
+      const stack = plan && Array.isArray(plan.undoStack) ? plan.undoStack : null;
+      const base = stack ? stack.length : 0;
+      try {
+        if (plan && typeof plan.setUndoPoint === "function") plan.setUndoPoint();
+      } catch (_) {
+      }
+      try {
+        return fn();
+      } finally {
+        try {
+          if (stack && stack.length > base + 1) stack.splice(base + 1);
+        } catch (_) {
+        }
+      }
+    }
+    _updateNames() {
+      const stale = this._staleNames();
+      if (!stale.length) {
+        this._note("Waypoint names are already up to date.");
+        return;
+      }
+      let count = 0;
+      this._oneUndoStep(() => {
+        for (const { rec, name } of stale) if (this._renameWaypoint(rec, name)) count++;
+      });
+      this._note(`Updated ${count} waypoint name${count === 1 ? "" : "s"} — save the route to keep ${count === 1 ? "it" : "them"}.`);
+    }
     _addWaypoint(poi, quiet = false) {
       const plan = this._plan();
       if (!plan || typeof plan.addWaypoint !== "function") {
@@ -12547,6 +12852,7 @@
         this._note("dynamic.watch didn't accept the waypoint.", true);
         return false;
       }
+      this._recordMine(poi.lat, poi.lng, name);
       this._markAdded(poi);
       if (!quiet) this._note(`Added “${name}” as a waypoint — save the route to keep it.`);
       return true;
@@ -12591,6 +12897,7 @@
         this._note("dynamic.watch didn't remove the waypoint.", true);
         return false;
       }
+      this._forgetMine(poi.lat, poi.lng);
       this._syncAdded();
       this._note(`Removed “${name}” — Undo brings it back.`);
       return true;
@@ -12616,28 +12923,55 @@
       if (marker) marker.setIcon(this._icon(poi));
       this._renderPanel();
     }
-    _addAll() {
+    // Make the plan's waypoints match what's shown: add what's missing (one
+    // per 100 m stretch), take away the script's own that are no longer
+    // wanted, and refresh names. Waypoints you added yourself are left alone.
+    _buildUpAhead() {
+      const plan = this._plan();
+      if (!plan || typeof plan.addWaypoint !== "function") {
+        this._note("This dynamic.watch page doesn't support adding waypoints.", true);
+        return;
+      }
       this._refreshAdded();
-      const pending = this._visiblePois().filter((poi) => !this._added.has(poi.id));
-      if (!pending.length) {
-        this._note("Every POI shown is already a waypoint.");
+      const build = planUpAhead(this._visiblePois(), this._waypointRecords());
+      const remove = this._canRemoveWaypoints() ? build.remove.filter((rec) => rec.id != null && plan.waypoints.some((w) => w && w.markerId === rec.id)) : [];
+      const going = new Set(remove.map((rec) => rec.id));
+      const stale = this._staleNames().filter(({ rec }) => !going.has(rec.id));
+      if (!build.add.length && !remove.length && !stale.length) {
+        this._note(build.kept || build.skipped ? "Up Ahead already matches what's shown." : "Nothing shown to add.");
         return;
       }
-      const chosen = thinClusters(pending, this._pois.filter((poi) => this._added.has(poi.id)));
-      const left = pending.length - chosen.length;
-      if (!chosen.length) {
-        this._note("Every stretch shown already has a waypoint.");
-        return;
-      }
-      if (chosen.length > CONFIRM_ADD_ALL_OVER && !window.confirm(`Add ${chosen.length} waypoints to this route?`)) return;
-      let count = 0;
+      if (build.add.length + remove.length > CONFIRM_ADD_ALL_OVER && !window.confirm(`Build Up Ahead: add ${build.add.length} and remove ${remove.length} waypoints?`)) return;
+      let added = 0, removed = 0, renamed = 0, failed = false;
       this._status = { text: "", error: false, note: true };
-      for (const poi of chosen) {
-        if (this._addWaypoint(poi, true)) count++;
-        else if (this._status.error) return;
-      }
-      const skipped = left ? ` (${left} next to a more useful one left out)` : "";
-      this._note(count ? `Added ${count} waypoint${count === 1 ? "" : "s"}${skipped} — save the route to keep them.` : "Those POIs already have waypoints.");
+      this._oneUndoStep(() => {
+        for (const rec of remove) {
+          try {
+            plan.removeWaypoint(rec.id);
+          } catch (e) {
+            console.warn("[CustomTiles] Route POIs: removeWaypoint failed", e);
+          }
+          if (plan.waypoints.some((w) => w && w.markerId === rec.id)) continue;
+          this._forgetMine(rec.lat, rec.lng);
+          removed++;
+        }
+        for (const poi of build.add) {
+          if (this._addWaypoint(poi, true)) added++;
+          else if (this._status.error) {
+            failed = true;
+            return;
+          }
+        }
+        for (const { rec, name } of stale) if (this._renameWaypoint(rec, name)) renamed++;
+      });
+      this._syncAdded();
+      if (failed) return;
+      const parts = [];
+      if (added) parts.push(`${added} added`);
+      if (removed) parts.push(`${removed} removed`);
+      if (renamed) parts.push(`${renamed} renamed`);
+      const skipped = build.skipped ? ` (${build.skipped} next to a more useful one left out)` : "";
+      this._note(parts.length ? `Up Ahead built: ${parts.join(", ")}${skipped} — one Undo reverts it; save the route to keep it.` : "Those POIs already have waypoints.");
     }
     // -- Panel --------------------------------------------------------------
     _ensurePanel() {
@@ -12668,6 +13002,7 @@
       const chips = POI_CATEGORIES.filter((cat) => counts[cat.id]).map((cat) => `<button type="button" class="dw-poi-chip${hidden.has(cat.id) ? " dw-poi-chip--off" : ""}"` + esc` data-poi-cat="${cat.id}" aria-pressed="${hidden.has(cat.id) ? "false" : "true"}">` + `<span class="dw-poi-dot" style="background:${cat.color}"></span>` + esc`${cat.label} <span class="dw-poi-count">${counts[cat.id]}</span></button>`).join("");
       const visible = this._visiblePois();
       const canRemove = this._canRemoveWaypoints();
+      const stale = this._state === "active" ? this._staleNames().length : 0;
       const rows = visible.slice(0, LIST_LIMIT).map((poi) => {
         const cat = CATEGORY[poi.category];
         const added = this._added.has(poi.id);
@@ -12686,7 +13021,7 @@
       const scrollTop = oldList && !this._scrollReset ? oldList.scrollTop : 0;
       this._scrollReset = false;
       const nameOptions = NAME_MODES.map((m) => `<option value="${m.id}"${m.id === this._prefs.nameMode ? " selected" : ""}>${_escHtml(m.label)}</option>`).join("");
-      el.innerHTML = `<div class="dw-poi-hd"><b>POIs along route</b><span class="dw-poi-hd-btns"><button type="button" data-poi-act="collapse" title="${collapsed ? "Expand" : "Collapse"}">${collapsed ? "+" : "–"}</button><button type="button" data-poi-act="close" title="Close and clear POIs">×</button></span></div><div class="dw-poi-body">` + esc`<div class="dw-poi-status${this._status.error ? " dw-poi-status--error" : ""}">${this._status.text}</div>` + this._gapHtml() + `<div class="dw-poi-opts"><label>Within <select data-poi-radius>${radiusOptions}</select></label><button type="button" data-poi-act="refresh"${this._state === "loading" ? " disabled" : ""}>Search again</button></div><div class="dw-poi-opts"><label title="Waypoint names are all that reach the watch">Waypoint names <select data-poi-names>${nameOptions}</select></label></div>` + (chips ? `<div class="dw-poi-chips">${chips}</div>` : "") + (rows ? `<ol class="dw-poi-list">${rows}${more}</ol>` : "") + (visible.length ? `<div class="dw-poi-ft"><button type="button" data-poi-act="add-all">Add shown as waypoints</button></div>` : "") + `<div class="dw-poi-attr">POI data © <a href="https://openmaptiles.org/" target="_blank" rel="noreferrer">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors, via <a href="https://openfreemap.org/" target="_blank" rel="noreferrer">OpenFreeMap</a>` + (this._state === "active" && this._hasElevation ? ` · Elevation <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank" rel="noreferrer">AWS Terrain Tiles</a>` : "") + `</div></div>`;
+      el.innerHTML = `<div class="dw-poi-hd"><b>POIs along route</b><span class="dw-poi-hd-btns"><button type="button" data-poi-act="collapse" title="${collapsed ? "Expand" : "Collapse"}">${collapsed ? "+" : "–"}</button><button type="button" data-poi-act="close" title="Close and clear POIs">×</button></span></div><div class="dw-poi-body">` + esc`<div class="dw-poi-status${this._status.error ? " dw-poi-status--error" : ""}">${this._status.text}</div>` + this._gapHtml() + `<div class="dw-poi-opts"><label>Within <select data-poi-radius>${radiusOptions}</select></label><button type="button" data-poi-act="refresh"${this._state === "loading" ? " disabled" : ""}>Search again</button></div><div class="dw-poi-opts"><label title="Waypoint names are all that reach the watch">Waypoint names <select data-poi-names>${nameOptions}</select></label></div>` + (chips ? `<div class="dw-poi-chips">${chips}</div>` : "") + (rows ? `<ol class="dw-poi-list">${rows}${more}</ol>` : "") + (visible.length || stale ? `<div class="dw-poi-ft">` + (visible.length ? `<button type="button" data-poi-act="build" title="Add what's shown as waypoints, and replace the ones this button added before">Build Up Ahead</button>` : "") + (stale ? esc`<button type="button" data-poi-act="update-names" title="Rename them to match the current route and name setting">Update ${stale} name${stale === 1 ? "" : "s"}</button>` : "") + `</div>` : "") + `<div class="dw-poi-attr">POI data © <a href="https://openmaptiles.org/" target="_blank" rel="noreferrer">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors, via <a href="https://openfreemap.org/" target="_blank" rel="noreferrer">OpenFreeMap</a>` + (this._state === "active" && this._hasElevation ? ` · Elevation <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank" rel="noreferrer">AWS Terrain Tiles</a>` : "") + `</div></div>`;
       const list = el.querySelector(".dw-poi-list");
       if (list && scrollTop) list.scrollTop = scrollTop;
     }
@@ -12701,7 +13036,8 @@
         const action = act.dataset.poiAct;
         if (action === "close") this.clear();
         else if (action === "refresh") this.search();
-        else if (action === "add-all") this._addAll();
+        else if (action === "build") this._buildUpAhead();
+        else if (action === "update-names") this._updateNames();
         else if (action === "collapse") {
           this._panel.classList.toggle("dw-poi-panel--collapsed");
           this._renderPanel();
@@ -12749,6 +13085,7 @@
         if (NAME_MODES.some((m) => m.id === names.value)) {
           this._prefs.nameMode = names.value;
           this._savePrefs();
+          this._renderPanel();
         }
         return;
       }
@@ -13505,6 +13842,7 @@
         addOverlay(CFG.LAYER_MARINE, new MarineTrafficLayerProvider());
         addOverlay(CFG.LAYER_WAZE, new WazeLayerProvider());
         addOverlay(CFG.LAYER_GEOCACHING, new GeocachingLayerProvider());
+        addOverlay(CFG.LAYER_ABW, new AussieBushwalkingLayerProvider());
         addOverlay(CFG.LAYER_MOBILE, new MobileCoverageLayerProvider());
         addOverlay(CFG.LAYER_SEAMARKS, new OpenSeaMapLayerProvider());
         addOverlay(CFG.LAYER_INFRA, new PowerInfraLayerProvider());
@@ -14151,6 +14489,12 @@
         ".dw-qpws-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
         ".dw-qpws-tip b { font-weight: 700; }",
         ".dw-infra-tip { font-size: 11px; line-height: 1.4; }",
+        ".dw-abw-icon { background: none; border: 0; }",
+        ".dw-abw-pin { display: block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.6); box-sizing: border-box; }",
+        ".dw-abw-tip { font-size: 11px; line-height: 1.4; }",
+        ".dw-abw-pop { font-size: 12px; line-height: 1.45; min-width: 190px; }",
+        ".dw-abw-sub { color: #6b7280; }",
+        ".dw-abw-desc { margin: 4px 0; }",
         // Match the site's native popup buttons (full popup width,
         // rounded, light border, generous padding) with a blue accent
         // so Street View reads as the external/exit action.
@@ -14229,6 +14573,7 @@
         ".dw-poi-gap-warn .fa-tint { color: #c2410c; }",
         ".dw-poi-opts { display: flex; align-items: center; justify-content: space-between; gap: 6px; }",
         ".dw-poi-opts select, .dw-poi-opts button, .dw-poi-ft button { font-size: 11px; }",
+        ".dw-poi-ft { display: flex; flex-wrap: wrap; gap: 6px; }",
         ".dw-poi-chips { display: flex; flex-wrap: wrap; gap: 4px; }",
         ".dw-poi-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border: 1px solid #bbb; border-radius: 10px; background: #fff; cursor: pointer; font-size: 11px; }",
         ".dw-poi-chip--off { opacity: .45; text-decoration: line-through; }",

@@ -80,6 +80,12 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 | **INTVL Global Map** | The INTVL run-territory game's public global map; hover for territory size, owner colour, and exact recording time decoded from the activity's cuid |
 | **Geocaches** | Geocaches from geocaching.com via the public tile API (no login required); shows Groundspeak's real per-type icons (traditional/mystery/earthcache/…), clickable through to each cache's page; click also fetches difficulty/terrain/owner/favourites |
 
+**Walks**
+
+| Layer | Notes |
+|---|---|
+| **Aussie Bushwalking** | The walks in view from [aussiebushwalking.com](https://www.aussiebushwalking.com/)'s own walk map: a line per recorded track and a pin per walk, coloured by difficulty. Hover for distance, difficulty and duration; click for the description and a link to the walk's page. Appears from zoom 10. Walks are contributed by the site's members; the site's terms allow personal use only. |
+
 **Mining**
 
 | Layer | Notes |
@@ -159,15 +165,22 @@ It also finds **course points** on the route itself, so your watch's Up Ahead li
 
 Each kind has its own chip, so you can hide the ones you don't want before adding waypoints.
 
-Up Ahead shows only the next few entries, so **Add shown as waypoints** adds one item per 100 m stretch of the route: the most useful one. The order is water, toilets, food and shops, medical, climbs, creek crossings, track sections, then picnic areas and car parks. A stretch that already has one of these waypoints gets nothing more. The panel says how many it left out; add any of those with its **+** button.
+**Build Up Ahead** makes the plan's waypoints match what's shown, in one step:
+
+- It adds one item per 100 m stretch of the route: the most useful one. The order is water, toilets, food and shops, medical, climbs, creek crossings, track sections, then picnic areas and car parks. The panel says how many it left out; add any of those with its **+** button.
+- Press it again after editing the route or hiding a kind, and it replaces only the waypoints the script added before: ones no longer wanted are removed, missing ones are added, and names are refreshed.
+- Waypoints you added yourself are never removed, and neither is one of the script's that you have renamed or moved. A stretch that has one of yours gets nothing more.
+- The whole build is a single Undo step.
+
+The script remembers which waypoints it added for each saved route in your userscript manager's storage, on this browser only.
 
 Above the list, the panel shows the **longest stretch without drinking water**, measured along the route from the start to the finish (or "No drinking water within 100 m of the route"). If cafés and shops shorten it noticeably, a second line gives that figure too. Click either line to highlight that stretch on the map.
 
-**Waypoint names** sets what POI waypoints are called: the name alone (the default) or distance and name (`4.2k Kiosk`). dynamic.watch sends only a waypoint's position and name to the watch, within its name limit (16 characters on most accounts). Waypoints you've already added keep their names. When a name wouldn't otherwise fit, common words are shortened (Creek → Ck, Track → Trk, Road → Rd), and climbs drop to `Climb 171m` or `+171m`.
+**Waypoint names** sets what POI waypoints are called: the name alone (the default) or distance and name (`4.2k Kiosk`). dynamic.watch sends only a waypoint's position and name to the watch, within its name limit (16 characters on most accounts). If the route changes before a waypoint, or you change this setting, names the script wrote go out of date; the panel then offers **Update names**, which renames them in one Undo step. Names you typed yourself are left alone. When a name wouldn't otherwise fit, common words are shortened (Creek → Ck, Track → Trk, Road → Rd), and climbs drop to `Climb 171m` or `+171m`.
 
 While the POIs are shown, they follow your edits: add, drag or delete route points and the list and pins update a couple of seconds after the route settles. **Search again** re-runs it at any time.
 
-Click a pin or list entry for details, then **Add as waypoint** (or **Add shown as waypoints**) to add it to the plan as a named waypoint — dynamic.watch sends waypoints to your watch once you **save** the route, and Undo removes them. A row you've added shows a tick; click the tick to take that waypoint off the plan again. Press the button again to clear the POIs. Pins work in 3D Mode too.
+Click a pin or list entry for details, then **Add as waypoint** (or **Build Up Ahead**) to add it to the plan as a named waypoint — dynamic.watch sends waypoints to your watch once you **save** the route, and Undo removes them. A row you've added shows a tick; click the tick to take that waypoint off the plan again. Press the button again to clear the POIs. Pins work in 3D Mode too.
 
 POI data comes from OpenStreetMap via [OpenFreeMap](https://openfreemap.org/)'s keyless vector tiles, so coverage is only as good as local OSM mapping; very long routes (roughly 300 km or more) need splitting.
 
@@ -245,6 +258,7 @@ Quick-reference table — what you need to log in to for each layer to render.
 | Marine Vessels | No | MarineTraffic anonymous endpoint | Cloudflare-protected; can drop out |
 | Waze Traffic | No | Waze live-map georss (reCAPTCHA-gated) | Token minted in a hidden `embed.waze.com` iframe; activates at z≥9. Manual override: `GM_setValue("dw_waze_token_manual", "<token>")` |
 | INTVL Global Map | No | Public Mapbox Vector Tile CDN | |
+| Aussie Bushwalking | No | aussiebushwalking.com's walk-map vector tiles | Read only while the overlay is on |
 | Geocaches | No | Groundspeak's public tile-info + map.details endpoints | No login. UTFGrid drives placement; lazy map.details fetch enriches on click. |
 
 **Auto-token implementation details:**
@@ -301,13 +315,19 @@ bash tests/run.sh --ci   # plain text output
 [GitHub Actions](.github/workflows/tests.yml) runs the bundle check and the offline suite on every push to `main` and every pull request. The live endpoint checks can be started by hand from the Actions tab (**Run workflow** → tick *live*); browser checks that need a dynamic.watch login skip there.
 
 - **`unit.mjs`** (116 tests, no network) — pure helpers: tile geometry, MVT/protobuf decode, Cadastre formatters, historical-map URLs, OnTheHouse URL builders, INTVL date utilities, layer-provider factories, and layer-group registration. Loaded into a sandboxed `vm.createContext` via [`_loader.mjs`](tests/_loader.mjs) so the production code itself is what gets exercised.
-- **Source-level regressions** (`polling-data-layer.mjs`, `viewport-layers.mjs`, `route-pois.mjs`, `route-profile.mjs`, `route-features.mjs`, `planner-toolbar.mjs`, `mode-3d-sync.mjs`, `userscript-menu.mjs`, `release-scripts.mjs`, `vexcel-*.mjs`, `lightpoll-token.mjs`; no network) — async overlay freshness/retries, route-POI geometry and waypoints, course points (creek crossings, track sections and climb detection), the elevation profile (Terrarium decoding and fetching with stubbed requests), the userscript menu and its redaction, the version-bump and release-notes scripts, and the Vexcel capture CLI with mocked services. `check-secrets.mjs` checks shipped source and bundle for embedded credentials.
+- **Source-level regressions** (`polling-data-layer.mjs`, `viewport-layers.mjs`, `route-pois.mjs`, `route-profile.mjs`, `route-features.mjs`, `planner-toolbar.mjs`, `mode-3d-sync.mjs`, `aussie-bushwalking.mjs`, `userscript-menu.mjs`, `release-scripts.mjs`, `vexcel-*.mjs`, `lightpoll-token.mjs`; no network) — async overlay freshness/retries, route-POI geometry and waypoints, course points (creek crossings, track sections and climb detection), the elevation profile (Terrarium decoding and fetching with stubbed requests), the userscript menu and its redaction, the version-bump and release-notes scripts, and the Vexcel capture CLI with mocked services. `check-secrets.mjs` checks shipped source and bundle for embedded credentials.
 - **`smoke.sh`** (34 tests + 7 skips, ~15 s) — HTTP probe every public layer endpoint over Brisbane CBD: HTTP 200 + content-type + minimum body size. Mapbox Terrain-DEM is skipped unless `MAPBOX_TOKEN` is set.
 - **`shape.mjs`** (42 tests + 2 skips, ~15 s) — deep structural validation: PNG/JPEG magic-byte sniff, PBF decoded via the userscript's own `mvtDecode`, JSON field walks asserting every field the script reads. Also runs the full QLD CSRF token bootstrap, Apple DuckDuckGo → bootstrap chain, and the Esri Wayback catalog → release → tile pipeline end-to-end. Mapbox terrain probes are opt-in via `MAPBOX_TOKEN`.
 - **`e2e/run-3d-asserts.mjs`** (12 tests, ~2 min) — Playwright-driven assertions on a real Chromium against a saved plan. Covers 3D enable, marker reprojection under rotation, waypoint drag, the rapid-toggle stress path, heatmap persistence, overlay-above-base layer order, the 3D → 2D → 3D cycle, overlay toggles leaving the base map alone, hover pop-ups on layers added after 3D, no error flood when 3D is switched off mid-load, and recovery when 3D cannot start. Needs `npm install` + `npm run e2e:install` + `npm run e2e:auth` once; see [`tests/e2e/README.md`](tests/e2e/README.md).
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
-- **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
+- **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, refreshing names, Build Up Ahead (adding, one-step Undo, replacing only its own waypoints), list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.19.0
+
+- **Build Up Ahead** replaces "Add shown as waypoints". It adds what's shown, and pressing it again after a route edit replaces only the waypoints it added before; yours are never removed. Each build is a single Undo step.
+- New **Aussie Bushwalking** overlay: the walks and recorded tracks in view, coloured by difficulty, each linking to its page on aussiebushwalking.com.
+- **Update names**: when a route edit or the name setting leaves distance names such as `4.2k Kiosk` out of date, the panel offers to rename them.
 
 ### Release notes — 7.18.1
 

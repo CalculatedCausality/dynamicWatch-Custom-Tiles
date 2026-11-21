@@ -8,7 +8,7 @@ import {
 	abbreviate, climbLabel, climbTopLabel, creekCrossings, findClimbs, trackSections,
 } from "../src/utils/route-features.js";
 import {
-	RoutePoiController, findRoutePois, thinClusters, waypointLabel, waypointPriority,
+	RoutePoiController, findRoutePois, looksGenerated, planUpAhead, thinClusters, waypointLabel, waypointPriority,
 } from "../src/providers/route-pois.js";
 
 // Routes run north from the equator, so offsets in both axes are metric.
@@ -204,7 +204,7 @@ test("bulk adding keeps only the most useful item per 100 m stretch", () => {
 	assert.deepEqual(thinClusters([]), []);
 });
 
-test("Add shown as waypoints skips clustered items and says how many it left out", () => {
+test("Build Up Ahead skips clustered items and says how many it left out", () => {
 	const added = [];
 	const plan = {
 		waypoints: [], waypointNameLength: 16, waypointCountMax: 999999, unitsMetric: true,
@@ -225,11 +225,144 @@ test("Add shown as waypoints skips clustered items and says how many it left out
 			{ ...item("picnic", "parking", "picnic_site", 19850), name: "Day Use Area" },
 			{ ...item("climb", "climb", "climb", 23920), name: "Climb 72m 0.7k" },
 		];
-		ctl._addAll();
+		ctl._buildUpAhead();
 		assert.deepEqual(added, ["Toilets", "Climb 72m 0.7k"]);
-		assert.match(ctl._status.text, /^Added 2 waypoints \(2 next to a more useful one left out\)/);
-		ctl._addAll();
-		assert.match(ctl._status.text, /already has a waypoint/, "the covered stretches get nothing more");
+		assert.match(ctl._status.text, /^Up Ahead built: 2 added \(2 next to a more useful one left out\)/);
+		ctl._buildUpAhead();
+		assert.equal(ctl._status.text, "Up Ahead already matches what's shown.", "the covered stretches get nothing more");
 		assert.equal(added.length, 2);
 	} finally { delete globalThis.window; }
+});
+
+test("generated names are recognised in either mode and at any distance", () => {
+	const kiosk = { name: "Kiosk", type: "cafe", category: "food", along: 4200 };
+	assert.equal(looksGenerated("Kiosk", kiosk), true);
+	assert.equal(looksGenerated("4.2k Kiosk", kiosk), true);
+	assert.equal(looksGenerated("17k Kiosk", kiosk), true, "an old distance still counts");
+	assert.equal(looksGenerated("2.6mi Kiosk", kiosk), true);
+	assert.equal(looksGenerated("Kiosk (coffee!)", kiosk), false, "your own wording is yours");
+	assert.equal(looksGenerated("4.2k Coffee", kiosk), false);
+	assert.equal(looksGenerated("", kiosk), false);
+	const creek = { name: "East Cedar Creek", type: "creek_crossing", category: "creek", along: 13040 };
+	assert.equal(looksGenerated("13k East Cedar C", creek), true, "shortened to fit beside the distance");
+	assert.equal(looksGenerated("9.9k East Cedar", creek), true);
+	assert.equal(looksGenerated(waypointLabel(creek, { mode: "km" }), creek), true);
+	assert.equal(looksGenerated("Toilets", { name: "", type: "toilets", category: "toilets", along: 0 }), true);
+});
+
+const wp = (id, km, name, mine, offM = 0) => ({ id, lat: north(km)[1], lng: east(offM), name, mine });
+
+test("Build Up Ahead replaces only its own waypoints and leaves yours alone", () => {
+	const pois = [
+		item("wc", "toilets", "toilets", 1000), item("park", "parking", "parking", 1050),
+		item("creek", "creek", "creek_crossing", 5000), item("climb", "climb", "climb", 9000),
+	];
+	// Nothing on the plan yet: one per 100 m stretch.
+	const fresh = planUpAhead(pois, []);
+	assert.deepEqual(fresh.add.map((p) => p.id), ["wc", "creek", "climb"]);
+	assert.deepEqual([fresh.remove.length, fresh.kept, fresh.skipped], [0, 0, 1]);
+
+	// Its own from last time: one still wanted, one whose POI has gone
+	// (the route moved), and one of yours that sits on no POI at all.
+	const second = planUpAhead(pois, [
+		wp("a", 1, "Toilets", true), wp("b", 7, "Climb 60m 1.0k", true), wp("c", 3, "Car drop", false),
+	]);
+	assert.deepEqual(second.add.map((p) => p.id), ["creek", "climb"]);
+	assert.deepEqual(second.remove.map((w) => w.id), ["b"], "its own stale waypoint goes");
+	assert.equal(second.kept, 1);
+
+	// Your waypoint on the car park keeps that stretch: the toilets beside it
+	// are not added, and the script's own toilets waypoint is taken away.
+	const yours = planUpAhead(pois, [wp("a", 1, "Toilets", true), wp("mine", 1.05, "Meet crew", false)]);
+	assert.deepEqual(yours.add.map((p) => p.id), ["creek", "climb"]);
+	assert.deepEqual(yours.remove.map((w) => w.id), ["a"]);
+	const never = planUpAhead(pois, [wp("x", 5, "My creek", false), wp("y", 20, "Elsewhere", false)]);
+	assert.deepEqual(never.remove, [], "waypoints that aren't the script's are never removed");
+	assert.deepEqual(never.add.map((p) => p.id), ["wc", "climb"]);
+
+	// A hidden kind (not in the shown list) loses the script's waypoint.
+	const hidden = planUpAhead(pois.filter((p) => p.category !== "creek"), [wp("k", 5, "Creek crossing", true)]);
+	assert.deepEqual(hidden.remove.map((w) => w.id), ["k"]);
+	assert.deepEqual(planUpAhead([], []), { add: [], remove: [], kept: 0, skipped: 0 });
+});
+
+// A planner stand-in with markers, undo points and removal, as on dynamic.watch.
+function fakePlanner(routeId) {
+	let seq = 0;
+	const plan = {
+		routeId, waypoints: [], undoStack: [], waypointNameLength: 16, waypointCountMax: 999999, unitsMetric: true,
+		setUndoPoint() { this.undoStack.push(this.waypoints.map((w) => w.name)); },
+		addWaypoint(latLng, name) {
+			let tip = name;
+			const w = {
+				markerId: "m" + (++seq), name,
+				marker: {
+					getLatLng: () => ({ lat: latLng[0], lng: latLng[1] }),
+					getTooltip: () => ({}), setTooltipContent: (text) => { tip = text; },
+				},
+				tooltip: () => tip,
+			};
+			this.setUndoPoint();
+			this.waypoints.push(w);
+			return w;
+		},
+		removeWaypoint(id) {
+			this.setUndoPoint();
+			this.waypoints.splice(this.waypoints.findIndex((w) => w.markerId == id), 1);
+		},
+	};
+	return plan;
+}
+
+test("names follow the route, and a rebuilt Up Ahead is one Undo step", () => {
+	const store = {};
+	globalThis.GM_getValue = (key, fallback) => (key in store ? store[key] : fallback);
+	globalThis.GM_setValue = (key, value) => { store[key] = value; };
+	const plan = fakePlanner(777);
+	globalThis.window = { leafletPlan: plan, confirm: () => true };
+	try {
+		// `km` fixes where the POI is; `along` is how far along the route it falls.
+		const named = (id, category, type, along, name, km) => ({ ...item(id, category, type, along, km), name });
+		const ctl = new RoutePoiController({});
+		ctl._renderPanel = () => {};
+		ctl._prefs.nameMode = "km";
+		ctl._pois = [named("tap", "water", "drinking_water", 4200, "Tap", 4.2), named("kiosk", "food", "cafe", 9000, "Kiosk", 9)];
+		plan.addWaypoint([north(6)[1], 0], "My own spot");
+		ctl._buildUpAhead();
+		assert.deepEqual(plan.waypoints.map((w) => w.name), ["My own spot", "4.2k Tap", "9.0k Kiosk"]);
+		assert.equal(ctl._staleNames().length, 0);
+
+		// The route gains 1.3 km before both: same places, new distances.
+		ctl._pois = [named("tap", "water", "drinking_water", 5500, "Tap", 4.2), named("kiosk", "food", "cafe", 10300, "Kiosk", 9)];
+		assert.deepEqual(ctl._staleNames().map((s) => [s.rec.name, s.name]), [["4.2k Tap", "5.5k Tap"], ["9.0k Kiosk", "10k Kiosk"]]);
+		const undoBefore = plan.undoStack.length;
+		ctl._updateNames();
+		assert.deepEqual(plan.waypoints.map((w) => w.name), ["My own spot", "5.5k Tap", "10k Kiosk"]);
+		assert.equal(plan.waypoints[1].tooltip(), "5.5k Tap", "the marker's label is updated too");
+		assert.equal(plan.undoStack.length, undoBefore + 1, "one undo point for the whole rename");
+		assert.equal(ctl._status.text, "Updated 2 waypoint names — save the route to keep them.");
+		assert.equal(ctl._staleNames().length, 0);
+
+		// A later visit (new controller) still knows which waypoints are its own.
+		const later = new RoutePoiController({});
+		later._renderPanel = () => {};
+		later._prefs.nameMode = "km";
+		// The route no longer passes the kiosk; a toilet block appears instead.
+		later._pois = [named("tap", "water", "drinking_water", 5500, "Tap", 4.2), item("wc", "toilets", "toilets", 12000, 15)];
+		const undoAt = plan.undoStack.length;
+		later._buildUpAhead();
+		assert.deepEqual(plan.waypoints.map((w) => w.name), ["My own spot", "5.5k Tap", "12k Toilets"]);
+		assert.equal(later._status.text, "Up Ahead built: 1 added, 1 removed — one Undo reverts it; save the route to keep it.");
+		assert.equal(plan.undoStack.length, undoAt + 1, "one undo point for the whole rebuild");
+		assert.deepEqual(plan.undoStack.at(-1), ["My own spot", "5.5k Tap", "10k Kiosk"], "and it is the state before the rebuild");
+
+		// A waypoint you renamed is yours from then on.
+		plan.waypoints[1].name = "Tap (slow)";
+		later._ledger = null;
+		later._pois = [];
+		later._buildUpAhead();
+		assert.ok(plan.waypoints.some((w) => w.name === "Tap (slow)"), "not removed, though nothing is shown there now");
+		assert.ok(!plan.waypoints.some((w) => w.name === "12k Toilets"), "its own waypoint with nothing shown is removed");
+		assert.ok(plan.waypoints.some((w) => w.name === "My own spot"));
+	} finally { delete globalThis.window; delete globalThis.GM_getValue; delete globalThis.GM_setValue; }
 });

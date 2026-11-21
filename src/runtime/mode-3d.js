@@ -1019,6 +1019,12 @@ export class Mode3DController {
 			return _escHtml(p.label || p.name || "Vessel");
 		});
 
+		// Aussie Bushwalking walks — the click opens the walk's page.
+		bind("dw-shapes-point-dwAbwPane", (f) => {
+			const p = f.properties || {};
+			return _escHtml(p.name || "Walk");
+		});
+
 		// Waze alerts — provider attaches _dwData.name (type + street).
 		bind("dw-shapes-point-dwWazePane", (f) => {
 			const p = f.properties || {};

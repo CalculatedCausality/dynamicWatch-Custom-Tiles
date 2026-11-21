@@ -263,7 +263,7 @@ test("adding POIs creates named planner waypoints once, without duplicates or ov
 		assert.equal(ctl._addWaypoint(pois[0]), false, "already added");
 		assert.equal(ctl._addWaypoint(pois[1]), false, "existing waypoint at the same spot");
 		ctl._pois = pois;
-		ctl._addAll();
+		ctl._buildUpAhead();
 		assert.deepEqual(added.map((a) => a.name), ["Tank at the old", "Drinking water"]);
 		assert.equal(plan.waypoints.length, 3);
 		assert.match(ctl._status.text, /maximum of 3 waypoints/);

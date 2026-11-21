@@ -53,6 +53,7 @@ import {
 	TelecomsLayerProvider,
 	WaterLayerProvider,
 } from "../providers/openinframap.js";
+import { AussieBushwalkingLayerProvider } from "../providers/aussie-bushwalking.js";
 import { createQldEnvironmentProviders } from "../providers/qld-environment.js";
 import { createQldMiningProviders } from "../providers/qld-mining.js";
 import { RoutePoiController } from "../providers/route-pois.js";
@@ -291,6 +292,7 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_MARINE,     new MarineTrafficLayerProvider());
 			addOverlay(CFG.LAYER_WAZE,       new WazeLayerProvider());
 			addOverlay(CFG.LAYER_GEOCACHING, new GeocachingLayerProvider());
+			addOverlay(CFG.LAYER_ABW,        new AussieBushwalkingLayerProvider());
 			addOverlay(CFG.LAYER_MOBILE,     new MobileCoverageLayerProvider());
 			addOverlay(CFG.LAYER_SEAMARKS,   new OpenSeaMapLayerProvider());
 			addOverlay(CFG.LAYER_INFRA,      new PowerInfraLayerProvider());
@@ -1073,6 +1075,12 @@ export class CustomTilesApp {
 			".dw-qpws-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
 			".dw-qpws-tip b { font-weight: 700; }",
 			".dw-infra-tip { font-size: 11px; line-height: 1.4; }",
+			".dw-abw-icon { background: none; border: 0; }",
+			".dw-abw-pin { display: block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.6); box-sizing: border-box; }",
+			".dw-abw-tip { font-size: 11px; line-height: 1.4; }",
+			".dw-abw-pop { font-size: 12px; line-height: 1.45; min-width: 190px; }",
+			".dw-abw-sub { color: #6b7280; }",
+			".dw-abw-desc { margin: 4px 0; }",
 			// Match the site's native popup buttons (full popup width,
 			// rounded, light border, generous padding) with a blue accent
 			// so Street View reads as the external/exit action.
@@ -1151,6 +1159,7 @@ export class CustomTilesApp {
 			".dw-poi-gap-warn .fa-tint { color: #c2410c; }",
 			".dw-poi-opts { display: flex; align-items: center; justify-content: space-between; gap: 6px; }",
 			".dw-poi-opts select, .dw-poi-opts button, .dw-poi-ft button { font-size: 11px; }",
+			".dw-poi-ft { display: flex; flex-wrap: wrap; gap: 6px; }",
 			".dw-poi-chips { display: flex; flex-wrap: wrap; gap: 4px; }",
 			".dw-poi-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border: 1px solid #bbb; border-radius: 10px; background: #fff; cursor: pointer; font-size: 11px; }",
 			".dw-poi-chip--off { opacity: .45; text-decoration: line-through; }",

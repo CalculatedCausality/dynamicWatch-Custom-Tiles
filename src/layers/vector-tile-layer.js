@@ -176,6 +176,10 @@ export function makeVectorTileLayer(opts) {
 								}
 								this._cacheTile(tk, tileEls);
 							} catch (e) { failedAny = true; }
+						} else if (opts.missingIsEmpty && !err && r && (r.status === 404 || r.status === 204)) {
+							// This source answers "not found" for a tile with
+							// nothing in it: remember it as empty, don't re-ask.
+							this._cacheTile(tk, []);
 						} else {
 							failedAny = true;
 						}
