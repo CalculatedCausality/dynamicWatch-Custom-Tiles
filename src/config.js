@@ -128,6 +128,7 @@ export const CFG = {
 	LAYER_HIST_MINES: "Historic Mines",
 	LAYER_MINE_SHAFTS: "Mine Shafts",
 	LAYER_MINE_LEASES: "Historic Mining Leases",
+	LAYER_LEASE_POINTS: "Old Lease Points",
 	LAYER_HIST_MAPS: "Historic Map Sheets",
 	LAYER_TOPO:    "QLD Topo",
 	LAYER_INTVL_GLOBAL: "INTVL Global Map",
@@ -308,7 +309,11 @@ export const CFG = {
 	QLD_SHAFTS_SERVICE:
 		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
 		"GeoscientificInformation/AbandonedMines/MapServer",
-	QLD_SHAFTS_LAYER_IDS: "45,75,65",
+	// Also drawn: the mapped extent of underground workings (62 outline,
+	// 63 points, ~8.3k), vents (44), remediated openings (60), mineral
+	// material (70, 95), and the pit (85), tailings (90), shallow-workings
+	// (105) and mine-openings (110) areas.
+	QLD_SHAFTS_LAYER_IDS: "45,75,65,44,70,63,60,62,85,90,95,105,110",
 	QLD_SHAFTS_HOVER_MIN_ZOOM: 11,
 
 	// Historic mining title footprints (MinesPermitsHistoric). Catches
@@ -320,6 +325,12 @@ export const CFG = {
 		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
 		"Economy/MinesPermitsHistoric/MapServer",
 	QLD_LEASES_LAYER_IDS: "170,155,135",
+	// 195 = Historical ML granted and 210 = Historical MFS granted: points
+	// for ~18k older leases with no surveyed outline (927 around Gympie,
+	// where only 6 outlines exist). The server labels every point, which
+	// swamps a goldfield, so they are their own overlay.
+	QLD_LEASE_POINTS_LAYER_IDS: "195,210",
+	QLD_LEASE_POINTS_MIN_ZOOM: 13,
 	QLD_LEASES_HOVER_MIN_ZOOM: 11,
 
 	// Historical printed map sheets index (parish/town/topographic/
@@ -381,6 +392,8 @@ export const CFG = {
 	ROUTE_POI_PREFS_KEY: "dw_route_poi_prefs",
 	// Which waypoints the script itself added, per saved route.
 	ROUTE_POI_ADDED_KEY: "dw_route_poi_added",
+	// Historic map sheets: the control points the user dragged, per scan.
+	HIST_MAP_ALIGN_KEY: "dw_histmap_align",
 
 	// Route elevation profile (climbs): AWS Terrain Tiles, Terrarium PNG, keyless.
 	ROUTE_ELEVATION_TILE: "https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png",
@@ -437,7 +450,7 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Mining",
-		names:  [CFG.LAYER_MINE_SHAFTS, CFG.LAYER_HIST_MINES, CFG.LAYER_MINE_LEASES],
+		names:  [CFG.LAYER_MINE_SHAFTS, CFG.LAYER_HIST_MINES, CFG.LAYER_MINE_LEASES, CFG.LAYER_LEASE_POINTS],
 	},
 	{
 		header: "Reference",

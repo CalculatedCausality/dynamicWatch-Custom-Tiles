@@ -100,6 +100,33 @@ const _GRID = 2;                                  // 2×2 cells → 3×3 points,
 const _CORNER_IDX = new Set([0, 2, 6, 8]);        // lattice corners (bigger handles)
 let _activeOverlay = null;                        // only one warped sheet at a time
 
+// A sheet's nine control points, as dragged, are remembered per scan so an
+// alignment survives removing the sheet or reloading the page.
+const _ALIGN_KEEP = 25;                           // most recently aligned sheets kept
+function _alignStore() {
+	try { const all = JSON.parse(GM_getValue(CFG.HIST_MAP_ALIGN_KEY, "{}")); return all && typeof all === "object" && !Array.isArray(all) ? all : {}; }
+	catch (_) { return {}; }
+}
+// Stored points for `url`, or null unless they are exactly `count` finite [lat, lng] pairs.
+export function _histAlignPoints(entry, count) {
+	const pts = entry && entry.pts;
+	if (!Array.isArray(pts) || pts.length !== count) return null;
+	const ok = pts.every((p) => Array.isArray(p) && p.length === 2 &&
+		Number.isFinite(p[0]) && Number.isFinite(p[1]) && Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180);
+	return ok ? pts.map((p) => [p[0], p[1]]) : null;
+}
+// The store with `url` set to `pts` (or dropped when pts is null), trimmed to the newest _ALIGN_KEEP.
+export function _histAlignUpdated(all, url, pts, now) {
+	const next = { ...all };
+	if (pts) next[url] = { t: now, pts: pts.map((p) => [Number(p[0].toFixed(6)), Number(p[1].toFixed(6))]) };
+	else delete next[url];
+	const keep = Object.keys(next).sort((a, b) => (next[b].t || 0) - (next[a].t || 0)).slice(0, _ALIGN_KEEP);
+	return Object.fromEntries(keep.map((k) => [k, next[k]]));
+}
+function _alignSave(url, pts) {
+	try { GM_setValue(CFG.HIST_MAP_ALIGN_KEY, JSON.stringify(_histAlignUpdated(_alignStore(), url, pts, Date.now()))); } catch (_) {}
+}
+
 // Superimpose `url` on the map, initially filling the geographic bbox
 // corners [[N,W],[N,E],[S,E],[S,W]] (TL,TR,BR,BL), with a draggable mesh.
 export function makeDistortableMapOverlay(map, opts) {
@@ -128,7 +155,8 @@ export function makeDistortableMapOverlay(map, opts) {
 	}
 	const cornerIcon = L.divIcon({ className: "dw-histmap-handle", iconSize: [16, 16] });
 	const midIcon = L.divIcon({ className: "dw-histmap-handle dw-histmap-handle--mid", iconSize: [14, 14] });
-	const markers = gridLL.map((ll, i) =>
+	const saved = _histAlignPoints(_alignStore()[scanUrl], gridLL.length);
+	const markers = (saved || gridLL).map((ll, i) =>
 		L.marker(ll, {
 			draggable: true, zIndexOffset: 2000,
 			icon: _CORNER_IDX.has(i) ? cornerIcon : midIcon,
@@ -180,6 +208,11 @@ export function makeDistortableMapOverlay(map, opts) {
 	probe.src = scanUrl;
 
 	markers.forEach((m) => m.on("drag", update));
+	const remember = () => {
+		_alignSave(scanUrl, markers.map((m) => { const ll = m.getLatLng(); return [ll.lat, ll.lng]; }));
+		setMsg("Alignment saved.", true);
+	};
+	markers.forEach((m) => m.on("dragend", remember));
 	const onMove = () => update();
 	map.on("move zoom viewreset zoomend moveend", onMove);
 
@@ -190,13 +223,19 @@ export function makeDistortableMapOverlay(map, opts) {
 		`<label>Opacity <input type="range" class="dw-histmap-op" min="0" max="1" step="0.05" value="0.7"></label>` +
 		`<div class="dw-histmap-msg"></div>` +
 		`<div class="dw-histmap-btns">` +
+		`<button type="button" class="dw-histmap-lock">Hide points</button>` +
 		`<button type="button" class="dw-histmap-fit">Reset points</button>` +
 		`<button type="button" class="dw-histmap-del">Remove</button></div>`;
 	map.getContainer().appendChild(ctl);
 	L.DomEvent.disableClickPropagation(ctl);
 	L.DomEvent.disableScrollPropagation(ctl);
 	const msgEl = ctl.querySelector(".dw-histmap-msg");
-	const setMsg = (t) => { if (msgEl) msgEl.textContent = t || ""; };
+	const setMsg = (t, ok) => {
+		if (!msgEl) return;
+		msgEl.textContent = t || "";
+		if (msgEl.classList) msgEl.classList.toggle("dw-histmap-msg--ok", !!ok);
+	};
+	if (saved) setMsg("Using your saved alignment.", true);
 
 	ctl.querySelector(".dw-histmap-op").addEventListener("input", (e) => {
 		wrap.style.opacity = e.target.value;
@@ -204,6 +243,16 @@ export function makeDistortableMapOverlay(map, opts) {
 	ctl.querySelector(".dw-histmap-fit").addEventListener("click", () => {
 		markers.forEach((m, i) => m.setLatLng(gridLL[i]));
 		update();
+		_alignSave(scanUrl, null);
+		setMsg("Back to the sheet's own corners.", true);
+	});
+	// Hiding the points leaves the sheet as a plain backdrop, so a route can
+	// be drawn over it without catching a handle.
+	const box = map.getContainer();
+	const lockBtn = ctl.querySelector(".dw-histmap-lock");
+	lockBtn.addEventListener("click", () => {
+		const hidden = box.classList.toggle("dw-histmap-locked");
+		lockBtn.textContent = hidden ? "Show points" : "Hide points";
 	});
 
 	const handle = {
@@ -212,6 +261,7 @@ export function makeDistortableMapOverlay(map, opts) {
 			markers.forEach((m) => m.remove());
 			if (wrap.parentNode) wrap.remove();
 			if (ctl.parentNode) ctl.remove();
+			if (box.classList) box.classList.remove("dw-histmap-locked");
 			if (_activeOverlay === handle) _activeOverlay = null;
 		},
 	};

@@ -22,7 +22,7 @@ function loadHistMaps(overrides = {}) {
 		_escHtml: dw._escHtml, esc: dw.esc, URL, ...overrides,
 	};
 	vm.runInNewContext(HIST_MAP_SOURCE +
-		"\n globalThis.hist = { _histMapScanUrl, _histMapSheet, _histMapsSectionHtml, makeDistortableMapOverlay };",
+		"\n globalThis.hist = { _histMapScanUrl, _histMapSheet, _histMapsSectionHtml, makeDistortableMapOverlay, _histAlignPoints, _histAlignUpdated };",
 		context);
 	return context.hist;
 }
@@ -1122,7 +1122,8 @@ t("Mining overlays (shafts, mines, leases) are registered in a Mining group", ()
 	eq(dw.CFG.LAYER_MINE_LEASES, "Historic Mining Leases");
 	const mining = dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Mining");
 	assert(mining, "Mining group missing");
-	for (const n of [dw.CFG.LAYER_MINE_SHAFTS, dw.CFG.LAYER_HIST_MINES, dw.CFG.LAYER_MINE_LEASES]) {
+	eq(dw.CFG.LAYER_LEASE_POINTS, "Old Lease Points");
+	for (const n of [dw.CFG.LAYER_MINE_SHAFTS, dw.CFG.LAYER_HIST_MINES, dw.CFG.LAYER_MINE_LEASES, dw.CFG.LAYER_LEASE_POINTS]) {
 		assert(mining.names.includes(n), n + " not in Mining group");
 	}
 });
@@ -1314,6 +1315,90 @@ t("_formatMineTooltip renders name, commodity/status, locality; escapes", () => 
 		"<b>Historic mine</b>");
 	assert(dw._formatMineTooltip({ "Occurrence name": '<img src=x onerror=alert(1)>' })
 		.includes("&lt;img"), "occur_name not escaped");
+});
+
+t("_mineYear reads identify dates and epoch ms; rejects placeholders", () => {
+	eq(dw._mineYear("6/14/1872"), "1872");
+	eq(dw._mineYear("714355200000"), "1992");
+	eq(dw._mineYear("2009"), "2009");
+	eq(dw._mineYear("1/1/1000"), "");
+	eq(dw._mineYear("Null"), "");
+	eq(dw._mineYear(null), "");
+});
+
+t("_formatMineTooltip adds other commodities, workings, accuracy and year", () => {
+	// Real /identify attributes for CALEDONIA AND NEW ZEALAND, Gympie.
+	const html = dw._formatMineTooltip({
+		"Occurrence name": "CALEDONIA AND NEW ZEALAND", "Main commodity": "GOLD",
+		"Mine status": "ABANDONED MINE", "Deposit size": "VERY SMALL",
+		"All commodities": "Au(vs);Ag(vs)", "Work extent": "169 DEEP",
+		"Location accuracy (m)": "200", "Date recorded": "8/21/1992",
+	});
+	assert(html.includes("Also recorded: Au, Ag"), "all commodities: " + html);
+	assert(html.includes("Workings: 169 deep"), "workings: " + html);
+	assert(html.includes("Position within about 200 m"), "accuracy: " + html);
+	assert(html.includes("recorded 1992"), "year: " + html);
+	// A single commodity and a precise position add no lines.
+	const plain = dw._formatMineTooltip({ "Occurrence name": "X", "All commodities": "Au(vs)", "Location accuracy (m)": "10" });
+	assert(!plain.includes("Also recorded") && !plain.includes("Position within"), plain);
+	assert(dw._formatMineTooltip({ "Work extent": "<i>" }).includes("&lt;i&gt;"), "workings not escaped");
+});
+
+t("_formatShaftTooltip names the layer for features with no type; shows works year", () => {
+	const ug = dw._formatShaftTooltip({ "Feature Name": "No 1 North Phoenix", "Feature Sub Type": "Shaft", "Year of Works": "Null" }, { layerId: 63 });
+	assert(ug.includes("<b>Underground workings — Shaft</b>"), ug);
+	assert(ug.includes("No 1 North Phoenix"), ug);
+	eq(dw._formatShaftTooltip({}, { layerId: 90 }), "<b>Tailings</b>");
+	const pit = dw._formatShaftTooltip({ "Feature Remediated": "Yes", "Year of Works": "2009" }, { layerId: 85 });
+	assert(pit.includes("<b>Pit</b>") && pit.includes("Remediated · works 2009"), pit);
+	assert(!dw._formatShaftTooltip({ "Feature Remediated": "None" }, { layerId: 85 }).includes("None"), "'None' shown");
+	eq(dw._formatShaftTooltip({}), "<b>Mine opening</b>");
+});
+
+t("_formatLeaseTooltip handles old lease points: type, years, former number", () => {
+	// Real /identify attributes for layer 195 at Gympie.
+	const html = dw._formatLeaseTooltip({
+		"Permit type": "ML", "Permit number": "230671", "Previous permit number": "GML95GYMP",
+		"Lodge date": "6/14/1872", "Grant date": "1/6/1874", "Expiry date": "12/1/1874", "Mineral": "AU",
+	});
+	assert(html.includes("<b>ML 230671</b>"), html);
+	assert(html.includes("Mining lease"), html);
+	assert(html.includes("1874 · AU"), "same grant and expiry year shown once: " + html);
+	assert(html.includes("Formerly GML95GYMP"), html);
+	const span = dw._formatLeaseTooltip({ "Permit number": "ML 1", "Grant date": "1/1/1901", "Non-current date": "1/1/1933" });
+	assert(span.includes("1901–1933"), span);
+	assert(dw._formatLeaseTooltip({ "Previous permit number": "<x" }).includes("&lt;x"), "not escaped");
+});
+
+t("_miningSectionHtml lists every result once, with a count and a cap", () => {
+	const src = { heading: "Historic mines", format: dw._formatMineTooltip };
+	eq(dw._miningSectionHtml(src, []), "");
+	const two = dw._miningSectionHtml(src, [
+		{ layerId: 16, attributes: { "Occurrence name": "A" } },
+		{ layerId: 102, attributes: { "Occurrence name": "A" } },
+		{ layerId: 16, attributes: { "Occurrence name": "<B>" } },
+	]);
+	assert(two.includes("Historic mines here (2)"), two);
+	assert(two.includes("&lt;B&gt;") && !two.includes("<B>"), "not escaped");
+	const many = dw._miningSectionHtml(src, Array.from({ length: 15 }, (_, i) => ({ attributes: { "Occurrence name": "M" + i } })));
+	assert(many.includes("(15)") && many.includes("and 3 more"), many);
+	eq(many.split("dw-mine-row").length - 1, 12);
+});
+
+t("map-sheet alignment: stored points are validated and the store is trimmed", () => {
+	const hist = loadHistMaps();
+	const pts = Array.from({ length: 9 }, (_, i) => [-26 - i / 100, 152 + i / 100]);
+	const a = hist._histAlignUpdated({}, "u1", pts.map((p) => [p[0] + 1e-9, p[1]]), 5);
+	eq(JSON.stringify(hist._histAlignPoints(a.u1, 9)), JSON.stringify(pts));
+	eq(hist._histAlignPoints(a.u1, 4), null, "wrong point count");
+	eq(hist._histAlignPoints({ pts: pts.map(() => ["x", 1]) }, 9), null, "not numbers");
+	eq(hist._histAlignPoints({ pts: pts.map(() => [91, 1]) }, 9), null, "off the globe");
+	eq(hist._histAlignPoints(undefined, 9), null);
+	let all = {};
+	for (let i = 0; i < 30; i++) all = hist._histAlignUpdated(all, "u" + i, pts, i);
+	eq(Object.keys(all).length, 25);
+	assert(!("u0" in all) && "u29" in all, "oldest dropped first");
+	assert(!("u29" in hist._histAlignUpdated(all, "u29", null, 99)), "reset forgets the sheet");
 });
 
 // ---- Vexcel aerial token helpers ----

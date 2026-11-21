@@ -249,6 +249,9 @@ Confirms it **re-warps on zoom** and **re-warps when a corner moves** (the
 corner is driven through the map API — synthetic Leaflet marker mouse-drag
 is unreliable in automation). Panning deliberately does *not* change the
 matrix (Leaflet translates the pane), so zoom is the map-driven signal.
+It then checks the saved alignment: after a drag ends the points are stored,
+**Hide points** hides the handles, and removing and re-overlaying the sheet
+brings the dragged point back; **Reset points** forgets it.
 
 ### Vexcel Aerial suite
 

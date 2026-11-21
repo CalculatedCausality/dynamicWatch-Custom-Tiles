@@ -55,7 +55,7 @@ import {
 } from "../providers/openinframap.js";
 import { AussieBushwalkingLayerProvider } from "../providers/aussie-bushwalking.js";
 import { createQldEnvironmentProviders } from "../providers/qld-environment.js";
-import { createQldMiningProviders } from "../providers/qld-mining.js";
+import { _miningSectionHtml, createQldMiningProviders, miningIdentifySources } from "../providers/qld-mining.js";
 import { RoutePoiController } from "../providers/route-pois.js";
 import {
 	HistoricalMapsIndexProvider,
@@ -82,7 +82,7 @@ const pageWin = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
  */
 const { QpwsLayerProvider, NationalParksLayerProvider } =
 	createQldEnvironmentProviders({ makeHoverIdentify, gmJsonGet });
-const { HistoricMinesLayerProvider, MineShaftsLayerProvider, HistoricLeasesLayerProvider } =
+const { HistoricMinesLayerProvider, MineShaftsLayerProvider, HistoricLeasesLayerProvider, LeasePointsLayerProvider } =
 	createQldMiningProviders({ makeHoverIdentify });
 
 /* -- Application ------------------------------------------------------- */
@@ -307,6 +307,7 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_MINE_SHAFTS, new MineShaftsLayerProvider());
 			addOverlay(CFG.LAYER_HIST_MINES, new HistoricMinesLayerProvider());
 			addOverlay(CFG.LAYER_MINE_LEASES, new HistoricLeasesLayerProvider());
+			addOverlay(CFG.LAYER_LEASE_POINTS, new LeasePointsLayerProvider());
 			addOverlay(CFG.LAYER_HIST_MAPS, new HistoricalMapsIndexProvider());
 			addOverlay(CFG.LAYER_INTVL_GLOBAL,
 				new IntvlGlobalTilesLayerProvider());
@@ -793,6 +794,22 @@ export class CustomTilesApp {
 			});
 		}
 
+		// MINING — everything the three mining overlays hold at this point.
+		// The hover tooltip shows one feature and needs a mouse; this lists
+		// them all (a goldfield has leases, workings and shafts stacked) and
+		// is the only way to read them on a phone.
+		for (const src of miningIdentifySources()) {
+			const lyr = this.layers[src.layerName];
+			if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
+			arcgisIdentify(map, latlng, {
+				baseUrl: src.baseUrl, layers: src.layers, tolerance: noHover ? src.tolerance * 2 : src.tolerance,
+			}, (err, _feat, raw) => {
+				if (err || !isCurrent()) return;
+				const html = _miningSectionHtml(src, (raw && raw.results) || []);
+				if (html) section("dw-popup-ident-mining", html);
+			});
+		}
+
 		// HISTORIC MAP SHEETS — in the right-click / long-press location popup
 		// (a plain left-click just drops a waypoint, and a hover panel got in
 		// the way of panning). Lists the scanned sheets covering this point,
@@ -1108,6 +1125,11 @@ export class CustomTilesApp {
 			// four corner points still read as the primary anchors.
 			".dw-histmap-handle--mid { width: 12px; height: 12px; margin: -6px 0 0 -6px; border-color: #2563eb; border-width: 2px; }",
 			".dw-histmap-tri { pointer-events: none; }",
+			".dw-histmap-locked .dw-histmap-handle { display: none; }",
+			".dw-histmap-ctl .dw-histmap-msg.dw-histmap-msg--ok { color: #15803d; }",
+			".dw-popup-ident-mining .dw-mine-hd { font-weight: 700; margin-bottom: 3px; }",
+			".dw-popup-ident-mining .dw-mine-row { margin: 4px 0; padding-top: 4px; border-top: 1px solid rgba(0,0,0,.12); }",
+			".dw-popup-ident-mining .dw-mine-list { max-height: 260px; overflow-y: auto; overscroll-behavior: contain; }",
 			".dw-histmap-ctl { position: absolute; top: 90px; right: 12px; z-index: 1000; background: rgba(255,255,255,.96); border: 1px solid #999; border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.3); max-width: 240px; }",
 			".dw-histmap-ctl .dw-histmap-ttl { font-weight: 700; margin-bottom: 6px; }",
 			".dw-histmap-ctl label { display: block; margin: 4px 0; }",

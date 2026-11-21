@@ -126,6 +126,31 @@ const cornerDrag = warped ? await page.evaluate(() => {
 }) : { found: false, changed: false };
 const reWarped = zoomReWarped && cornerDrag.changed;
 
+// Alignment is remembered: finish a drag, hide the points, remove the sheet,
+// overlay it again and the dragged point must come back where it was left.
+const remembered = cornerDrag.changed ? await page.evaluate(async () => {
+	const map = window._dwLayerCtrl._map;
+	const mids = () => Object.values(map._layers).filter((l) =>
+		/dw-histmap-handle--mid/.test(l.options?.icon?.options?.className || ""));
+	const moved = mids()[0];
+	moved.fire("dragend");
+	const want = moved.getLatLng();
+	const saidSaved = /saved/i.test(document.querySelector(".dw-histmap-msg")?.textContent || "");
+	document.querySelector(".dw-histmap-lock").click();
+	const hidden = [...document.querySelectorAll(".dw-histmap-handle")].every((h) => getComputedStyle(h).display === "none");
+	document.querySelector(".dw-histmap-del").click();
+	const gone = !document.querySelector(".dw-histmap-tri") && !map.getContainer().classList.contains("dw-histmap-locked");
+	document.querySelector(".dw-popup-ident-histmaps .dw-histmap-overlay-link").click();
+	await new Promise((r) => setTimeout(r, 400));
+	const back = mids()[0]?.getLatLng();
+	const restored = !!back && Math.abs(back.lat - want.lat) < 1e-5 && Math.abs(back.lng - want.lng) < 1e-5;
+	document.querySelector(".dw-histmap-fit").click();
+	let stored = {};
+	try { stored = JSON.parse(window.GM_getValue("dw_histmap_align", "{}")); } catch (_) {}
+	return { saidSaved, hidden, gone, restored, forgotten: Object.keys(stored).length === 0 };
+}) : {};
+const alignOk = !!(remembered.saidSaved && remembered.hidden && remembered.gone && remembered.restored && remembered.forgotten);
+
 if (!existsSync(REPORT_DIR)) mkdirSync(REPORT_DIR, { recursive: true });
 const shot = resolve(REPORT_DIR, `verify-histmap-${new Date().toISOString().replace(/[:.]/g, "-")}.png`);
 await page.screenshot({ path: shot });
@@ -136,9 +161,10 @@ console.log(`  location popup lists sheets w/ Overlay link: ${sectionShown}`);
 console.log(`  scan superimposed as mesh (8 tris, 9 handles, control): ${warped}`);
 console.log(`  re-warps on zoom: ${zoomReWarped}`);
 console.log(`  re-warps on interior-point drag (found: ${cornerDrag.found}): ${cornerDrag.changed}`);
+console.log(`  alignment saved, points hidden, restored on re-overlay, forgotten on reset: ${alignOk} ${JSON.stringify(remembered)}`);
 console.log(`  page errors: ${errors.length}${errors.length ? " -> " + errors.slice(0, 2).join(" | ") : ""}`);
 console.log(`  screenshot: ${shot}`);
-const ok = indexTiles > 0 && sectionShown && warped && reWarped && errors.length === 0;
+const ok = indexTiles > 0 && sectionShown && warped && reWarped && alignOk && errors.length === 0;
 console.log(`\n${ok ? "✓ PASS" : "✗ FAIL"} — historic map overlay ${ok ? "superimposes + rubber-sheets" : "did not fully verify"}`);
 await browser.close();
 process.exit(ok ? 0 : 1);

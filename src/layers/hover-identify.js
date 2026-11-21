@@ -79,15 +79,16 @@ export function makeHoverIdentify(opts) {
 				if (myGen !== gen) return;
 				if (!feat) { clearTip(); return; }
 				const attrs = feat.attributes || {};
-				const oid =
-					attrs["Object ID"] || attrs.OBJECTID || JSON.stringify(attrs);
+				// Object ids repeat between sublayers, so the layer is part of the key.
+				const oid = (feat.layerId ?? "") + ":" +
+					(attrs["Object ID"] || attrs.OBJECTID || JSON.stringify(attrs));
 				if (oid === lastOid && tooltip._map) {
 					tooltip.setLatLng(latlng);
 					return;
 				}
 				lastOid = oid;
 				lastAttrs = attrs;
-				tooltip.setLatLng(latlng).setContent(opts.formatTooltip(attrs));
+				tooltip.setLatLng(latlng).setContent(opts.formatTooltip(attrs, feat));
 				if (!tooltip._map) tooltip.addTo(map);
 
 				if (opts.afterRender) {

@@ -90,15 +90,16 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 
 | Layer | Notes |
 |---|---|
-| **Mine Shafts** | Queensland's abandoned-mine physical features — ~10,400 mapped **mine openings** (shafts/adits), plus shallow workings and pits, from the GSQ Abandoned Mine Lands program. Hover a feature for its type (e.g. "Vertical shaft"), mine name, commodity, and remediation status. Best layer for pinpointing actual shafts |
-| **Historic Mines** | Queensland's historical mine sites — ~15,000 "historical workings" plus historical coal workings, from the Geological Survey of Queensland (GeoResGlobe). Hover a site for its name, commodity, mine status, and locality |
-| **Historic Mining Leases** | Historical mining-title footprints (mining leases, claims, mineral development licences) from QLD's MinesPermitsHistoric. An old lease boundary flags mining activity even where no individual shaft was catalogued. Hover for permit number, type, status, minerals, and holder |
+| **Mine Shafts** | Queensland's abandoned-mine physical features from the GSQ Abandoned Mine Lands program: ~10,400 mapped **mine openings** (shafts/adits), the mapped extent of **underground workings** (~8,300 points plus outlines), vents, shallow workings, pits, tailings and remediated openings. Hover a feature for what it is (e.g. "Vertical shaft", "Underground workings — Shaft"), mine name, commodity, remediation status and year of works. Best layer for pinpointing actual shafts |
+| **Historic Mines** | Queensland's historical mine sites — ~15,000 "historical workings" plus historical coal workings, from the Geological Survey of Queensland (GeoResGlobe). Hover a site for its name, commodity, mine status, other commodities recorded, depth of workings, locality, and how accurately the dot is placed (many were taken from old maps and can be 200 m out) |
+| **Historic Mining Leases** | Historical mining-title footprints (mining leases, claims, mineral development licences) from QLD's MinesPermitsHistoric. An old lease boundary flags mining activity even where no individual shaft was catalogued. Hover for permit number, type, status, the years it ran, minerals, and holder |
+| **Old Lease Points** | The ~18,000 older leases that have no surveyed outline, most from the 1870s–1930s, as points (Gympie has over 900 of these and only a handful of outlines). Hover for the lease number, the number it had at the time, its years and mineral. Appears from zoom 13; the server labels every point, so it is busy on a goldfield |
 
 **Reference**
 
 | Layer | Notes |
 |---|---|
-| **Historic Map Sheets** | Footprint index of QLD's scanned historical maps — parish, town, topographic (incl. 1:4,752 goldfield sheets that plot individual shafts), and exploration series, 1860s–2012, filtered to local scales. **Right-click** (or long-press) a spot and the location menu lists the sheets covering it, each with a link to the scan and an **"Overlay ▦"** action that superimposes that scan on the live map. It warps through a **3×3 grid of draggable control points** (corners *plus* edge-midpoints and centre) so you can rubber-sheet out local paper/scan distortion and line old shaft/mine symbols up with real-world positions |
+| **Historic Map Sheets** | Footprint index of QLD's scanned historical maps — parish, town, topographic (incl. 1:4,752 goldfield sheets that plot individual shafts), and exploration series, 1860s–2012, filtered to local scales. **Right-click** (or long-press) a spot and the location menu lists the sheets covering it, each with a link to the scan and an **"Overlay ▦"** action that superimposes that scan on the live map. It warps through a **3×3 grid of draggable control points** (corners *plus* edge-midpoints and centre) so you can rubber-sheet out local paper/scan distortion and line old shaft/mine symbols up with real-world positions Your alignment is remembered per sheet in the browser (the 25 most recent), and **Hide points** clears the handles away so a route can be drawn over the sheet |
 
 **Heatmaps**
 
@@ -148,9 +149,11 @@ A few layers show inline tooltips on hover:
 
 - **Australia Cadastre** — lot/plan, name, address, tenure, area, locality (any state/territory), plus OnTheHouse property history (last sale, estimate, sales timeline) auto-loaded inline where a street address resolves
 - **QPWS Estate** — protected-area name and management type
-- **Mine Shafts** — opening type (e.g. "Vertical shaft"), mine name, commodity, and remediation status
-- **Historic Mines** — mine site name, commodity, mine status, and locality
-- **Historic Mining Leases** — permit number, type, status, minerals, and holder
+- **Mine Shafts** — what the feature is (e.g. "Vertical shaft"), mine name, commodity, remediation status, and year of works
+- **Historic Mines** — mine site name, commodity, mine status, other commodities, depth of workings, locality, and position accuracy
+- **Historic Mining Leases** and **Old Lease Points** — permit number, type, status, years, minerals, former number, and holder
+
+With any mining overlay on, **right-click** (or long-press on a phone) a spot and the location menu lists every mine, shaft and lease recorded there, not only the one under the pointer.
 - **INTVL Global Map** — territory size, the owner's colour swatch, and the precise recording time decoded from the activity's cuid
 
 ### POIs along your route
@@ -322,6 +325,14 @@ bash tests/run.sh --ci   # plain text output
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
 - **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, refreshing names, Build Up Ahead (adding, one-step Undo, replacing only its own waypoints), list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.20.0
+
+- **Mining overlays say more.** Historic Mines adds the other commodities recorded, the depth of workings, the year recorded, and how far out the dot may be. Leases show the years they ran and the number they had at the time. Mine Shafts names features that had no type of their own.
+- **Mine Shafts draws more**: the mapped extent of underground workings, vents, tailings, remediated openings and the pit and shallow-workings areas.
+- New **Old Lease Points** overlay: the ~18,000 older leases with no surveyed outline.
+- **Right-click (or long-press) lists everything at a spot** for whichever mining overlays are on. This is the only way to read them on a phone.
+- **Historic Map Sheets remembers your alignment.** After you drag a sheet's points into place it is saved in the browser, and the sheet comes back aligned next time. "Reset points" forgets it. **Hide points** leaves the sheet as a plain backdrop so you can draw a route over it.
 
 ### Release notes — 7.19.0
 

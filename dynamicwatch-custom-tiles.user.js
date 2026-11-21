@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.19.0
+// @version      7.20.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -159,6 +159,7 @@
     LAYER_HIST_MINES: "Historic Mines",
     LAYER_MINE_SHAFTS: "Mine Shafts",
     LAYER_MINE_LEASES: "Historic Mining Leases",
+    LAYER_LEASE_POINTS: "Old Lease Points",
     LAYER_HIST_MAPS: "Historic Map Sheets",
     LAYER_TOPO: "QLD Topo",
     LAYER_INTVL_GLOBAL: "INTVL Global Map",
@@ -304,7 +305,11 @@
     // shafts/adits with feature_type "Vertical shaft" + remediation
     // status), 75 = "Shallow working (point)", 65 = "Pit (point)".
     QLD_SHAFTS_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/GeoscientificInformation/AbandonedMines/MapServer",
-    QLD_SHAFTS_LAYER_IDS: "45,75,65",
+    // Also drawn: the mapped extent of underground workings (62 outline,
+    // 63 points, ~8.3k), vents (44), remediated openings (60), mineral
+    // material (70, 95), and the pit (85), tailings (90), shallow-workings
+    // (105) and mine-openings (110) areas.
+    QLD_SHAFTS_LAYER_IDS: "45,75,65,44,70,63,60,62,85,90,95,105,110",
     QLD_SHAFTS_HOVER_MIN_ZOOM: 11,
     // Historic mining title footprints (MinesPermitsHistoric). Catches
     // small/old sites the shaft inventory misses — an old lease boundary
@@ -313,6 +318,12 @@
     // Historical MDL extent (mineral development licences). Polygons.
     QLD_LEASES_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Economy/MinesPermitsHistoric/MapServer",
     QLD_LEASES_LAYER_IDS: "170,155,135",
+    // 195 = Historical ML granted and 210 = Historical MFS granted: points
+    // for ~18k older leases with no surveyed outline (927 around Gympie,
+    // where only 6 outlines exist). The server labels every point, which
+    // swamps a goldfield, so they are their own overlay.
+    QLD_LEASE_POINTS_LAYER_IDS: "195,210",
+    QLD_LEASE_POINTS_MIN_ZOOM: 13,
     QLD_LEASES_HOVER_MIN_ZOOM: 11,
     // Historical printed map sheets index (parish/town/topographic/
     // exploration/… scans, 1860s-2012). Footprint overlay + click lists
@@ -358,6 +369,8 @@
     ROUTE_POI_PREFS_KEY: "dw_route_poi_prefs",
     // Which waypoints the script itself added, per saved route.
     ROUTE_POI_ADDED_KEY: "dw_route_poi_added",
+    // Historic map sheets: the control points the user dragged, per scan.
+    HIST_MAP_ALIGN_KEY: "dw_histmap_align",
     // Route elevation profile (climbs): AWS Terrain Tiles, Terrarium PNG, keyless.
     ROUTE_ELEVATION_TILE: "https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png",
     ROUTE_ELEVATION_ZOOM: 12,
@@ -404,7 +417,7 @@
     },
     {
       header: "Mining",
-      names: [CFG.LAYER_MINE_SHAFTS, CFG.LAYER_HIST_MINES, CFG.LAYER_MINE_LEASES]
+      names: [CFG.LAYER_MINE_SHAFTS, CFG.LAYER_HIST_MINES, CFG.LAYER_MINE_LEASES, CFG.LAYER_LEASE_POINTS]
     },
     {
       header: "Reference",
@@ -628,14 +641,14 @@
             return;
           }
           const attrs = feat.attributes || {};
-          const oid = attrs["Object ID"] || attrs.OBJECTID || JSON.stringify(attrs);
+          const oid = (feat.layerId ?? "") + ":" + (attrs["Object ID"] || attrs.OBJECTID || JSON.stringify(attrs));
           if (oid === lastOid && tooltip._map) {
             tooltip.setLatLng(latlng);
             return;
           }
           lastOid = oid;
           lastAttrs = attrs;
-          tooltip.setLatLng(latlng).setContent(opts.formatTooltip(attrs));
+          tooltip.setLatLng(latlng).setContent(opts.formatTooltip(attrs, feat));
           if (!tooltip._map) tooltip.addTo(map);
           if (opts.afterRender) {
             opts.afterRender(attrs, {
@@ -11001,6 +11014,17 @@
     }
     return "";
   }
+  function _mineYear(value) {
+    const v = _mineVal(value);
+    if (!v) return "";
+    let year = "";
+    if (/^-?\d{9,}$/.test(v)) year = String(new Date(Number(v)).getUTCFullYear());
+    else year = (/(?:^|\D)(\d{4})(?:\D|$)/.exec(v) || [])[1] || "";
+    return year >= "1800" && year <= "2100" ? year : "";
+  }
+  function _allCommodities(value) {
+    return _mineVal(value).split(/[;,]/).map((c) => c.replace(/\(.*?\)/g, "").trim()).filter(Boolean).join(", ");
+  }
   function _formatMineTooltip(attrs) {
     const a = attrs || {};
     const name = _pickAny(a, ["Occurrence name", "occur_name"]);
@@ -11009,39 +11033,142 @@
     const size = _pickAny(a, ["Deposit size", "deposit_size"]);
     const locality = _pickAny(a, ["site locality", "Site locality", "site_locality"]);
     const kind = _pickAny(a, ["Group name", "group_name", "Site type", "site_type"]);
+    const all = _allCommodities(_pickAny(a, ["All commodities", "all_commodities"]));
+    const workings = _pickAny(a, ["Work extent", "work_extent"]);
+    const accuracy = Number(_pickAny(a, ["Location accuracy (m)", "loc_accuracy"]));
+    const recorded = _mineYear(_pickAny(a, ["Date recorded", "date_recorded"]));
     const lines = [esc`<b>${name || "Historic mine"}</b>`];
     const bits = [commodity, status, size].filter(Boolean);
     if (bits.length) lines.push(_escHtml(bits.join(" · ")));
+    if (all.includes(",")) lines.push(esc`Also recorded: ${all}`);
+    if (workings) lines.push(esc`Workings: ${workings.toLowerCase()}`);
     if (locality) lines.push(_escHtml(locality));
-    if (kind) lines.push(esc`<span class="dw-cad-sub">${kind}</span>`);
+    if (accuracy >= 50) lines.push(esc`<span class="dw-cad-sub">Position within about ${Math.round(accuracy)} m</span>`);
+    const sub = [kind, recorded ? "recorded " + recorded : ""].filter(Boolean).join(" · ");
+    if (sub) lines.push(esc`<span class="dw-cad-sub">${sub}</span>`);
     return lines.join("<br>");
   }
-  function _formatShaftTooltip(attrs) {
+  var SHAFT_LAYER_KINDS = {
+    44: "Mine vent",
+    60: "Remediated opening",
+    62: "Underground workings",
+    63: "Underground workings",
+    70: "Mineral material",
+    85: "Pit",
+    90: "Tailings",
+    95: "Mineral material",
+    105: "Shallow workings",
+    110: "Mine openings"
+  };
+  function _formatShaftTooltip(attrs, feature) {
     const a = attrs || {};
-    const type = _pickAny(a, ["Type", "feature_type", "Feature Sub Type", "ftr_sub"]);
-    const mine = _pickAny(a, ["Mine Name", "mine_name"]);
-    const commodity = _pickAny(a, ["Commodity", "commodity"]);
-    const rem = _pickAny(a, ["Remediation Status", "rem_status", "Feature Remediated", "ftr_rehab"]);
-    const lines = [esc`<b>${type || "Mine opening"}</b>`];
+    const layerKind = feature && SHAFT_LAYER_KINDS[feature.layerId];
+    const type = _pickAny(a, [
+      "Type",
+      "feature_type",
+      "Feature Sub Type",
+      "Feature Subtype",
+      "ftr_sub",
+      "Vent Construction"
+    ]);
+    const mine = _pickAny(a, ["Mine Name", "mine_name", "Feature Name", "ftr_name"]);
+    const commodity = _pickAny(a, ["Commodity", "commodity", "Mine Seam", "mine_seam"]);
+    const rem = _pickAny(a, [
+      "Remediation Status",
+      "rem_status",
+      "Feature Remediated",
+      "ftr_rehab",
+      "Feature Rehabilitated?"
+    ]);
+    const worksYear = _mineYear(_pickAny(a, ["Year of Works", "rehab_yr"]));
+    const title = layerKind && type && type.toLowerCase() !== layerKind.toLowerCase() ? `${layerKind} — ${type}` : type || layerKind || "Mine opening";
+    const lines = [esc`<b>${title}</b>`];
     const named = mine && mine.toLowerCase() !== "unknown" ? mine : "";
     const bits = [named, commodity].filter(Boolean);
     if (bits.length) lines.push(_escHtml(bits.join(" · ")));
-    if (rem) lines.push(esc`<span class="dw-cad-sub">${rem}</span>`);
+    const status = /^(none|no|n)$/i.test(rem) ? "" : /^(yes|y)$/i.test(rem) ? "Remediated" : rem;
+    const sub = [status, worksYear ? "works " + worksYear : ""].filter(Boolean).join(" · ");
+    if (sub) lines.push(esc`<span class="dw-cad-sub">${sub}</span>`);
     return lines.join("<br>");
   }
+  var LEASE_TYPES = { ML: "Mining lease", MC: "Mining claim", MDL: "Mineral development licence", MFS: "Mineral freehold selection" };
   function _formatLeaseTooltip(attrs) {
     const a = attrs || {};
-    const num = _pickAny(a, ["Permit number", "displayname"]);
-    const type = _pickAny(a, ["Permit type", "permittype"]);
+    const num = _pickAny(a, ["Permit number", "displayname", "tenurenum"]);
+    const rawType = _pickAny(a, ["Permit type", "permittype", "tenuretype"]);
+    const type = LEASE_TYPES[rawType] || rawType;
     const status = _pickAny(a, ["Permit sub-status", "permitstate", "Permit status", "permitstatus"]);
-    const mineral = _pickAny(a, ["Mineral", "permitminerals"]);
+    const mineral = _pickAny(a, ["Mineral", "permitminerals", "minerals"]);
     const holder = _pickAny(a, ["Authorised holder name", "authorisedholdername"]);
-    const lines = [esc`<b>${num || "Historic mining title"}</b>`];
+    const name = _pickAny(a, ["Name", "name", "Permit name", "permitname"]);
+    const previous = _pickAny(a, ["Previous permit number", "previouspermits", "prev_ten_n"]);
+    const from = _mineYear(_pickAny(a, ["Grant date", "approvedate", "date_grant"])) || _mineYear(_pickAny(a, ["Lodge date", "lodgedate", "lodge_date"]));
+    const to = _mineYear(_pickAny(a, ["Non-current date", "noncurrentdate", "Expiry date", "date_nc"]));
+    const title = /^\d+$/.test(num) && LEASE_TYPES[rawType] ? `${rawType} ${num}` : num;
+    const lines = [esc`<b>${name || title || "Historic mining title"}</b>`];
+    if (name && title) lines.push(_escHtml(title));
     const st = [type, status].filter(Boolean).join(" · ");
     if (st) lines.push(_escHtml(st));
-    if (mineral) lines.push(_escHtml(mineral.replace(/,/g, ", ")));
+    const years = from && to && from !== to ? `${from}–${to}` : from || to;
+    const facts = [years, mineral.replace(/,/g, ", ")].filter(Boolean).join(" · ");
+    if (facts) lines.push(_escHtml(facts));
+    if (previous) lines.push(esc`<span class="dw-cad-sub">Formerly ${previous}</span>`);
     if (holder) lines.push(esc`<span class="dw-cad-sub">${holder}</span>`);
     return lines.join("<br>");
+  }
+  function miningIdentifySources() {
+    return [
+      {
+        layerName: CFG.LAYER_HIST_MINES,
+        heading: "Historic mines",
+        baseUrl: CFG.QLD_MINING_SERVICE,
+        layers: "all:" + CFG.QLD_MINING_LAYER_IDS,
+        tolerance: 8,
+        minZoom: CFG.QLD_MINING_HOVER_MIN_ZOOM,
+        format: _formatMineTooltip
+      },
+      {
+        layerName: CFG.LAYER_MINE_SHAFTS,
+        heading: "Shafts and workings",
+        baseUrl: CFG.QLD_SHAFTS_SERVICE,
+        layers: "all:" + CFG.QLD_SHAFTS_LAYER_IDS,
+        tolerance: 6,
+        minZoom: CFG.QLD_SHAFTS_HOVER_MIN_ZOOM,
+        format: _formatShaftTooltip
+      },
+      {
+        layerName: CFG.LAYER_MINE_LEASES,
+        heading: "Historic mining titles",
+        baseUrl: CFG.QLD_LEASES_SERVICE,
+        layers: "all:" + CFG.QLD_LEASES_LAYER_IDS,
+        tolerance: 4,
+        minZoom: CFG.QLD_LEASES_HOVER_MIN_ZOOM,
+        format: _formatLeaseTooltip
+      },
+      {
+        layerName: CFG.LAYER_LEASE_POINTS,
+        heading: "Old leases",
+        baseUrl: CFG.QLD_LEASES_SERVICE,
+        layers: "all:" + CFG.QLD_LEASE_POINTS_LAYER_IDS,
+        tolerance: 8,
+        minZoom: CFG.QLD_LEASE_POINTS_MIN_ZOOM,
+        format: _formatLeaseTooltip
+      }
+    ];
+  }
+  var MINING_SECTION_MAX = 12;
+  function _miningSectionHtml(src, results) {
+    const seen = /* @__PURE__ */ new Set();
+    const rows = [];
+    for (const r of results || []) {
+      const html = src.format(r.attributes || {}, r);
+      if (seen.has(html)) continue;
+      seen.add(html);
+      rows.push(`<div class="dw-mine-row">${html}</div>`);
+    }
+    if (!rows.length) return "";
+    const more = rows.length > MINING_SECTION_MAX ? `<div class="dw-cad-sub">and ${rows.length - MINING_SECTION_MAX} more: zoom in to separate them</div>` : "";
+    return `<div class="dw-mine-hd">${_escHtml(src.heading)} here (${rows.length})</div><div class="dw-mine-list">${rows.slice(0, MINING_SECTION_MAX).join("")}${more}</div>`;
   }
   function createQldMiningProviders({ makeHoverIdentify: makeHoverIdentify2 }) {
     const installLeasesHover = makeHoverIdentify2({
@@ -11062,6 +11189,31 @@
       maxZoom: 25,
       attribution: 'Mining permits &copy; <a href="https://georesglobe.information.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (Resources)</a>',
       onAdd: (layer, map) => installLeasesHover(layer, map),
+      onRemove: (layer) => {
+        if (layer._dwHoverOff) {
+          layer._dwHoverOff();
+          layer._dwHoverOff = null;
+        }
+      }
+    });
+    const installLeasePointsHover = makeHoverIdentify2({
+      baseUrl: CFG.QLD_LEASES_SERVICE,
+      layers: "all:" + CFG.QLD_LEASE_POINTS_LAYER_IDS,
+      tolerance: 8,
+      minZoom: CFG.QLD_LEASE_POINTS_MIN_ZOOM,
+      tipClass: "dw-qpws-tip",
+      formatTooltip: _formatLeaseTooltip
+    });
+    const LeasePointsLayerProvider2 = arcgisExportProvider({
+      baseUrl: CFG.QLD_LEASES_SERVICE,
+      showLayers: CFG.QLD_LEASE_POINTS_LAYER_IDS,
+      pane: "dwLeasePointsPane",
+      paneZIndex: 394,
+      opacity: 0.9,
+      minZoom: CFG.QLD_LEASE_POINTS_MIN_ZOOM,
+      maxZoom: 25,
+      attribution: 'Mining permits &copy; <a href="https://georesglobe.information.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (Resources)</a>',
+      onAdd: (layer, map) => installLeasePointsHover(layer, map),
       onRemove: (layer) => {
         if (layer._dwHoverOff) {
           layer._dwHoverOff();
@@ -11120,7 +11272,7 @@
         }
       }
     });
-    return { HistoricMinesLayerProvider: HistoricMinesLayerProvider2, MineShaftsLayerProvider: MineShaftsLayerProvider2, HistoricLeasesLayerProvider: HistoricLeasesLayerProvider2 };
+    return { HistoricMinesLayerProvider: HistoricMinesLayerProvider2, MineShaftsLayerProvider: MineShaftsLayerProvider2, HistoricLeasesLayerProvider: HistoricLeasesLayerProvider2, LeasePointsLayerProvider: LeasePointsLayerProvider2 };
   }
 
   // src/utils/route-geometry.js
@@ -13178,6 +13330,34 @@
   var _GRID = 2;
   var _CORNER_IDX = /* @__PURE__ */ new Set([0, 2, 6, 8]);
   var _activeOverlay = null;
+  var _ALIGN_KEEP = 25;
+  function _alignStore() {
+    try {
+      const all = JSON.parse(GM_getValue(CFG.HIST_MAP_ALIGN_KEY, "{}"));
+      return all && typeof all === "object" && !Array.isArray(all) ? all : {};
+    } catch (_) {
+      return {};
+    }
+  }
+  function _histAlignPoints(entry, count) {
+    const pts = entry && entry.pts;
+    if (!Array.isArray(pts) || pts.length !== count) return null;
+    const ok = pts.every((p) => Array.isArray(p) && p.length === 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]) && Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180);
+    return ok ? pts.map((p) => [p[0], p[1]]) : null;
+  }
+  function _histAlignUpdated(all, url, pts, now) {
+    const next = { ...all };
+    if (pts) next[url] = { t: now, pts: pts.map((p) => [Number(p[0].toFixed(6)), Number(p[1].toFixed(6))]) };
+    else delete next[url];
+    const keep = Object.keys(next).sort((a, b) => (next[b].t || 0) - (next[a].t || 0)).slice(0, _ALIGN_KEEP);
+    return Object.fromEntries(keep.map((k) => [k, next[k]]));
+  }
+  function _alignSave(url, pts) {
+    try {
+      GM_setValue(CFG.HIST_MAP_ALIGN_KEY, JSON.stringify(_histAlignUpdated(_alignStore(), url, pts, Date.now())));
+    } catch (_) {
+    }
+  }
   function makeDistortableMapOverlay(map, opts) {
     const scanUrl = _histMapScanUrl(opts.url);
     if (!scanUrl) return null;
@@ -13200,7 +13380,8 @@
     }
     const cornerIcon = L.divIcon({ className: "dw-histmap-handle", iconSize: [16, 16] });
     const midIcon = L.divIcon({ className: "dw-histmap-handle dw-histmap-handle--mid", iconSize: [14, 14] });
-    const markers = gridLL.map((ll, i) => L.marker(ll, {
+    const saved = _histAlignPoints(_alignStore()[scanUrl], gridLL.length);
+    const markers = (saved || gridLL).map((ll, i) => L.marker(ll, {
       draggable: true,
       zIndexOffset: 2e3,
       icon: _CORNER_IDX.has(i) ? cornerIcon : midIcon
@@ -13253,23 +13434,42 @@
     probe.addEventListener("error", () => setMsg("Couldn't load the map scan."));
     probe.src = scanUrl;
     markers.forEach((m) => m.on("drag", update));
+    const remember = () => {
+      _alignSave(scanUrl, markers.map((m) => {
+        const ll = m.getLatLng();
+        return [ll.lat, ll.lng];
+      }));
+      setMsg("Alignment saved.", true);
+    };
+    markers.forEach((m) => m.on("dragend", remember));
     const onMove = () => update();
     map.on("move zoom viewreset zoomend moveend", onMove);
     const ctl = L.DomUtil.create("div", "dw-histmap-ctl");
-    ctl.innerHTML = `<div class="dw-histmap-ttl">${_escHtml((opts.title || "Historical map").slice(0, 60))}</div><label>Opacity <input type="range" class="dw-histmap-op" min="0" max="1" step="0.05" value="0.7"></label><div class="dw-histmap-msg"></div><div class="dw-histmap-btns"><button type="button" class="dw-histmap-fit">Reset points</button><button type="button" class="dw-histmap-del">Remove</button></div>`;
+    ctl.innerHTML = `<div class="dw-histmap-ttl">${_escHtml((opts.title || "Historical map").slice(0, 60))}</div><label>Opacity <input type="range" class="dw-histmap-op" min="0" max="1" step="0.05" value="0.7"></label><div class="dw-histmap-msg"></div><div class="dw-histmap-btns"><button type="button" class="dw-histmap-lock">Hide points</button><button type="button" class="dw-histmap-fit">Reset points</button><button type="button" class="dw-histmap-del">Remove</button></div>`;
     map.getContainer().appendChild(ctl);
     L.DomEvent.disableClickPropagation(ctl);
     L.DomEvent.disableScrollPropagation(ctl);
     const msgEl = ctl.querySelector(".dw-histmap-msg");
-    const setMsg = (t) => {
-      if (msgEl) msgEl.textContent = t || "";
+    const setMsg = (t, ok) => {
+      if (!msgEl) return;
+      msgEl.textContent = t || "";
+      if (msgEl.classList) msgEl.classList.toggle("dw-histmap-msg--ok", !!ok);
     };
+    if (saved) setMsg("Using your saved alignment.", true);
     ctl.querySelector(".dw-histmap-op").addEventListener("input", (e) => {
       wrap.style.opacity = e.target.value;
     });
     ctl.querySelector(".dw-histmap-fit").addEventListener("click", () => {
       markers.forEach((m, i) => m.setLatLng(gridLL[i]));
       update();
+      _alignSave(scanUrl, null);
+      setMsg("Back to the sheet's own corners.", true);
+    });
+    const box = map.getContainer();
+    const lockBtn = ctl.querySelector(".dw-histmap-lock");
+    lockBtn.addEventListener("click", () => {
+      const hidden = box.classList.toggle("dw-histmap-locked");
+      lockBtn.textContent = hidden ? "Show points" : "Hide points";
     });
     const handle = {
       remove() {
@@ -13277,6 +13477,7 @@
         markers.forEach((m) => m.remove());
         if (wrap.parentNode) wrap.remove();
         if (ctl.parentNode) ctl.remove();
+        if (box.classList) box.classList.remove("dw-histmap-locked");
         if (_activeOverlay === handle) _activeOverlay = null;
       }
     };
@@ -13672,7 +13873,7 @@
   // src/app/custom-tiles-app.js
   var pageWin3 = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   var { QpwsLayerProvider, NationalParksLayerProvider } = createQldEnvironmentProviders({ makeHoverIdentify, gmJsonGet });
-  var { HistoricMinesLayerProvider, MineShaftsLayerProvider, HistoricLeasesLayerProvider } = createQldMiningProviders({ makeHoverIdentify });
+  var { HistoricMinesLayerProvider, MineShaftsLayerProvider, HistoricLeasesLayerProvider, LeasePointsLayerProvider } = createQldMiningProviders({ makeHoverIdentify });
   var CustomTilesApp = class {
     constructor() {
       this.qldToken = new QldTokenManager({
@@ -13859,6 +14060,7 @@
         addOverlay(CFG.LAYER_MINE_SHAFTS, new MineShaftsLayerProvider());
         addOverlay(CFG.LAYER_HIST_MINES, new HistoricMinesLayerProvider());
         addOverlay(CFG.LAYER_MINE_LEASES, new HistoricLeasesLayerProvider());
+        addOverlay(CFG.LAYER_LEASE_POINTS, new LeasePointsLayerProvider());
         addOverlay(CFG.LAYER_HIST_MAPS, new HistoricalMapsIndexProvider());
         addOverlay(
           CFG.LAYER_INTVL_GLOBAL,
@@ -14235,6 +14437,19 @@
           );
         });
       }
+      for (const src of miningIdentifySources()) {
+        const lyr = this.layers[src.layerName];
+        if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
+        arcgisIdentify(map, latlng, {
+          baseUrl: src.baseUrl,
+          layers: src.layers,
+          tolerance: noHover ? src.tolerance * 2 : src.tolerance
+        }, (err, _feat, raw) => {
+          if (err || !isCurrent()) return;
+          const html = _miningSectionHtml(src, raw && raw.results || []);
+          if (html) section("dw-popup-ident-mining", html);
+        });
+      }
       const histMaps = this.layers[CFG.LAYER_HIST_MAPS];
       if (histMaps && map.hasLayer(histMaps) && map.getZoom() >= CFG.QLD_HIST_MAPS_MIN_ZOOM) {
         fetchHistMapSheets(map, latlng, (sheets) => {
@@ -14522,6 +14737,11 @@
         // four corner points still read as the primary anchors.
         ".dw-histmap-handle--mid { width: 12px; height: 12px; margin: -6px 0 0 -6px; border-color: #2563eb; border-width: 2px; }",
         ".dw-histmap-tri { pointer-events: none; }",
+        ".dw-histmap-locked .dw-histmap-handle { display: none; }",
+        ".dw-histmap-ctl .dw-histmap-msg.dw-histmap-msg--ok { color: #15803d; }",
+        ".dw-popup-ident-mining .dw-mine-hd { font-weight: 700; margin-bottom: 3px; }",
+        ".dw-popup-ident-mining .dw-mine-row { margin: 4px 0; padding-top: 4px; border-top: 1px solid rgba(0,0,0,.12); }",
+        ".dw-popup-ident-mining .dw-mine-list { max-height: 260px; overflow-y: auto; overscroll-behavior: contain; }",
         ".dw-histmap-ctl { position: absolute; top: 90px; right: 12px; z-index: 1000; background: rgba(255,255,255,.96); border: 1px solid #999; border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.3); max-width: 240px; }",
         ".dw-histmap-ctl .dw-histmap-ttl { font-weight: 700; margin-bottom: 6px; }",
         ".dw-histmap-ctl label { display: block; margin: 4px 0; }",
@@ -15001,6 +15221,8 @@
         _formatMineTooltip,
         _formatShaftTooltip,
         _formatLeaseTooltip,
+        _mineYear,
+        _miningSectionHtml,
         _quadToMatrix3d,
         _triAffine,
         _histMapSheet,
