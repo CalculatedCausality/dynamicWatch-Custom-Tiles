@@ -136,6 +136,7 @@ export const CFG = {
 	LAYER_INTVL_GLOBAL: "INTVL Global Map",
 	LAYER_GEOCACHING: "Geocaches",
 	LAYER_ABW: "Aussie Bushwalking",
+	LAYER_ALLTRAILS: "AllTrails Trail Map",
 	// Single layer-panel entry; which Development.i sublayers show
 	// (dev/building/plumbing × current/decided) is picked in the on-map
 	// submenu that appears while the overlay is active. Selection is
@@ -403,6 +404,14 @@ export const CFG = {
 	ABW_ORIGIN: "https://www.aussiebushwalking.com",
 	ABW_TILES: "https://www.aussiebushwalking.com/tiles/abw",
 	ABW_MIN_ZOOM: 10,
+	// AllTrails' own map tiles, hosted on Mapbox. The page is where the
+	// public Mapbox token they need is looked up; it is never stored here.
+	ALLTRAILS_PAGE: "https://www.alltrails.com/explore",
+	ALLTRAILS_TILES:
+		"https://api.mapbox.com/v4/alltrails.at_ways_production,alltrails.at_points_of_interest_production",
+	ALLTRAILS_MIN_ZOOM: 10,
+	ALLTRAILS_MAX_NATIVE_Z: 14,
+	ALLTRAILS_TOKEN_KEY: "dw_alltrails_token",
 	ABW_MAX_NATIVE_Z: 15,
 
 	ROUTE_POI_PREFS_KEY: "dw_route_poi_prefs",
@@ -463,7 +472,7 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Walks",
-		names:  [CFG.LAYER_ABW],
+		names:  [CFG.LAYER_ABW, CFG.LAYER_ALLTRAILS],
 	},
 	{
 		header: "Mining",

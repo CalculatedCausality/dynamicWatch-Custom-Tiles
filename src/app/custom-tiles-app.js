@@ -58,6 +58,7 @@ import { createQldEnvironmentProviders } from "../providers/qld-environment.js";
 import { _miningSectionHtml, createQldMiningProviders, miningIdentifySources } from "../providers/qld-mining.js";
 import { createQldLandProviders, landIdentifySources } from "../providers/qld-land.js";
 import { allTrailsExploreUrl, allTrailsViewAround } from "../utils/alltrails.js";
+import { AllTrailsLayerProvider } from "../providers/alltrails.js";
 import { RoutePoiController } from "../providers/route-pois.js";
 import {
 	HistoricalMapsIndexProvider,
@@ -297,6 +298,7 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_WAZE,       new WazeLayerProvider());
 			addOverlay(CFG.LAYER_GEOCACHING, new GeocachingLayerProvider());
 			addOverlay(CFG.LAYER_ABW,        new AussieBushwalkingLayerProvider());
+			addOverlay(CFG.LAYER_ALLTRAILS,  new AllTrailsLayerProvider());
 			addOverlay(CFG.LAYER_MOBILE,     new MobileCoverageLayerProvider());
 			addOverlay(CFG.LAYER_SEAMARKS,   new OpenSeaMapLayerProvider());
 			addOverlay(CFG.LAYER_INFRA,      new PowerInfraLayerProvider());
@@ -1126,6 +1128,10 @@ export class CustomTilesApp {
 			".dw-qpws-tip b { font-weight: 700; }",
 			".dw-infra-tip { font-size: 11px; line-height: 1.4; }",
 			".dw-abw-icon { background: none; border: 0; }",
+			".dw-at-icon { background: none; border: 0; }",
+			".dw-at-poi { display: flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.6); box-sizing: border-box; color: #fff; font: 700 9px/1 system-ui, sans-serif; }",
+			".dw-at-warn { color: #b91c1c; font-weight: 600; }",
+			".dw-at-note { position: absolute; left: 50%; bottom: 56px; transform: translateX(-50%); z-index: 1000; max-width: 340px; background: rgba(255,255,255,.97); border: 1px solid #b45309; border-radius: 8px; padding: 8px 12px; font-size: 12px; line-height: 1.4; box-shadow: 0 2px 8px rgba(0,0,0,.25); }",
 			".dw-abw-pin { display: block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.6); box-sizing: border-box; }",
 			".dw-abw-tip { font-size: 11px; line-height: 1.4; }",
 			".dw-abw-pop { font-size: 12px; line-height: 1.45; min-width: 190px; }",

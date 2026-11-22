@@ -54,6 +54,8 @@
 // @connect      tiles03.geocaching.com
 // @connect      tiles04.geocaching.com
 // @connect      www.aussiebushwalking.com
+// @connect      www.alltrails.com
+// @connect      cloudfront.net
 // @connect      api.mapbox.com
 // @connect      s3.amazonaws.com
 // @connect      elevation-tiles-prod.s3.amazonaws.com
@@ -167,6 +169,7 @@
     LAYER_INTVL_GLOBAL: "INTVL Global Map",
     LAYER_GEOCACHING: "Geocaches",
     LAYER_ABW: "Aussie Bushwalking",
+    LAYER_ALLTRAILS: "AllTrails Trail Map",
     // Single layer-panel entry; which Development.i sublayers show
     // (dev/building/plumbing × current/decided) is picked in the on-map
     // submenu that appears while the overlay is active. Selection is
@@ -376,6 +379,13 @@
     ABW_ORIGIN: "https://www.aussiebushwalking.com",
     ABW_TILES: "https://www.aussiebushwalking.com/tiles/abw",
     ABW_MIN_ZOOM: 10,
+    // AllTrails' own map tiles, hosted on Mapbox. The page is where the
+    // public Mapbox token they need is looked up; it is never stored here.
+    ALLTRAILS_PAGE: "https://www.alltrails.com/explore",
+    ALLTRAILS_TILES: "https://api.mapbox.com/v4/alltrails.at_ways_production,alltrails.at_points_of_interest_production",
+    ALLTRAILS_MIN_ZOOM: 10,
+    ALLTRAILS_MAX_NATIVE_Z: 14,
+    ALLTRAILS_TOKEN_KEY: "dw_alltrails_token",
     ABW_MAX_NATIVE_Z: 15,
     ROUTE_POI_PREFS_KEY: "dw_route_poi_prefs",
     // Which waypoints the script itself added, per saved route.
@@ -431,7 +441,7 @@
     },
     {
       header: "Walks",
-      names: [CFG.LAYER_ABW]
+      names: [CFG.LAYER_ABW, CFG.LAYER_ALLTRAILS]
     },
     {
       header: "Mining",
@@ -10357,6 +10367,7 @@
           map.getPane(opts.pane).style.zIndex = String(opts.paneZIndex);
         }
         this._group = L.layerGroup().addTo(map);
+        if (opts.onAdd) opts.onAdd(this, map);
         this._fetch();
         map.on("moveend zoomend", this._onViewChange, this);
       },
@@ -10367,6 +10378,7 @@
         this._lastKey = null;
         this._cancel();
         map.off("moveend zoomend", this._onViewChange, this);
+        if (opts.onRemove) opts.onRemove(this, map);
         if (this._group) {
           this._group.remove();
           this._group = null;
@@ -10389,6 +10401,11 @@
         }
         this._debounce = setTimeout(() => this._fetch(), debounceMs);
       },
+      // Fetch again from scratch, e.g. once a source that was not ready is.
+      refresh() {
+        this._lastKey = null;
+        this._fetch();
+      },
       _cancel() {
         for (const h of this._handles) gmCancel(h);
         this._handles = [];
@@ -10396,6 +10413,7 @@
       _fetch() {
         const map = this._map;
         if (!map || !this._group) return;
+        if (opts.isReady && !opts.isReady()) return;
         const vz = map.getZoom();
         if (vz < opts.minZoom) {
           this._gen++;
@@ -10502,6 +10520,7 @@
                 this._cacheTile(tk, []);
               } else {
                 failedAny = true;
+                if (opts.onTileError && !err && r) opts.onTileError(r.status);
               }
               if (--pending === 0) finish();
             }
@@ -11602,6 +11621,284 @@
       east: Math.min(180, lng + dLng)
     };
   }
+  function allTrailsChunkUrls(html) {
+    const out = [];
+    const re = /https:\/\/[a-z0-9.-]+\/[A-Za-z0-9_\-/]*_next\/static\/chunks\/[A-Za-z0-9_\-.]+\.js/g;
+    for (const m of String(html || "").match(re) || []) if (!out.includes(m)) out.push(m);
+    return out.slice(0, 150);
+  }
+  function allTrailsTokenIn(text) {
+    for (const tok of String(text || "").match(/pk\.[A-Za-z0-9_-]{50,}\.[A-Za-z0-9_-]{15,}/g) || []) {
+      try {
+        const payload = JSON.parse(atob(tok.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+        if (payload && payload.u === "alltrails") return tok;
+      } catch (_) {
+      }
+    }
+    return "";
+  }
+
+  // src/providers/alltrails.js
+  var clean2 = (v, max) => String(v == null ? "" : v).replace(/\s+/g, " ").trim().slice(0, max);
+  var ROUTE_COLORS = { hiking: "#15803d", mountain_biking: "#b45309", biking: "#1d4ed8", running: "#be123c" };
+  var ROUTE_NAMES = { hiking: "Walking route", mountain_biking: "Mountain bike route", biking: "Cycling route", running: "Running route" };
+  var NETWORKS = {
+    lwn: "local",
+    rwn: "regional",
+    nwn: "national",
+    iwn: "international",
+    lcn: "local",
+    rcn: "regional",
+    ncn: "national",
+    icn: "international"
+  };
+  var SAC = {
+    hiking: "easy walking",
+    mountain_hiking: "mountain walking",
+    demanding_mountain_hiking: "demanding mountain walking",
+    alpine_hiking: "alpine",
+    demanding_alpine_hiking: "demanding alpine",
+    difficult_alpine_hiking: "difficult alpine"
+  };
+  var HIGHWAYS = { path: "Path", track: "Track", footway: "Footpath", cycleway: "Cycleway", bridleway: "Bridle path", steps: "Steps" };
+  var POIS = {
+    parking: ["P", "#1d4ed8", "Parking"],
+    toilets: ["T", "#6d28d9", "Toilets"],
+    drinking_water: ["W", "#0284c7", "Drinking water"],
+    camp_site: ["C", "#15803d", "Camp site"],
+    caravan_site: ["C", "#15803d", "Caravan site"],
+    picnic_site: ["Pi", "#a16207", "Picnic area"],
+    peak: ["▲", "#57534e", "Peak"],
+    viewpoint: ["V", "#be123c", "Lookout"],
+    information: ["i", "#0f766e", "Information"],
+    trailhead: ["TH", "#b91c1c", "Trailhead"],
+    shelter: ["S", "#a16207", "Shelter"],
+    waterfall: ["F", "#0284c7", "Waterfall"]
+  };
+  var POI_SKIP = /* @__PURE__ */ new Set(["playground", "dam"]);
+  function atAccess(props) {
+    const p = props || {};
+    for (const v of [p.f, p.a, p.ac]) {
+      if (v === "private" || v === "no" || v === "permit") return v;
+      if (v === "yes" || v === "designated" || v === "permissive") return "";
+    }
+    return "";
+  }
+  function atSegmentHtml(props) {
+    const p = props || {};
+    const kind = HIGHWAYS[p.h] || "Trail";
+    const access = atAccess(p);
+    const facts = [
+      clean2(p.s, 30),
+      SAC[p.sac] || "",
+      Number(p.l) > 0 ? `${Number(p.l)} km section` : ""
+    ].filter(Boolean).join(" · ");
+    return esc`<b>${clean2(p.n, 100) || kind}</b>` + (p.n ? esc`<br>${kind}` : "") + (facts ? esc`<br>${facts}` : "") + (access ? esc`<br><span class="dw-at-warn">${access === "permit" ? "Permit needed" : access === "private" ? "Private: no public access" : "No access on foot"}</span>` : "");
+  }
+  function atRouteHtml(props) {
+    const p = props || {};
+    const kind = ROUTE_NAMES[p.type] || "Waymarked route";
+    const net = NETWORKS[p.network] ? `${NETWORKS[p.network]} route` : clean2(p.network, 60);
+    const sub = [kind, net, p.ref ? `marked "${clean2(p.ref, 20)}"` : ""].filter(Boolean).join(" · ");
+    return esc`<b>${clean2(p.name, 100) || kind}</b><br>${sub}`;
+  }
+  function atPoiHtml(props) {
+    const p = props || {};
+    const def = POIS[p.class] || POIS[p.type];
+    const label = def ? def[2] : clean2(String(p.class || "Place").replace(/_/g, " "), 40);
+    const facts = [
+      p.access && p.access !== "yes" ? `access: ${clean2(p.access, 20)}` : "",
+      p.fee === "yes" ? "fee" : p.fee === "no" ? "free" : "",
+      Number(p.ele) > 0 ? `${Math.round(Number(p.ele))} m` : ""
+    ].filter(Boolean).join(" · ");
+    return esc`<b>${clean2(p.name, 100) || label}</b>` + (p.name ? esc`<br>${label}` : "") + (facts ? esc`<br>${facts}` : "");
+  }
+  function atToElements(layerName, props, geometryType, rings) {
+    if (layerName === "at_routes_production" && geometryType === 2) {
+      return rings.filter((r) => r.length > 1).map((r) => ({ type: "way", geometry: r, tags: props, kind: "route" }));
+    }
+    if (layerName === "at_osm_trail_segments_production" && geometryType === 2) {
+      return rings.filter((r) => r.length > 1).map((r) => ({ type: "way", geometry: r, tags: props, kind: "segment" }));
+    }
+    if (layerName === "at_points_of_interest_production" && geometryType === 1 && rings[0] && rings[0][0]) {
+      if (POI_SKIP.has(props.class) || props.access === "private" || props.access === "customers") return null;
+      const p = rings[0][0];
+      return [{ type: "node", lat: p.lat, lon: p.lon, tags: props, _id: "at" + props.id }];
+    }
+    return null;
+  }
+  var _lookup = null;
+  function storedToken() {
+    try {
+      const v = JSON.parse(GM_getValue(CFG.ALLTRAILS_TOKEN_KEY, "null"));
+      return v && typeof v.tok === "string" ? v.tok : "";
+    } catch (_) {
+      return "";
+    }
+  }
+  function storeToken(tok) {
+    try {
+      GM_setValue(CFG.ALLTRAILS_TOKEN_KEY, tok ? JSON.stringify({ tok, t: Date.now() }) : "null");
+    } catch (_) {
+    }
+  }
+  function lookupAllTrailsToken(cb, opts) {
+    const fresh = opts && opts.fresh;
+    if (!fresh) {
+      const tok = storedToken();
+      if (tok) {
+        cb(tok);
+        return;
+      }
+    }
+    if (_lookup) {
+      _lookup.push(cb);
+      return;
+    }
+    const waiting = _lookup = [cb];
+    const done = (tok, reason) => {
+      _lookup = null;
+      if (tok) storeToken(tok);
+      for (const fn of waiting) fn(tok, reason);
+    };
+    gmGet(CFG.ALLTRAILS_PAGE, { anonymous: false, timeout: 25e3 }, (err, r) => {
+      if (err || !r) {
+        done("", "network");
+        return;
+      }
+      if (r.status !== 200) {
+        done("", r.status === 403 || r.status === 401 || r.status === 429 ? "blocked" : "network");
+        return;
+      }
+      const html = r.responseText || "";
+      const inPage = allTrailsTokenIn(html);
+      if (inPage) {
+        done(inPage);
+        return;
+      }
+      const urls = allTrailsChunkUrls(html);
+      if (!urls.length) {
+        done("", "notfound");
+        return;
+      }
+      let next = 0, active = 0, finished = false;
+      const pump = () => {
+        if (finished) return;
+        if (next >= urls.length && !active) {
+          finished = true;
+          done("", "notfound");
+          return;
+        }
+        while (active < 4 && next < urls.length) {
+          active++;
+          gmGet(urls[next++], { timeout: 25e3 }, (e2, r2) => {
+            active--;
+            if (finished) return;
+            const tok = !e2 && r2 && r2.status === 200 ? allTrailsTokenIn(r2.responseText || "") : "";
+            if (tok) {
+              finished = true;
+              done(tok);
+              return;
+            }
+            pump();
+          });
+        }
+      };
+      pump();
+    });
+  }
+  var NOTES = {
+    blocked: "AllTrails asked for a human check. Open alltrails.com in this browser once, then switch this layer off and on.",
+    network: "Couldn't reach AllTrails. Switch this layer off and on to try again.",
+    notfound: "Couldn't find AllTrails' map key; their site may have changed."
+  };
+  var AllTrailsLayerProvider = class extends LayerProvider {
+    create() {
+      const PANE2 = "dwAllTrailsPane";
+      let token = "";
+      let retried = false;
+      let note = null;
+      const showNote = (map, reason) => {
+        hideNote();
+        if (!map || !reason) return;
+        note = L.DomUtil.create("div", "dw-at-note", map.getContainer());
+        note.innerHTML = _escHtml(NOTES[reason] || NOTES.network) + (reason === "blocked" ? ` <a href="${CFG.ALLTRAILS_PAGE}" target="_blank" rel="noopener noreferrer">Open AllTrails ↗</a>` : "");
+        L.DomEvent.disableClickPropagation(note);
+      };
+      const hideNote = () => {
+        if (note && note.parentNode) note.remove();
+        note = null;
+      };
+      const poiIcon = (def) => L.divIcon({
+        className: "dw-at-icon",
+        html: `<span class="dw-at-poi" style="background:${def[1]}">${_escHtml(def[0])}</span>`,
+        iconSize: [18, 18],
+        iconAnchor: [9, 9],
+        popupAnchor: [0, -9],
+        tooltipAnchor: [0, -9]
+      });
+      const obtain = (layer2, fresh) => lookupAllTrailsToken((tok, reason) => {
+        token = tok;
+        if (!layer2._map) return;
+        if (tok) {
+          hideNote();
+          layer2.refresh();
+        } else showNote(layer2._map, reason);
+      }, { fresh });
+      const layer = makeVectorTileLayer({
+        label: "AllTrails",
+        pane: PANE2,
+        paneZIndex: 414,
+        minZoom: CFG.ALLTRAILS_MIN_ZOOM,
+        padBounds: 0.05,
+        maxNativeZoom: CFG.ALLTRAILS_MAX_NATIVE_Z,
+        attribution: 'Trail map © <a href="https://www.alltrails.com/" target="_blank" rel="noreferrer">AllTrails</a>, © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>',
+        isReady: () => !!token,
+        tileUrl: (z, x, y) => `${CFG.ALLTRAILS_TILES}/${z}/${x}/${y}.vector.pbf?access_token=${token}`,
+        missingIsEmpty: true,
+        // A refused tile means the remembered key has been replaced: look it up again, once.
+        onTileError: (status) => {
+          if (status !== 401 && status !== 403 || retried) return;
+          retried = true;
+          token = "";
+          obtain(layer, true);
+        },
+        onAdd: () => {
+          retried = false;
+          if (!token) obtain(layer, false);
+        },
+        onRemove: () => hideNote(),
+        toElements: atToElements,
+        render: (group, elements, tz) => {
+          const line = (el, style, html) => L.polyline(el.geometry.map((g) => [g.lat, g.lon]), { pane: PANE2, ...style }).bindTooltip(html, { className: "dw-abw-tip", sticky: true }).addTo(group);
+          if (tz >= 12) for (const el of elements) {
+            if (el.kind !== "segment") continue;
+            const closed = atAccess(el.tags);
+            line(el, {
+              color: closed ? "#b91c1c" : el.tags.h === "track" ? "#92400e" : "#166534",
+              weight: 2,
+              opacity: 0.85,
+              dashArray: closed ? "2 5" : el.tags.h === "track" ? "7 4" : "4 4"
+            }, atSegmentHtml(el.tags));
+          }
+          for (const el of elements) {
+            if (el.kind !== "route") continue;
+            L.polyline(el.geometry.map((g) => [g.lat, g.lon]), { pane: PANE2, color: "#fff", weight: 6, opacity: 0.8, interactive: false }).addTo(group);
+            line(el, { color: ROUTE_COLORS[el.tags.type] || "#15803d", weight: 3, opacity: 0.95 }, atRouteHtml(el.tags));
+          }
+          if (tz >= 13) for (const el of elements) {
+            if (el.type !== "node") continue;
+            const def = POIS[el.tags.class] || POIS[el.tags.type];
+            if (!def) continue;
+            const marker = L.marker([el.lat, el.lon], { icon: poiIcon(def), pane: PANE2, keyboard: false });
+            marker._dwData = { name: clean2(el.tags.name, 100) || def[2], label: "", url: "", color: def[1], radius: 6 };
+            marker.bindTooltip(atPoiHtml(el.tags), { className: "dw-abw-tip", direction: "top" }).addTo(group);
+          }
+        }
+      });
+      return layer;
+    }
+  };
 
   // src/utils/route-geometry.js
   var EARTH_R = 63710088e-1;
@@ -14373,6 +14670,7 @@
         addOverlay(CFG.LAYER_WAZE, new WazeLayerProvider());
         addOverlay(CFG.LAYER_GEOCACHING, new GeocachingLayerProvider());
         addOverlay(CFG.LAYER_ABW, new AussieBushwalkingLayerProvider());
+        addOverlay(CFG.LAYER_ALLTRAILS, new AllTrailsLayerProvider());
         addOverlay(CFG.LAYER_MOBILE, new MobileCoverageLayerProvider());
         addOverlay(CFG.LAYER_SEAMARKS, new OpenSeaMapLayerProvider());
         addOverlay(CFG.LAYER_INFRA, new PowerInfraLayerProvider());
@@ -15053,6 +15351,10 @@
         ".dw-qpws-tip b { font-weight: 700; }",
         ".dw-infra-tip { font-size: 11px; line-height: 1.4; }",
         ".dw-abw-icon { background: none; border: 0; }",
+        ".dw-at-icon { background: none; border: 0; }",
+        ".dw-at-poi { display: flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.6); box-sizing: border-box; color: #fff; font: 700 9px/1 system-ui, sans-serif; }",
+        ".dw-at-warn { color: #b91c1c; font-weight: 600; }",
+        ".dw-at-note { position: absolute; left: 50%; bottom: 56px; transform: translateX(-50%); z-index: 1000; max-width: 340px; background: rgba(255,255,255,.97); border: 1px solid #b45309; border-radius: 8px; padding: 8px 12px; font-size: 12px; line-height: 1.4; box-shadow: 0 2px 8px rgba(0,0,0,.25); }",
         ".dw-abw-pin { display: block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.6); box-sizing: border-box; }",
         ".dw-abw-tip { font-size: 11px; line-height: 1.4; }",
         ".dw-abw-pop { font-size: 12px; line-height: 1.45; min-width: 190px; }",
@@ -15561,6 +15863,13 @@
         intvlTrustedActivityTime,
         allTrailsExploreUrl,
         allTrailsViewAround,
+        allTrailsChunkUrls,
+        allTrailsTokenIn,
+        atAccess,
+        atPoiHtml,
+        atRouteHtml,
+        atSegmentHtml,
+        atToElements,
         _cadVal,
         _escHtml,
         esc,

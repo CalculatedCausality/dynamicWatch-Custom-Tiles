@@ -1531,6 +1531,58 @@ t("allTrailsViewAround gives a box of the asked width around a point", () => {
 	assert(dw.allTrailsExploreUrl(v).startsWith("https://www.alltrails.com/explore?b_tl_lat="), "usable");
 });
 
+// A Mapbox-shaped public token for a given account (the signature part is filler).
+function fakeMapboxToken(user) {
+	const body = Buffer.from(JSON.stringify({ u: user, a: "cjxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" })).toString("base64")
+		.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+	return "pk." + body + ".AbCdEfGhIjKlMnOpQrStUv";
+}
+
+t("allTrailsTokenIn picks the alltrails account's token and nothing else", () => {
+	const theirs = fakeMapboxToken("alltrails"), other = fakeMapboxToken("mapbox");
+	eq(dw.allTrailsTokenIn(`x="${other}";y="${theirs}";`), theirs);
+	eq(dw.allTrailsTokenIn(`x="${other}"`), "", "another account's token is not used");
+	eq(dw.allTrailsTokenIn("pk.notatoken.short"), "");
+	eq(dw.allTrailsTokenIn(null), "");
+});
+
+t("allTrailsChunkUrls lists the page's script chunks once each, https only", () => {
+	const a = "https://d27scpai1jcyi9.cloudfront.net/explore-static/_next/static/chunks/0ujx5hgb59ru1.js";
+	const html = `<script src="${a}"></script><script src="${a}"></script>` +
+		`<script src="http://evil.example/_next/static/chunks/x.js"></script>` +
+		`<script src="https://cdn.example/other/app.js"></script>`;
+	eq(JSON.stringify(dw.allTrailsChunkUrls(html)), JSON.stringify([a]));
+	eq(dw.allTrailsChunkUrls("").length, 0);
+});
+
+t("atToElements keeps routes, trail sections and public POIs", () => {
+	const ring = [{ lat: -26.6, lon: 152.8 }, { lat: -26.61, lon: 152.81 }];
+	eq(dw.atToElements("at_routes_production", { name: "A" }, 2, [ring])[0].kind, "route");
+	eq(dw.atToElements("at_osm_trail_segments_production", { h: "path" }, 2, [ring, [ring[0]]]).length, 1, "a one-point piece is dropped");
+	const poi = dw.atToElements("at_points_of_interest_production", { id: "node/1", class: "toilets" }, 1, [[ring[0]]]);
+	eq(poi[0]._id, "atnode/1");
+	eq(dw.atToElements("at_points_of_interest_production", { id: "n", class: "parking", access: "customers" }, 1, [[ring[0]]]), null);
+	eq(dw.atToElements("at_points_of_interest_production", { id: "n", class: "playground" }, 1, [[ring[0]]]), null);
+	eq(dw.atToElements("road", {}, 2, [ring]), null, "Mapbox's own layers are ignored");
+});
+
+t("AllTrails tooltips: access warnings, plain names, escaped tile text", () => {
+	eq(dw.atAccess({ a: "private" }), "private");
+	eq(dw.atAccess({ f: "designated", a: "private" }), "", "open on foot wins over a general restriction");
+	eq(dw.atAccess({ h: "path" }), "");
+	const seg = dw.atSegmentHtml({ n: "Turpentine Track", h: "path", s: "dirt", sac: "mountain_hiking", l: 0.9 });
+	assert(seg.includes("<b>Turpentine Track</b><br>Path") && seg.includes("dirt · mountain walking · 0.9 km section"), seg);
+	assert(dw.atSegmentHtml({ h: "track", a: "private" }).includes("Private: no public access"), "private warning");
+	eq(dw.atSegmentHtml({ h: "track" }), "<b>Track</b>");
+	const route = dw.atRouteHtml({ name: "Piccabeen Circuit", type: "hiking", network: "lwn", ref: "2" });
+	assert(route.includes("<b>Piccabeen Circuit</b>") && route.includes('Walking route · local route · marked &quot;2&quot;'), route);
+	const poi = dw.atPoiHtml({ class: "camp_site", name: "Thilba Thalba Walkers Camp", fee: "no", ele: "410" });
+	assert(poi.includes("Camp site") && poi.includes("free · 410 m"), poi);
+	for (const html of [dw.atSegmentHtml({ n: "<b>x" }), dw.atRouteHtml({ name: "<b>x", network: "<i>" }), dw.atPoiHtml({ name: "<b>x", class: "<u>" })]) {
+		assert(html.includes("&lt;b&gt;x") && !html.includes("<i>") && !html.includes("<u>"), html);
+	}
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

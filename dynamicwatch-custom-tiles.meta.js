@@ -54,6 +54,8 @@
 // @connect      tiles03.geocaching.com
 // @connect      tiles04.geocaching.com
 // @connect      www.aussiebushwalking.com
+// @connect      www.alltrails.com
+// @connect      cloudfront.net
 // @connect      api.mapbox.com
 // @connect      s3.amazonaws.com
 // @connect      elevation-tiles-prod.s3.amazonaws.com

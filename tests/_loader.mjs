@@ -25,7 +25,8 @@ const HELPERS = [
 	// INTVL formatters
 	"intvlActivityTime", "intvlAgo", "intvlArea", "intvlOwnerKey", "intvlOwnerStats", "intvlRunLine",
 	"intvlSharedNames", "intvlTooltipHtml", "intvlTrustedActivityTime",
-	"allTrailsExploreUrl", "allTrailsViewAround",
+	"allTrailsExploreUrl", "allTrailsViewAround", "allTrailsChunkUrls", "allTrailsTokenIn",
+	"atAccess", "atPoiHtml", "atRouteHtml", "atSegmentHtml", "atToElements",
 	// Cadastre / OnTheHouse formatters (underscore-prefixed module-scope)
 	"_cadVal", "_escHtml", "esc", "_safeColor", "_fmtPrice", "_fmtDate",
 	"_slugify", "_othStreetTypeSlug", "_othCanonicalUrlFromLocation",

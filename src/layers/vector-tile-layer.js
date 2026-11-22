@@ -26,6 +26,7 @@ export function makeVectorTileLayer(opts) {
 				map.getPane(opts.pane).style.zIndex = String(opts.paneZIndex);
 			}
 			this._group = L.layerGroup().addTo(map);
+			if (opts.onAdd) opts.onAdd(this, map);
 			this._fetch();
 			map.on("moveend zoomend", this._onViewChange, this);
 		},
@@ -37,6 +38,7 @@ export function makeVectorTileLayer(opts) {
 			this._lastKey = null;
 			this._cancel();
 			map.off("moveend zoomend", this._onViewChange, this);
+			if (opts.onRemove) opts.onRemove(this, map);
 			if (this._group) { this._group.remove(); this._group = null; }
 			this._tileEls.clear();
 		},
@@ -59,6 +61,12 @@ export function makeVectorTileLayer(opts) {
 			this._debounce = setTimeout(() => this._fetch(), debounceMs);
 		},
 
+		// Fetch again from scratch, e.g. once a source that was not ready is.
+		refresh() {
+			this._lastKey = null;
+			this._fetch();
+		},
+
 		_cancel() {
 			for (const h of this._handles) gmCancel(h);
 			this._handles = [];
@@ -67,6 +75,9 @@ export function makeVectorTileLayer(opts) {
 		_fetch() {
 			const map = this._map;
 			if (!map || !this._group) return;
+			// A source that needs something first (a key) asks for it in
+			// onAdd and calls refresh() when it has it.
+			if (opts.isReady && !opts.isReady()) return;
 			const vz = map.getZoom();
 			if (vz < opts.minZoom) {
 				this._gen++;
@@ -182,6 +193,7 @@ export function makeVectorTileLayer(opts) {
 							this._cacheTile(tk, []);
 						} else {
 							failedAny = true;
+							if (opts.onTileError && !err && r) opts.onTileError(r.status);
 						}
 						if (--pending === 0) finish();
 					});

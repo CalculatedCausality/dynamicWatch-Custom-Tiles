@@ -87,6 +87,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 | Layer | Notes |
 |---|---|
 | **Aussie Bushwalking** | The walks in view from [aussiebushwalking.com](https://www.aussiebushwalking.com/)'s own walk map: a line per recorded track and a pin per walk, coloured by difficulty. Hover for distance, difficulty and duration; click for the description and a link to the walk's page. Appears from zoom 10. Walks are contributed by the site's members; the site's terms allow personal use only. |
+| **AllTrails Trail Map** | The trail network AllTrails' own map draws: named, waymarked routes (green for walking, brown for mountain biking, blue for cycling), every path and track as a thin dashed line (red where it is private, closed or needs a permit), and trailheads, parking, toilets, drinking water, camp sites and peaks. Hover for the name, surface, difficulty and access. Routes appear from zoom 10, paths from 12, places from 13. This is AllTrails' base map, drawn from OpenStreetMap data; AllTrails' own trail listings (ratings, reviews, photos) are not shown. The first time, the script reads AllTrails' site from your browser to find the map key it needs; if AllTrails asks for a human check, open alltrails.com once and switch the layer off and on |
 
 **Mining**
 
@@ -197,7 +198,7 @@ Right-clicking the map (or placing a waypoint) shows a popup with the usual dyna
 
 The coordinate at the top of the popup is also click-to-copy — one tap puts `lat,lng` on your clipboard.
 
-The same popup has an **AllTrails** button. It opens AllTrails' own Explore page on the area you are looking at (or about 10 km around the spot if the map is zoomed far in or out). It is a plain link: the script reads nothing from AllTrails, which does not allow automated access to its trail data.
+The same popup has an **AllTrails** button. It opens AllTrails' own Explore page on the area you are looking at (or about 10 km around the spot if the map is zoomed far in or out). It is a plain link, separate from the AllTrails Trail Map overlay.
 
 ### Layer memory
 
@@ -268,6 +269,7 @@ Quick-reference table — what you need to log in to for each layer to render.
 | Waze Traffic | No | Waze live-map georss (reCAPTCHA-gated) | Token minted in a hidden `embed.waze.com` iframe; activates at z≥9. Manual override: `GM_setValue("dw_waze_token_manual", "<token>")` |
 | INTVL Global Map | No | Public Mapbox Vector Tile CDN | |
 | State Land, Land Use | No | Queensland Government ArcGIS (cadastre tenure; QLUMP land use) | Same host as the cadastre |
+| AllTrails Trail Map | No (reads AllTrails' site from your browser once) | AllTrails' map tiles, hosted on Mapbox | The map key is looked up in your browser and kept there; it is not in the script |
 | Aussie Bushwalking | No | aussiebushwalking.com's walk-map vector tiles | Read only while the overlay is on |
 | Geocaches | No | Groundspeak's public tile-info + map.details endpoints | No login. UTFGrid drives placement; lazy map.details fetch enriches on click. |
 
@@ -335,7 +337,9 @@ bash tests/run.sh --ci   # plain text output
 
 ### Release notes — 7.23.0
 
+- New **AllTrails Trail Map** overlay (in Walks, off by default): the routes, paths, tracks and trail facilities AllTrails' own map draws, with private and closed paths in red.
 - New **AllTrails** button in the right-click / long-press popup: opens AllTrails on the area you are looking at.
+- Tampermonkey will ask to allow `www.alltrails.com` and `cloudfront.net` when it updates; the overlay needs both.
 
 ### Release notes — 7.22.0
 
