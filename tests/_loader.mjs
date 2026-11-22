@@ -23,7 +23,8 @@ const HELPERS = [
 	// colour + geometry primitives
 	"hexAlpha", "pointInRing", "prepareLayers",
 	// INTVL formatters
-	"intvlActivityTime", "intvlAgo", "intvlArea",
+	"intvlActivityTime", "intvlAgo", "intvlArea", "intvlOwnerKey", "intvlOwnerStats", "intvlRunLine",
+	"intvlSharedNames", "intvlTooltipHtml", "intvlTrustedActivityTime",
 	// Cadastre / OnTheHouse formatters (underscore-prefixed module-scope)
 	"_cadVal", "_escHtml", "esc", "_safeColor", "_fmtPrice", "_fmtDate",
 	"_slugify", "_othStreetTypeSlug", "_othCanonicalUrlFromLocation",

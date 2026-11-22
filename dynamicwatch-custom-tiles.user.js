@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.21.0
+// @version      7.22.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -935,6 +935,12 @@
     if (!Number.isFinite(ms) || ms < Date.UTC(2018, 0, 1) || ms > Date.now() + 864e5) return null;
     return new Date(ms);
   }
+  function intvlTrustedActivityTime(activityId, dayDate) {
+    const t = intvlActivityTime(activityId);
+    if (!t) return null;
+    if (!(dayDate instanceof Date) || isNaN(dayDate)) return t;
+    return Math.abs(t.getTime() - dayDate.getTime()) <= 4 * 864e5 ? t : null;
+  }
   function intvlAgo(date) {
     if (!(date instanceof Date) || isNaN(date)) return "";
     const days = Math.floor((Date.now() - date.getTime()) / 864e5);
@@ -953,6 +959,62 @@
     if (v < 1e5) return Math.round(v).toLocaleString() + " m²";
     const km2 = v / 1e6;
     return (km2 < 10 ? km2.toFixed(2) : km2.toFixed(1)) + " km²";
+  }
+  function intvlOwnerKey(props) {
+    const h = props && props.userHash;
+    return typeof h === "string" && h ? h : "";
+  }
+  function intvlRunLine(props) {
+    const km = Number(props && props.distance), min = Number(props && props.duration);
+    if (!(km > 0) || !(min > 0) || km > 1e3 || min > 6e3) return "";
+    const whole = Math.round(min);
+    const time = whole >= 60 ? `${Math.floor(whole / 60)} h ${whole % 60} min` : `${whole} min`;
+    const paceSec = Math.round(min * 60 / km);
+    const pace = paceSec >= 120 && paceSec <= 1800 ? ` · ${Math.floor(paceSec / 60)}:${String(paceSec % 60).padStart(2, "0")} /km` : "";
+    return `${km < 10 ? km.toFixed(1) : Math.round(km)} km in ${time}${pace}`;
+  }
+  function intvlOwnerStats(tiles, ownerKey) {
+    const seen = /* @__PURE__ */ new Set();
+    let area = 0;
+    if (ownerKey) for (const prepared of tiles) for (const layer of prepared) for (const f of layer.features) {
+      if (intvlOwnerKey(f.props) !== ownerKey || seen.has(f.props.runId)) continue;
+      seen.add(f.props.runId);
+      area += Number(f.props.currentArea) || 0;
+    }
+    return { count: seen.size, area };
+  }
+  function intvlSharedNames(value) {
+    if (typeof value !== "string" || !value) return [];
+    let pairs;
+    try {
+      pairs = JSON.parse(value);
+    } catch (_) {
+      return [];
+    }
+    if (!Array.isArray(pairs)) return [];
+    return pairs.map((p) => Array.isArray(p) && typeof p[1] === "string" ? p[1].trim() : "").filter(Boolean).slice(0, 5);
+  }
+  function intvlTooltipHtml(props, opts) {
+    const p = props || {}, o = opts || {};
+    const swatch = `<span style="display:inline-block;width:10px;height:10px;background:${_safeColor(p.colour, "#3b82f6")};border:1px solid #444;vertical-align:middle"></span>`;
+    const name = typeof p.username === "string" && p.username.trim() ? p.username.trim() : "";
+    const who = name || (p.anonymous ? "Anonymous runner" : "Unnamed runner");
+    const level = Number.isFinite(p.level) && p.level > 0 ? `Level ${p.level}` : "";
+    const city = typeof p.city === "string" && p.city.trim() ? p.city.trim() : "";
+    const lines = [`${swatch} <b>${_escHtml(who)}</b>`];
+    const about = [level, city].filter(Boolean).join(" · ");
+    if (about) lines.push(`<span class="dw-cad-sub">${_escHtml(about)}</span>`);
+    lines.push(`${_escHtml(intvlArea(p.currentArea))} territory`);
+    const shared = intvlSharedNames(p.sharedUserHashes);
+    if (shared.length) lines.push(`Shared with ${_escHtml(shared.join(", "))}`);
+    const run = intvlRunLine(p);
+    if (run) lines.push(_escHtml(run));
+    if (o.when) lines.push(o.when);
+    const st = o.stats;
+    if (st && st.count > 1) {
+      lines.push(`<span class="dw-cad-sub">Holds ${st.count} territories on this part of the map, ${_escHtml(intvlArea(st.area))} in all</span>`);
+    }
+    return lines.join("<br>");
   }
 
   // src/runtime/mode-3d.js
@@ -8537,6 +8599,8 @@
 
   // src/providers/intvl-global.js
   var tileKey = (z, x, y) => `${z}/${x}/${y}`;
+  var DIM_ALPHA = 0.16;
+  var LIT_ALPHA = 0.85;
   var IntvlGlobalTilesLayerProvider = class extends LayerProvider {
     create() {
       const TILE_PX = 256;
@@ -8663,8 +8727,9 @@
               gmCancel(e.tile._dwHandle);
               e.tile._dwHandle = null;
             }
-            if (!this._tileFeatures) return;
             const c = e.coords;
+            if (this._tileCtx) this._tileCtx.delete(tileKey(c.z, c.x, c.y));
+            if (!this._tileFeatures) return;
             this._tileFeatures.delete(tileKey(c.z, c.x, c.y));
           };
           this.on("tileunload", this._onTileUnload);
@@ -8690,6 +8755,8 @@
           this._clearTooltip();
           this._tooltip = null;
           this._tileFeatures && this._tileFeatures.clear();
+          this._tileCtx && this._tileCtx.clear();
+          this._highlight = "";
           L.GridLayer.prototype.onRemove.call(this, map);
         },
         _cancelPress() {
@@ -8699,6 +8766,18 @@
         _clearTooltip() {
           if (this._tooltip && this._tooltip._map) this._tooltip.remove();
           this._lastFeatKey = null;
+          this._setHighlight("");
+        },
+        // Make one runner's territories stand out by dimming the rest.
+        // Only repaints when the runner under the pointer changes.
+        _setHighlight(ownerKey) {
+          if ((this._highlight || "") === ownerKey) return;
+          this._highlight = ownerKey;
+          if (!this._tileFeatures || !this._tileCtx) return;
+          for (const [key, ctx] of this._tileCtx) {
+            const prepared = this._tileFeatures.get(key);
+            if (prepared) this._renderTile(ctx, prepared, TILE_PX);
+          }
         },
         createTile(coords, done) {
           const canvas = L.DomUtil.create("canvas", "leaflet-tile");
@@ -8724,10 +8803,12 @@
               const prepared = prepareLayers(layers, FILL_ALPHA);
               this._renderTile(ctx, prepared, TILE_PX);
               if (!this._tileFeatures) this._tileFeatures = /* @__PURE__ */ new Map();
+              if (!this._tileCtx) this._tileCtx = /* @__PURE__ */ new Map();
               this._tileFeatures.set(
                 tileKey(coords.z, coords.x, coords.y),
                 prepared
               );
+              this._tileCtx.set(tileKey(coords.z, coords.x, coords.y), ctx);
             } catch (e) {
               console.warn("[CustomTiles] INTVL global decode:", e);
             }
@@ -8760,7 +8841,7 @@
                 }
                 ctx.closePath();
               }
-              ctx.fillStyle = f.fillStyle;
+              ctx.fillStyle = !this._highlight ? f.fillStyle : hexAlpha(f.colour, intvlOwnerKey(f.props) === this._highlight ? LIT_ALPHA : DIM_ALPHA);
               ctx.fill();
             }
           }
@@ -8800,13 +8881,12 @@
                 return;
               }
               this._lastFeatKey = featKey;
-              const area = intvlArea(f.props.currentArea);
               let dayDate = null;
               if (typeof f.props.startTime === "number") {
                 const unixDay = f.props.startTime + CFG.INTVL_START_TIME_EPOCH_OFFSET_DAYS;
                 dayDate = new Date(unixDay * 86400 * 1e3);
               }
-              const actDate = intvlActivityTime(f.props.activityId);
+              const actDate = intvlTrustedActivityTime(f.props.activityId, dayDate);
               const fmtDay = (d) => d.toLocaleDateString(
                 void 0,
                 { day: "numeric", month: "short", year: "numeric" }
@@ -8826,8 +8906,12 @@
               } else {
                 whenLine = "Capture date unknown";
               }
-              const swatch = `<span style="display:inline-block;width:10px;height:10px;background:${_safeColor(f.colour, "#3b82f6")};border:1px solid #444;vertical-align:middle"></span>`;
-              const html = `<b>${swatch} ${area}</b> territory<br>${whenLine}`;
+              const owner = intvlOwnerKey(f.props);
+              this._setHighlight(owner);
+              const html = intvlTooltipHtml({ ...f.props, colour: f.colour }, {
+                when: whenLine,
+                stats: intvlOwnerStats(this._tileFeatures.values(), owner)
+              });
               this._tooltip.setLatLng(latlng).setContent(html);
               if (!this._tooltip._map) this._tooltip.addTo(map);
               return;
@@ -15432,6 +15516,12 @@
         intvlActivityTime,
         intvlAgo,
         intvlArea,
+        intvlOwnerKey,
+        intvlOwnerStats,
+        intvlRunLine,
+        intvlSharedNames,
+        intvlTooltipHtml,
+        intvlTrustedActivityTime,
         _cadVal,
         _escHtml,
         esc,

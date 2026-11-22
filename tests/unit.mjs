@@ -272,6 +272,56 @@ t("intvlAgo formats relative time", () => {
 	eq(dw.intvlAgo(new Date(now - 5 * 86400e3)), "5 days ago");
 });
 
+t("intvlTrustedActivityTime only believes a decoded time near the capture day", () => {
+	const when = Date.UTC(2026, 4, 31, 3, 0);
+	const cuid = "c" + when.toString(36).padStart(8, "0") + "0000abcdefghijkl";
+	eq(dw.intvlTrustedActivityTime(cuid, new Date(Date.UTC(2026, 4, 30))).getTime(), when);
+	eq(dw.intvlTrustedActivityTime(cuid, new Date(Date.UTC(2025, 0, 1))), null, "a chance decode far from the capture day");
+	eq(dw.intvlTrustedActivityTime(cuid, null).getTime(), when, "no day to compare with");
+	eq(dw.intvlTrustedActivityTime("hazie8fn38xs25i1yax8q5ml", new Date()), null);
+});
+
+t("intvlRunLine gives distance, time and a believable pace", () => {
+	eq(dw.intvlRunLine({ distance: 16.30351, duration: 75.05 }), "16 km in 1 h 15 min · 4:36 /km");
+	eq(dw.intvlRunLine({ distance: 5.04, duration: 31.2 }), "5.0 km in 31 min · 6:11 /km");
+	eq(dw.intvlRunLine({ distance: 40, duration: 60 }), "40 km in 1 h 0 min", "a bike pace is left out");
+	eq(dw.intvlRunLine({ distance: 0, duration: 10 }), "");
+	eq(dw.intvlRunLine({}), "");
+});
+
+t("intvlSharedNames reads [hash, name] pairs and survives junk", () => {
+	eq(JSON.stringify(dw.intvlSharedNames('[["X5lCa3kv","Sam Example"],["aaaa","  "],["bbbb"]]')), '["Sam Example"]');
+	for (const bad of [undefined, "", "not json", "{}", "[1,2]"]) eq(dw.intvlSharedNames(bad).length, 0, String(bad));
+});
+
+t("intvlOwnerStats counts a runner's territories once across tiles", () => {
+	const f = (runId, userHash, currentArea) => ({ props: { runId, userHash, currentArea } });
+	const tileA = [{ features: [f(1, "u1", 100), f(2, "u1", 50), f(3, "u2", 999)] }];
+	const tileB = [{ features: [f(2, "u1", 50), f(4, "u1", 25)] }];
+	eq(JSON.stringify(dw.intvlOwnerStats([tileA, tileB], "u1")), '{"count":3,"area":175}');
+	eq(dw.intvlOwnerStats([tileA], "").count, 0, "no key, no match");
+	eq(dw.intvlOwnerKey({ userHash: "u1" }), "u1");
+	eq(dw.intvlOwnerKey({}), "");
+});
+
+t("intvlTooltipHtml names the runner, respects anonymity, escapes tile text", () => {
+	const html = dw.intvlTooltipHtml({
+		username: "Sam Example", level: 19, city: "Sunshine Coast", colour: "#93E1D8",
+		currentArea: 2581, distance: 16.3, duration: 75,
+	}, { when: "Captured 1 Mar 2026", stats: { count: 4, area: 250000 } });
+	assert(html.includes("<b>Sam Example</b>"), html);
+	assert(html.includes("Level 19 · Sunshine Coast"), html);
+	assert(html.includes("2,581 m² territory"), html);
+	assert(html.includes("16 km in 1 h 15 min"), html);
+	assert(html.includes("Captured 1 Mar 2026"), html);
+	assert(html.includes("Holds 4 territories") && html.includes("0.25 km²"), html);
+	const anon = dw.intvlTooltipHtml({ anonymous: true, currentArea: 10 }, {});
+	assert(anon.includes("<b>Anonymous runner</b>") && !anon.includes("Holds"), anon);
+	const bad = dw.intvlTooltipHtml({ username: "<img src=x>", city: "<b>", colour: "red;x", sharedUserHashes: '[["h","<i>"]]' }, {});
+	assert(bad.includes("&lt;img src=x&gt;") && bad.includes("&lt;b&gt;") && bad.includes("Shared with &lt;i&gt;"), bad);
+	assert(!bad.includes("red;x"), "unsafe colour used: " + bad);
+});
+
 t("intvlArea formats m² → km²", () => {
 	eq(dw.intvlArea(0), "0 m²");
 	eq(dw.intvlArea(50000), "50,000 m²");

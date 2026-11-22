@@ -1,8 +1,7 @@
 import { CFG } from "../config.js";
 import { LayerProvider } from "../layers/provider-factories.js";
 import { gmCancel, gmGet } from "../utils/http.js";
-import { _safeColor } from "../utils/html.js";
-import { pointInRing, intvlActivityTime, intvlAgo, intvlArea } from "../utils/intvl.js";
+import { hexAlpha, pointInRing, intvlAgo, intvlTrustedActivityTime, intvlOwnerKey, intvlOwnerStats, intvlTooltipHtml } from "../utils/intvl.js";
 import { mvtDecode, prepareLayers } from "../utils/mvt.js";
 
 /* -- INTVL Global Map (public Mapbox Vector Tile pyramid) ------------
@@ -33,23 +32,25 @@ import { mvtDecode, prepareLayers } from "../utils/mvt.js";
 // again), so a helper avoids any chance of drift between the two.
 const tileKey = (z, x, y) => `${z}/${x}/${y}`;
 
-/* -- INTVL hover formatting helpers ----------------------------------
+/* -- INTVL hover ------------------------------------------------------
  *
- * The public tiles ship only { runId, activityId, colour, currentArea,
- * startTime } — deliberately anonymised: there is NO username/userId in
- * the data and NO public way to resolve one. Confirmed by enumerating
- * the INTVL tRPC router at https://www.intvl.com.au/api/trpc — every
- * run/user lookup (run.getRun, user.getRun, user.byId,
- * user.byIdProfileImage, …) requires BOTH a Clerk login AND a `userId`
- * the tiles never carry, so runId/activityId cannot be turned into a
- * name without an authed session that already knows the owner. So we
- * make the data we DO have as useful as possible instead.
+ * Since late 2026 the public tiles carry who holds each territory:
+ * { username, userHash, level, city, country, distance (km), duration
+ * (min), isPro, profileImageUrl, anonymous, sharedUserHashes } beside the
+ * original { runId, activityId, colour, currentArea, startTime }. A runner
+ * who chose to be anonymous is sent with `anonymous: true` and no name.
+ * (Before that the tiles were nameless and every lookup needed a login.)
  *
- * One bonus: most activityIds are cuid v1 (`c` + 8 base36 chars of
- * creation-time ms + counter/fingerprint/random). Decoding that recovers
- * the precise time-of-day the run was recorded — `startTime` itself is
- * only day-resolution. Older rows use a different id scheme; we sanity-
- * check the decoded date and silently skip when it isn't a sane cuid. */
+ * The hover names the runner and dims everyone else's territory, so one
+ * runner's holdings stand out. Profile pictures are not loaded: that would
+ * send a request to a third party for every territory the pointer crosses.
+ *
+ * Older activityIds are cuid v1, whose prefix decodes to the time of day
+ * the run was recorded; newer ids carry no time and fall back to the
+ * day-resolution startTime. */
+const DIM_ALPHA = 0.16;
+const LIT_ALPHA = 0.85;
+
 export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 	create() {
 		const TILE_PX = 256;
@@ -197,8 +198,9 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 						gmCancel(e.tile._dwHandle);
 						e.tile._dwHandle = null;
 					}
-					if (!this._tileFeatures) return;
 					const c = e.coords;
+					if (this._tileCtx) this._tileCtx.delete(tileKey(c.z, c.x, c.y));
+					if (!this._tileFeatures) return;
 					this._tileFeatures.delete(tileKey(c.z, c.x, c.y));
 				};
 				this.on("tileunload", this._onTileUnload);
@@ -225,6 +227,8 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 				this._clearTooltip();
 				this._tooltip = null;
 				this._tileFeatures && this._tileFeatures.clear();
+				this._tileCtx && this._tileCtx.clear();
+				this._highlight = "";
 				L.GridLayer.prototype.onRemove.call(this, map);
 			},
 
@@ -236,6 +240,19 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 			_clearTooltip() {
 				if (this._tooltip && this._tooltip._map) this._tooltip.remove();
 				this._lastFeatKey = null;
+				this._setHighlight("");
+			},
+
+			// Make one runner's territories stand out by dimming the rest.
+			// Only repaints when the runner under the pointer changes.
+			_setHighlight(ownerKey) {
+				if ((this._highlight || "") === ownerKey) return;
+				this._highlight = ownerKey;
+				if (!this._tileFeatures || !this._tileCtx) return;
+				for (const [key, ctx] of this._tileCtx) {
+					const prepared = this._tileFeatures.get(key);
+					if (prepared) this._renderTile(ctx, prepared, TILE_PX);
+				}
 			},
 
 			createTile(coords, done) {
@@ -274,8 +291,10 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 						const prepared = prepareLayers(layers, FILL_ALPHA);
 						this._renderTile(ctx, prepared, TILE_PX);
 						if (!this._tileFeatures) this._tileFeatures = new Map();
+						if (!this._tileCtx) this._tileCtx = new Map();
 						this._tileFeatures.set(
 							tileKey(coords.z, coords.x, coords.y), prepared);
+						this._tileCtx.set(tileKey(coords.z, coords.x, coords.y), ctx);
 					} catch (e) {
 						console.warn("[CustomTiles] INTVL global decode:", e);
 					}
@@ -324,7 +343,8 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 							}
 							ctx.closePath();
 						}
-						ctx.fillStyle = f.fillStyle;
+						ctx.fillStyle = !this._highlight ? f.fillStyle
+							: hexAlpha(f.colour, intvlOwnerKey(f.props) === this._highlight ? LIT_ALPHA : DIM_ALPHA);
 						ctx.fill();
 					}
 				}
@@ -381,8 +401,6 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 						}
 						this._lastFeatKey = featKey;
 
-						const area = intvlArea(f.props.currentArea);
-
 						// Captured date from startTime (day-resolution) —
 						// startTime is an integer day count against a custom
 						// app epoch (~1977-09-03), not the Unix epoch, so
@@ -396,7 +414,7 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 						}
 						// Precise recorded time from the activityId cuid, when
 						// decodable — recovers the time-of-day startTime lacks.
-						const actDate = intvlActivityTime(f.props.activityId);
+						const actDate = intvlTrustedActivityTime(f.props.activityId, dayDate);
 						const fmtDay = (d) => d.toLocaleDateString(undefined,
 							{ day: "numeric", month: "short", year: "numeric" });
 						const fmtDateTime = (d) => d.toLocaleString(undefined, {
@@ -415,18 +433,12 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 							whenLine = "Capture date unknown";
 						}
 
-						const swatch =
-							`<span style="display:inline-block;width:10px;` +
-							`height:10px;background:${_safeColor(f.colour, "#3b82f6")};` +
-							`border:1px solid #444;vertical-align:middle"></span>`;
-						// The public tiles carry no username/userId and there's
-						// no public way to resolve one (see intvlActivityTime
-						// comment), so the runId/activityId are dead weight in a
-						// hover — show only what's actually meaningful: the
-						// territory's colour, area, and when it was claimed.
-						const html =
-							`<b>${swatch} ${area}</b> territory<br>` +
-							`${whenLine}`;
+						const owner = intvlOwnerKey(f.props);
+						this._setHighlight(owner);
+						const html = intvlTooltipHtml({ ...f.props, colour: f.colour }, {
+							when: whenLine,
+							stats: intvlOwnerStats(this._tileFeatures.values(), owner),
+						});
 						this._tooltip.setLatLng(latlng).setContent(html);
 						if (!this._tooltip._map) this._tooltip.addTo(map);
 						return;
