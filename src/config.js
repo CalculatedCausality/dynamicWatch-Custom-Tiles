@@ -408,7 +408,7 @@ export const CFG = {
 	// public Mapbox token they need is looked up; it is never stored here.
 	ALLTRAILS_PAGE: "https://www.alltrails.com/explore",
 	ALLTRAILS_TILES:
-		"https://api.mapbox.com/v4/alltrails.at_ways_production,alltrails.at_points_of_interest_production",
+		"https://api.mapbox.com/v4/alltrails.at_ways_production",
 	ALLTRAILS_MIN_ZOOM: 10,
 	ALLTRAILS_MAX_NATIVE_Z: 14,
 	ALLTRAILS_TOKEN_KEY: "dw_alltrails_token",

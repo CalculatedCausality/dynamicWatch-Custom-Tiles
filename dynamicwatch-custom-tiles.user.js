@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.23.0
+// @version      7.23.1
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -382,7 +382,7 @@
     // AllTrails' own map tiles, hosted on Mapbox. The page is where the
     // public Mapbox token they need is looked up; it is never stored here.
     ALLTRAILS_PAGE: "https://www.alltrails.com/explore",
-    ALLTRAILS_TILES: "https://api.mapbox.com/v4/alltrails.at_ways_production,alltrails.at_points_of_interest_production",
+    ALLTRAILS_TILES: "https://api.mapbox.com/v4/alltrails.at_ways_production",
     ALLTRAILS_MIN_ZOOM: 10,
     ALLTRAILS_MAX_NATIVE_Z: 14,
     ALLTRAILS_TOKEN_KEY: "dw_alltrails_token",
@@ -11661,21 +11661,6 @@
     difficult_alpine_hiking: "difficult alpine"
   };
   var HIGHWAYS = { path: "Path", track: "Track", footway: "Footpath", cycleway: "Cycleway", bridleway: "Bridle path", steps: "Steps" };
-  var POIS = {
-    parking: ["P", "#1d4ed8", "Parking"],
-    toilets: ["T", "#6d28d9", "Toilets"],
-    drinking_water: ["W", "#0284c7", "Drinking water"],
-    camp_site: ["C", "#15803d", "Camp site"],
-    caravan_site: ["C", "#15803d", "Caravan site"],
-    picnic_site: ["Pi", "#a16207", "Picnic area"],
-    peak: ["▲", "#57534e", "Peak"],
-    viewpoint: ["V", "#be123c", "Lookout"],
-    information: ["i", "#0f766e", "Information"],
-    trailhead: ["TH", "#b91c1c", "Trailhead"],
-    shelter: ["S", "#a16207", "Shelter"],
-    waterfall: ["F", "#0284c7", "Waterfall"]
-  };
-  var POI_SKIP = /* @__PURE__ */ new Set(["playground", "dam"]);
   function atAccess(props) {
     const p = props || {};
     for (const v of [p.f, p.a, p.ac]) {
@@ -11702,16 +11687,9 @@
     const sub = [kind, net, p.ref ? `marked "${clean2(p.ref, 20)}"` : ""].filter(Boolean).join(" · ");
     return esc`<b>${clean2(p.name, 100) || kind}</b><br>${sub}`;
   }
-  function atPoiHtml(props) {
-    const p = props || {};
-    const def = POIS[p.class] || POIS[p.type];
-    const label = def ? def[2] : clean2(String(p.class || "Place").replace(/_/g, " "), 40);
-    const facts = [
-      p.access && p.access !== "yes" ? `access: ${clean2(p.access, 20)}` : "",
-      p.fee === "yes" ? "fee" : p.fee === "no" ? "free" : "",
-      Number(p.ele) > 0 ? `${Math.round(Number(p.ele))} m` : ""
-    ].filter(Boolean).join(" · ");
-    return esc`<b>${clean2(p.name, 100) || label}</b>` + (p.name ? esc`<br>${label}` : "") + (facts ? esc`<br>${facts}` : "");
+  function atPopupHtml(detailsHtml, latlng) {
+    const url = latlng && Number.isFinite(latlng.lat) && Number.isFinite(latlng.lng) ? allTrailsExploreUrl(allTrailsViewAround(latlng.lat, latlng.lng, 3)) : "";
+    return `<div class="dw-abw-pop">${detailsHtml}` + (url ? esc`<div><a href="${url}" target="_blank" rel="noopener noreferrer">See trails here on AllTrails ↗</a></div>` : "") + `</div>`;
   }
   function atToElements(layerName, props, geometryType, rings) {
     if (layerName === "at_routes_production" && geometryType === 2) {
@@ -11719,11 +11697,6 @@
     }
     if (layerName === "at_osm_trail_segments_production" && geometryType === 2) {
       return rings.filter((r) => r.length > 1).map((r) => ({ type: "way", geometry: r, tags: props, kind: "segment" }));
-    }
-    if (layerName === "at_points_of_interest_production" && geometryType === 1 && rings[0] && rings[0][0]) {
-      if (POI_SKIP.has(props.class) || props.access === "private" || props.access === "customers") return null;
-      const p = rings[0][0];
-      return [{ type: "node", lat: p.lat, lon: p.lon, tags: props, _id: "at" + props.id }];
     }
     return null;
   }
@@ -11829,14 +11802,6 @@
         if (note && note.parentNode) note.remove();
         note = null;
       };
-      const poiIcon = (def) => L.divIcon({
-        className: "dw-at-icon",
-        html: `<span class="dw-at-poi" style="background:${def[1]}">${_escHtml(def[0])}</span>`,
-        iconSize: [18, 18],
-        iconAnchor: [9, 9],
-        popupAnchor: [0, -9],
-        tooltipAnchor: [0, -9]
-      });
       const obtain = (layer2, fresh) => lookupAllTrailsToken((tok, reason) => {
         token = tok;
         if (!layer2._map) return;
@@ -11870,7 +11835,14 @@
         onRemove: () => hideNote(),
         toElements: atToElements,
         render: (group, elements, tz) => {
-          const line = (el, style, html) => L.polyline(el.geometry.map((g) => [g.lat, g.lon]), { pane: PANE2, ...style }).bindTooltip(html, { className: "dw-abw-tip", sticky: true }).addTo(group);
+          const line = (el, style, html) => {
+            const latlngs = el.geometry.map((g) => [g.lat, g.lon]);
+            L.polyline(latlngs, { pane: PANE2, interactive: false, ...style }).addTo(group);
+            let clicked = null;
+            L.polyline(latlngs, { pane: PANE2, color: "#000", weight: 14, opacity: 0 }).on("click", (e) => {
+              clicked = e.latlng;
+            }).bindTooltip(html, { className: "dw-abw-tip", sticky: true }).bindPopup(() => atPopupHtml(html, clicked), { className: "dw-abw-popup", maxWidth: 280, autoPan: false }).addTo(group);
+          };
           if (tz >= 12) for (const el of elements) {
             if (el.kind !== "segment") continue;
             const closed = atAccess(el.tags);
@@ -11885,14 +11857,6 @@
             if (el.kind !== "route") continue;
             L.polyline(el.geometry.map((g) => [g.lat, g.lon]), { pane: PANE2, color: "#fff", weight: 6, opacity: 0.8, interactive: false }).addTo(group);
             line(el, { color: ROUTE_COLORS[el.tags.type] || "#15803d", weight: 3, opacity: 0.95 }, atRouteHtml(el.tags));
-          }
-          if (tz >= 13) for (const el of elements) {
-            if (el.type !== "node") continue;
-            const def = POIS[el.tags.class] || POIS[el.tags.type];
-            if (!def) continue;
-            const marker = L.marker([el.lat, el.lon], { icon: poiIcon(def), pane: PANE2, keyboard: false });
-            marker._dwData = { name: clean2(el.tags.name, 100) || def[2], label: "", url: "", color: def[1], radius: 6 };
-            marker.bindTooltip(atPoiHtml(el.tags), { className: "dw-abw-tip", direction: "top" }).addTo(group);
           }
         }
       });
@@ -15351,8 +15315,6 @@
         ".dw-qpws-tip b { font-weight: 700; }",
         ".dw-infra-tip { font-size: 11px; line-height: 1.4; }",
         ".dw-abw-icon { background: none; border: 0; }",
-        ".dw-at-icon { background: none; border: 0; }",
-        ".dw-at-poi { display: flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.6); box-sizing: border-box; color: #fff; font: 700 9px/1 system-ui, sans-serif; }",
         ".dw-at-warn { color: #b91c1c; font-weight: 600; }",
         ".dw-at-note { position: absolute; left: 50%; bottom: 56px; transform: translateX(-50%); z-index: 1000; max-width: 340px; background: rgba(255,255,255,.97); border: 1px solid #b45309; border-radius: 8px; padding: 8px 12px; font-size: 12px; line-height: 1.4; box-shadow: 0 2px 8px rgba(0,0,0,.25); }",
         ".dw-abw-pin { display: block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.6); box-sizing: border-box; }",
@@ -15866,7 +15828,7 @@
         allTrailsChunkUrls,
         allTrailsTokenIn,
         atAccess,
-        atPoiHtml,
+        atPopupHtml,
         atRouteHtml,
         atSegmentHtml,
         atToElements,

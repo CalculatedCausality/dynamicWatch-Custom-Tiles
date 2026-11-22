@@ -1,21 +1,20 @@
 import { CFG } from "../config.js";
 import { LayerProvider } from "../layers/provider-factories.js";
 import { makeVectorTileLayer } from "../layers/vector-tile-layer.js";
-import { allTrailsChunkUrls, allTrailsTokenIn } from "../utils/alltrails.js";
+import { allTrailsChunkUrls, allTrailsExploreUrl, allTrailsTokenIn, allTrailsViewAround } from "../utils/alltrails.js";
 import { _escHtml, esc } from "../utils/html.js";
 import { gmGet } from "../utils/http.js";
 
 /* -- AllTrails trail map --------------------------------------------------
  * The trail network AllTrails' own map draws, from the vector tiles it
- * hosts on Mapbox (tilesets at_ways_production and
- * at_points_of_interest_production):
+ * hosts on Mapbox (tileset at_ways_production):
  *   at_routes_production             named, waymarked routes (z3+)
  *   at_osm_trail_segments_production every path and track (z11+), with
  *                                    short keys: n name, h highway type,
  *                                    s surface, sac difficulty, a/ac
  *                                    access, l length in km
- *   at_points_of_interest_production trailheads, parking, toilets, water,
- *                                    camps, peaks…
+ * Trails only: AllTrails' places tileset (parking, toilets, water…) is
+ * deliberately not read; it buried the trails in parking pins.
  * This is the map AllTrails draws under its trail listings. The listings
  * themselves (ratings, reviews, photos) come from a separate search
  * service and are not read here.
@@ -37,15 +36,6 @@ const SAC = {
 	alpine_hiking: "alpine", demanding_alpine_hiking: "demanding alpine", difficult_alpine_hiking: "difficult alpine",
 };
 const HIGHWAYS = { path: "Path", track: "Track", footway: "Footpath", cycleway: "Cycleway", bridleway: "Bridle path", steps: "Steps" };
-const POIS = {
-	parking: ["P", "#1d4ed8", "Parking"], toilets: ["T", "#6d28d9", "Toilets"], drinking_water: ["W", "#0284c7", "Drinking water"],
-	camp_site: ["C", "#15803d", "Camp site"], caravan_site: ["C", "#15803d", "Caravan site"], picnic_site: ["Pi", "#a16207", "Picnic area"],
-	peak: ["▲", "#57534e", "Peak"], viewpoint: ["V", "#be123c", "Lookout"], information: ["i", "#0f766e", "Information"],
-	trailhead: ["TH", "#b91c1c", "Trailhead"], shelter: ["S", "#a16207", "Shelter"], waterfall: ["F", "#0284c7", "Waterfall"],
-};
-// Classes that are noise on a trail map.
-const POI_SKIP = new Set(["playground", "dam"]);
-
 // "private" / "no" / "permit" when a path is not open to walk, else "".
 export function atAccess(props) {
 	const p = props || {};
@@ -78,16 +68,15 @@ export function atRouteHtml(props) {
 	return esc`<b>${clean(p.name, 100) || kind}</b><br>${sub}`;
 }
 
-export function atPoiHtml(props) {
-	const p = props || {};
-	const def = POIS[p.class] || POIS[p.type];
-	const label = def ? def[2] : clean(String(p.class || "Place").replace(/_/g, " "), 40);
-	const facts = [
-		p.access && p.access !== "yes" ? `access: ${clean(p.access, 20)}` : "",
-		p.fee === "yes" ? "fee" : p.fee === "no" ? "free" : "",
-		Number(p.ele) > 0 ? `${Math.round(Number(p.ele))} m` : "",
-	].filter(Boolean).join(" · ");
-	return esc`<b>${clean(p.name, 100) || label}</b>` + (p.name ? esc`<br>${label}` : "") + (facts ? esc`<br>${facts}` : "");
+// Pop-up for a clicked trail: its details and a link to AllTrails' Explore
+// page for about 3 km around the click. The tiles identify a trail by its
+// OpenStreetMap id, not by an AllTrails page, so the link is to the place.
+export function atPopupHtml(detailsHtml, latlng) {
+	const url = latlng && Number.isFinite(latlng.lat) && Number.isFinite(latlng.lng)
+		? allTrailsExploreUrl(allTrailsViewAround(latlng.lat, latlng.lng, 3)) : "";
+	return `<div class="dw-abw-pop">${detailsHtml}` +
+		(url ? esc`<div><a href="${url}" target="_blank" rel="noopener noreferrer">See trails here on AllTrails ↗</a></div>` : "") +
+		`</div>`;
 }
 
 // Tile features → the elements the shared vector-tile layer draws.
@@ -97,11 +86,6 @@ export function atToElements(layerName, props, geometryType, rings) {
 	}
 	if (layerName === "at_osm_trail_segments_production" && geometryType === 2) {
 		return rings.filter((r) => r.length > 1).map((r) => ({ type: "way", geometry: r, tags: props, kind: "segment" }));
-	}
-	if (layerName === "at_points_of_interest_production" && geometryType === 1 && rings[0] && rings[0][0]) {
-		if (POI_SKIP.has(props.class) || props.access === "private" || props.access === "customers") return null;
-		const p = rings[0][0];
-		return [{ type: "node", lat: p.lat, lon: p.lon, tags: props, _id: "at" + props.id }];
 	}
 	return null;
 }
@@ -177,11 +161,6 @@ export class AllTrailsLayerProvider extends LayerProvider {
 			L.DomEvent.disableClickPropagation(note);
 		};
 		const hideNote = () => { if (note && note.parentNode) note.remove(); note = null; };
-		const poiIcon = (def) => L.divIcon({
-			className: "dw-at-icon",
-			html: `<span class="dw-at-poi" style="background:${def[1]}">${_escHtml(def[0])}</span>`,
-			iconSize: [18, 18], iconAnchor: [9, 9], popupAnchor: [0, -9], tooltipAnchor: [0, -9],
-		});
 		const obtain = (layer, fresh) => lookupAllTrailsToken((tok, reason) => {
 			token = tok;
 			if (!layer._map) return;
@@ -211,8 +190,19 @@ export class AllTrailsLayerProvider extends LayerProvider {
 			onRemove: () => hideNote(),
 			toElements: atToElements,
 			render: (group, elements, tz) => {
-				const line = (el, style, html) => L.polyline(el.geometry.map((g) => [g.lat, g.lon]), { pane: PANE, ...style })
-					.bindTooltip(html, { className: "dw-abw-tip", sticky: true }).addTo(group);
+				// The drawn line is thin, so a wide invisible one on top takes
+				// the hover and the click. A click opens a pop-up whose link
+				// goes to AllTrails' Explore page around the clicked spot.
+				const line = (el, style, html) => {
+					const latlngs = el.geometry.map((g) => [g.lat, g.lon]);
+					L.polyline(latlngs, { pane: PANE, interactive: false, ...style }).addTo(group);
+					let clicked = null;
+					L.polyline(latlngs, { pane: PANE, color: "#000", weight: 14, opacity: 0 })
+						.on("click", (e) => { clicked = e.latlng; })
+						.bindTooltip(html, { className: "dw-abw-tip", sticky: true })
+						.bindPopup(() => atPopupHtml(html, clicked), { className: "dw-abw-popup", maxWidth: 280, autoPan: false })
+						.addTo(group);
+				};
 				// Every path and track: thin, and only once zoomed in enough to tell them apart.
 				if (tz >= 12) for (const el of elements) {
 					if (el.kind !== "segment") continue;
@@ -227,14 +217,6 @@ export class AllTrailsLayerProvider extends LayerProvider {
 					if (el.kind !== "route") continue;
 					L.polyline(el.geometry.map((g) => [g.lat, g.lon]), { pane: PANE, color: "#fff", weight: 6, opacity: 0.8, interactive: false }).addTo(group);
 					line(el, { color: ROUTE_COLORS[el.tags.type] || "#15803d", weight: 3, opacity: 0.95 }, atRouteHtml(el.tags));
-				}
-				if (tz >= 13) for (const el of elements) {
-					if (el.type !== "node") continue;
-					const def = POIS[el.tags.class] || POIS[el.tags.type];
-					if (!def) continue;
-					const marker = L.marker([el.lat, el.lon], { icon: poiIcon(def), pane: PANE, keyboard: false });
-					marker._dwData = { name: clean(el.tags.name, 100) || def[2], label: "", url: "", color: def[1], radius: 6 };
-					marker.bindTooltip(atPoiHtml(el.tags), { className: "dw-abw-tip", direction: "top" }).addTo(group);
 				}
 			},
 		});

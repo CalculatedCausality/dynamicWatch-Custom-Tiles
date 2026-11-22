@@ -87,7 +87,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 | Layer | Notes |
 |---|---|
 | **Aussie Bushwalking** | The walks in view from [aussiebushwalking.com](https://www.aussiebushwalking.com/)'s own walk map: a line per recorded track and a pin per walk, coloured by difficulty. Hover for distance, difficulty and duration; click for the description and a link to the walk's page. Appears from zoom 10. Walks are contributed by the site's members; the site's terms allow personal use only. |
-| **AllTrails Trail Map** | The trail network AllTrails' own map draws: named, waymarked routes (green for walking, brown for mountain biking, blue for cycling), every path and track as a thin dashed line (red where it is private, closed or needs a permit), and trailheads, parking, toilets, drinking water, camp sites and peaks. Hover for the name, surface, difficulty and access. Routes appear from zoom 10, paths from 12, places from 13. This is AllTrails' base map, drawn from OpenStreetMap data; AllTrails' own trail listings (ratings, reviews, photos) are not shown. The first time, the script reads AllTrails' site from your browser to find the map key it needs; if AllTrails asks for a human check, open alltrails.com once and switch the layer off and on |
+| **AllTrails Trail Map** | The trail network AllTrails' own map draws: named, waymarked routes (green for walking, brown for mountain biking, blue for cycling), and every path and track as a thin dashed line (red where it is private, closed or needs a permit). Trails only: no parking or other place pins. Hover for the name, surface, difficulty and access; click a trail for a link that opens AllTrails on that spot. Routes appear from zoom 10, paths from 12. This is AllTrails' base map, drawn from OpenStreetMap data; AllTrails' own trail listings (ratings, reviews, photos) are not shown. The first time, the script reads AllTrails' site from your browser to find the map key it needs; if AllTrails asks for a human check, open alltrails.com once and switch the layer off and on |
 
 **Mining**
 
@@ -334,6 +334,11 @@ bash tests/run.sh --ci   # plain text output
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
 - **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, refreshing names, Build Up Ahead (adding, one-step Undo, replacing only its own waypoints), list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.23.1
+
+- **AllTrails Trail Map shows trails only.** The parking, toilet and other place pins are gone.
+- **Click a trail** for a pop-up with a link that opens AllTrails on that spot. Trails are also easier to hover and click.
 
 ### Release notes — 7.23.0
 

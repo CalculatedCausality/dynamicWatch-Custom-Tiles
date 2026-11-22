@@ -1555,15 +1555,23 @@ t("allTrailsChunkUrls lists the page's script chunks once each, https only", () 
 	eq(dw.allTrailsChunkUrls("").length, 0);
 });
 
-t("atToElements keeps routes, trail sections and public POIs", () => {
+t("atToElements keeps routes and trail sections, nothing else", () => {
 	const ring = [{ lat: -26.6, lon: 152.8 }, { lat: -26.61, lon: 152.81 }];
 	eq(dw.atToElements("at_routes_production", { name: "A" }, 2, [ring])[0].kind, "route");
 	eq(dw.atToElements("at_osm_trail_segments_production", { h: "path" }, 2, [ring, [ring[0]]]).length, 1, "a one-point piece is dropped");
-	const poi = dw.atToElements("at_points_of_interest_production", { id: "node/1", class: "toilets" }, 1, [[ring[0]]]);
-	eq(poi[0]._id, "atnode/1");
-	eq(dw.atToElements("at_points_of_interest_production", { id: "n", class: "parking", access: "customers" }, 1, [[ring[0]]]), null);
-	eq(dw.atToElements("at_points_of_interest_production", { id: "n", class: "playground" }, 1, [[ring[0]]]), null);
+	eq(dw.atToElements("at_points_of_interest_production", { id: "node/1", class: "parking" }, 1, [[ring[0]]]), null, "places are not drawn");
 	eq(dw.atToElements("road", {}, 2, [ring]), null, "Mapbox's own layers are ignored");
+});
+
+t("atPopupHtml links to AllTrails around the clicked spot", () => {
+	const html = dw.atPopupHtml("<b>Piccabeen Circuit</b>", { lat: -26.62, lng: 152.87 });
+	assert(html.includes("<b>Piccabeen Circuit</b>"), html);
+	const href = /href="([^"]+)"/.exec(html)[1].replace(/&amp;/g, "&");
+	assert(href.startsWith("https://www.alltrails.com/explore?b_tl_lat=-26.6"), href);
+	const q = new URL(href).searchParams;
+	assert(Number(q.get("b_tl_lat")) > -26.62 && Number(q.get("b_br_lat")) < -26.62 &&
+		Number(q.get("b_tl_lng")) < 152.87 && Number(q.get("b_br_lng")) > 152.87, "the click is inside the box");
+	assert(!dw.atPopupHtml("<b>x</b>", null).includes("href"), "no link without a spot");
 });
 
 t("AllTrails tooltips: access warnings, plain names, escaped tile text", () => {
@@ -1576,10 +1584,8 @@ t("AllTrails tooltips: access warnings, plain names, escaped tile text", () => {
 	eq(dw.atSegmentHtml({ h: "track" }), "<b>Track</b>");
 	const route = dw.atRouteHtml({ name: "Piccabeen Circuit", type: "hiking", network: "lwn", ref: "2" });
 	assert(route.includes("<b>Piccabeen Circuit</b>") && route.includes('Walking route · local route · marked &quot;2&quot;'), route);
-	const poi = dw.atPoiHtml({ class: "camp_site", name: "Thilba Thalba Walkers Camp", fee: "no", ele: "410" });
-	assert(poi.includes("Camp site") && poi.includes("free · 410 m"), poi);
-	for (const html of [dw.atSegmentHtml({ n: "<b>x" }), dw.atRouteHtml({ name: "<b>x", network: "<i>" }), dw.atPoiHtml({ name: "<b>x", class: "<u>" })]) {
-		assert(html.includes("&lt;b&gt;x") && !html.includes("<i>") && !html.includes("<u>"), html);
+	for (const html of [dw.atSegmentHtml({ n: "<b>x" }), dw.atRouteHtml({ name: "<b>x", network: "<i>" })]) {
+		assert(html.includes("&lt;b&gt;x") && !html.includes("<i>"), html);
 	}
 });
 

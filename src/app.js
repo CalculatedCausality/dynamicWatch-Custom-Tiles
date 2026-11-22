@@ -20,7 +20,7 @@ import {
 } from './providers/qld-cadastre.js';
 import { _parseAuStreetAddress, _pickJurisdiction } from './providers/cadastre-au.js';
 import { allTrailsChunkUrls, allTrailsExploreUrl, allTrailsTokenIn, allTrailsViewAround } from './utils/alltrails.js';
-import { atAccess, atPoiHtml, atRouteHtml, atSegmentHtml, atToElements } from './providers/alltrails.js';
+import { atAccess, atPopupHtml, atRouteHtml, atSegmentHtml, atToElements } from './providers/alltrails.js';
 import { _formatLandUseTooltip, _formatStateLandTooltip, _landArea, _landUseClass, stateLandDynamicLayers, STATE_LAND_TENURES } from './providers/qld-land.js';
 import { _formatMineTooltip, _formatShaftTooltip, _formatLeaseTooltip, _mineYear, _miningSectionHtml } from './providers/qld-mining.js';
 import { _quadToMatrix3d, _triAffine, _histMapSheet, _histMapsSectionHtml } from './providers/qld-historical-maps.js';
@@ -118,7 +118,7 @@ export function bootUserscript() {
 			hexAlpha, pointInRing, prepareLayers,
 			intvlActivityTime, intvlAgo, intvlArea, intvlOwnerKey, intvlOwnerStats, intvlRunLine, intvlSharedNames, intvlTooltipHtml, intvlTrustedActivityTime,
 			allTrailsExploreUrl, allTrailsViewAround, allTrailsChunkUrls, allTrailsTokenIn,
-			atAccess, atPoiHtml, atRouteHtml, atSegmentHtml, atToElements,
+			atAccess, atPopupHtml, atRouteHtml, atSegmentHtml, atToElements,
 			_cadVal, _escHtml, esc, _safeColor, _fmtPrice, _fmtDate,
 			_slugify, _othStreetTypeSlug, _othCanonicalUrlFromLocation,
 			_formatCadastreTooltip, _formatAddressLine,
