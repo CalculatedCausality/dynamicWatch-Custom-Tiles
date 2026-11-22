@@ -197,6 +197,8 @@ Right-clicking the map (or placing a waypoint) shows a popup with the usual dyna
 
 The coordinate at the top of the popup is also click-to-copy — one tap puts `lat,lng` on your clipboard.
 
+The same popup has an **AllTrails** button. It opens AllTrails' own Explore page on the area you are looking at (or about 10 km around the spot if the map is zoomed far in or out). It is a plain link: the script reads nothing from AllTrails, which does not allow automated access to its trail data.
+
 ### Layer memory
 
 Your last active base layer and every active overlay are saved per-browser and restored when you reload. Layer-manager preferences (which layers are hidden from the switcher) and collapsed-group state also persist.
@@ -330,6 +332,10 @@ bash tests/run.sh --ci   # plain text output
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
 - **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, refreshing names, Build Up Ahead (adding, one-step Undo, replacing only its own waypoints), list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.23.0
+
+- New **AllTrails** button in the right-click / long-press popup: opens AllTrails on the area you are looking at.
 
 ### Release notes — 7.22.0
 

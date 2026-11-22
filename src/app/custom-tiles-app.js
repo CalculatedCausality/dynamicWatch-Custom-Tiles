@@ -57,6 +57,7 @@ import { AussieBushwalkingLayerProvider } from "../providers/aussie-bushwalking.
 import { createQldEnvironmentProviders } from "../providers/qld-environment.js";
 import { _miningSectionHtml, createQldMiningProviders, miningIdentifySources } from "../providers/qld-mining.js";
 import { createQldLandProviders, landIdentifySources } from "../providers/qld-land.js";
+import { allTrailsExploreUrl, allTrailsViewAround } from "../utils/alltrails.js";
 import { RoutePoiController } from "../providers/route-pois.js";
 import {
 	HistoricalMapsIndexProvider,
@@ -702,6 +703,32 @@ export class CustomTilesApp {
 				window.open(url, "_blank", "noopener,noreferrer");
 			});
 			pod.appendChild(btn);
+
+			// "AllTrails" button — opens AllTrails' own Explore page on the
+			// area around this spot. A plain link; nothing is read from AllTrails.
+			const at = document.createElement("button");
+			at.className = "dw-sv-btn dw-at-btn";
+			at.type = "button";
+			at.setAttribute("aria-label", "Find trails around here on AllTrails");
+			at.innerHTML =
+				'<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+				'<path d="M9.5 4 2 20h5l2.5-5.5L12 20h10L14.5 6l-2.4 4.6z"/></svg>' +
+				"<span>AllTrails</span>";
+			at.addEventListener("click", () => {
+				const curLat = Number(pod.dataset.dwLat);
+				const curLng = Number(pod.dataset.dwLng);
+				if (!isFinite(curLat) || !isFinite(curLng)) return;
+				// Search the map view when it is a sensible size (2–60 km
+				// across); otherwise about 10 km around the spot.
+				const b = map.getBounds();
+				const acrossKm = b.getNorthWest().distanceTo(b.getNorthEast()) / 1000;
+				const view = acrossKm >= 2 && acrossKm <= 60 && b.contains([curLat, curLng])
+					? { north: b.getNorth(), south: b.getSouth(), west: b.getWest(), east: b.getEast() }
+					: allTrailsViewAround(curLat, curLng, 10);
+				const url = allTrailsExploreUrl(view);
+				if (url) window.open(url, "_blank", "noopener,noreferrer");
+			});
+			pod.appendChild(at);
 		});
 	}
 

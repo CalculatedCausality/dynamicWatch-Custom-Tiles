@@ -46,6 +46,7 @@ Current modules:
 - `src/ui/layer-manager-ui.js` — layer archive/manage panel injected into the Leaflet layer control.
 - `src/utils/html.js` — shared escaping, safe-colour, price, and date formatting helpers.
 - `src/utils/http.js` — GM_xmlhttpRequest wrappers, abort wiring, request coalescing, and persistent TTL cache helpers.
+- `src/utils/alltrails.js` — builds the link to AllTrails' Explore page for a map view (link-out only).
 - `src/utils/intvl.js` — INTVL formatting and geometry helpers.
 - `src/utils/mvt.js` — minimal MVT/PBF parsing and INTVL tile preprocessing helpers.
 - `src/utils/tile-geometry.js` — pure tile projection helpers.

@@ -1514,6 +1514,23 @@ t("stateLandDynamicLayers filters to the State's tenures and colours each", () =
 	for (const u of layer.drawingInfo.renderer.uniqueValueInfos) eq(u.symbol.color.length, 4);
 });
 
+t("allTrailsExploreUrl builds AllTrails' bounding-box link and refuses bad views", () => {
+	eq(dw.allTrailsExploreUrl({ north: -26.55, south: -26.7, west: 152.8, east: 153 }),
+		"https://www.alltrails.com/explore?b_tl_lat=-26.55000&b_tl_lng=152.80000&b_br_lat=-26.70000&b_br_lng=153.00000");
+	for (const bad of [null, {}, { north: 1, south: 2, west: 0, east: 1 }, { north: 2, south: 1, west: 1, east: 0 },
+		{ north: 95, south: 1, west: 0, east: 1 }, { north: "x", south: 1, west: 0, east: 1 }]) {
+		eq(dw.allTrailsExploreUrl(bad), "", JSON.stringify(bad));
+	}
+});
+
+t("allTrailsViewAround gives a box of the asked width around a point", () => {
+	const v = dw.allTrailsViewAround(-26.62, 152.88, 10);
+	assert(Math.abs((v.north - v.south) * 111.32 - 10) < 0.01, "height " + (v.north - v.south));
+	assert(Math.abs((v.east - v.west) * 111.32 * Math.cos(26.62 * Math.PI / 180) - 10) < 0.01, "width");
+	assert(v.north > -26.62 && v.south < -26.62 && v.west < 152.88 && v.east > 152.88, "not centred");
+	assert(dw.allTrailsExploreUrl(v).startsWith("https://www.alltrails.com/explore?b_tl_lat="), "usable");
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

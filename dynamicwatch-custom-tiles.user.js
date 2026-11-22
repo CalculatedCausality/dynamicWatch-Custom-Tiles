@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.22.0
+// @version      7.23.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -11582,6 +11582,27 @@
     return { StateLandLayerProvider: StateLandLayerProvider2, LandUseLayerProvider: LandUseLayerProvider2 };
   }
 
+  // src/utils/alltrails.js
+  function allTrailsExploreUrl(view) {
+    const v = view || {};
+    const n = Number(v.north), s = Number(v.south), w = Number(v.west), e = Number(v.east);
+    if (![n, s, w, e].every(Number.isFinite) || n <= s || e <= w) return "";
+    if (n > 90 || s < -90 || w < -180 || e > 180) return "";
+    const f = (x) => x.toFixed(5);
+    return `https://www.alltrails.com/explore?b_tl_lat=${f(n)}&b_tl_lng=${f(w)}&b_br_lat=${f(s)}&b_br_lng=${f(e)}`;
+  }
+  function allTrailsViewAround(lat, lng, km) {
+    const half = (km || 10) / 2;
+    const dLat = half / 111.32;
+    const dLng = half / (111.32 * Math.max(0.1, Math.cos(lat * Math.PI / 180)));
+    return {
+      north: Math.min(90, lat + dLat),
+      south: Math.max(-90, lat - dLat),
+      west: Math.max(-180, lng - dLng),
+      east: Math.min(180, lng + dLng)
+    };
+  }
+
   // src/utils/route-geometry.js
   var EARTH_R = 63710088e-1;
   var RAD = Math.PI / 180;
@@ -14671,6 +14692,22 @@
           window.open(url, "_blank", "noopener,noreferrer");
         });
         pod.appendChild(btn);
+        const at = document.createElement("button");
+        at.className = "dw-sv-btn dw-at-btn";
+        at.type = "button";
+        at.setAttribute("aria-label", "Find trails around here on AllTrails");
+        at.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M9.5 4 2 20h5l2.5-5.5L12 20h10L14.5 6l-2.4 4.6z"/></svg><span>AllTrails</span>';
+        at.addEventListener("click", () => {
+          const curLat = Number(pod.dataset.dwLat);
+          const curLng = Number(pod.dataset.dwLng);
+          if (!isFinite(curLat) || !isFinite(curLng)) return;
+          const b = map.getBounds();
+          const acrossKm = b.getNorthWest().distanceTo(b.getNorthEast()) / 1e3;
+          const view = acrossKm >= 2 && acrossKm <= 60 && b.contains([curLat, curLng]) ? { north: b.getNorth(), south: b.getSouth(), west: b.getWest(), east: b.getEast() } : allTrailsViewAround(curLat, curLng, 10);
+          const url = allTrailsExploreUrl(view);
+          if (url) window.open(url, "_blank", "noopener,noreferrer");
+        });
+        pod.appendChild(at);
       });
     }
     // Touch devices have no hover, so the Cadastre / QPWS identify
@@ -15522,6 +15559,8 @@
         intvlSharedNames,
         intvlTooltipHtml,
         intvlTrustedActivityTime,
+        allTrailsExploreUrl,
+        allTrailsViewAround,
         _cadVal,
         _escHtml,
         esc,
