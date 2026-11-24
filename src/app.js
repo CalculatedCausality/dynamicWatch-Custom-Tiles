@@ -19,6 +19,7 @@ import {
 	_slugify,
 } from './providers/qld-cadastre.js';
 import { _parseAuStreetAddress, _pickJurisdiction } from './providers/cadastre-au.js';
+import { QldTokenManager } from './tokens.js';
 import { allTrailsChunkUrls, allTrailsExploreUrl, allTrailsTokenIn, allTrailsViewAround } from './utils/alltrails.js';
 import { atAccess, atPopupHtml, atRouteHtml, atSegmentHtml, atToElements } from './providers/alltrails.js';
 import { _formatLandUseTooltip, _formatStateLandTooltip, _landArea, _landUseClass, stateLandDynamicLayers, STATE_LAND_TENURES } from './providers/qld-land.js';
@@ -110,7 +111,7 @@ export function bootUserscript() {
 
 	if (globalThis.__DW_TEST_EXPORTS__) {
 		globalThis.__dw = {
-			CFG, DW_LAYER_GROUPS, DW_OVERLAY_GROUPS,
+			CFG, DW_LAYER_GROUPS, DW_OVERLAY_GROUPS, QldTokenManager,
 			tileToBBox4326, tileToBBox3857, utfGridCellToLatLng,
 			_overzoomPlacement,
 			mvtDecode, parseLayer, parseValue, parseFeature,

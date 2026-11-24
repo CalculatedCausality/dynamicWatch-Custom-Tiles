@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.23.1
+// @version      7.23.2
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -14371,8 +14371,10 @@
         /window\._csrf\s*=\s*["']([^"']+)["']/,
         /['"_]csrf['"]\s*:\s*["']([^"']{20,80})["']/,
         /csrfToken\s*:\s*["']([^"']{20,80})["']/,
-        /<input[^>]+name=["']_csrf["'][^>]+value=["']([^"']+)["']/i,
-        /<input[^>]+value=["']([^"']+)["'][^>]+name=["']_csrf["']/i
+        // The page's hidden field, named or (since late 2026) only id'd
+        // "_csrf", in either attribute order.
+        /<input[^>]+(?:name|id)=["']_csrf["'][^>]+value=["']([^"']+)["']/i,
+        /<input[^>]+value=["']([^"']+)["'][^>]+(?:name|id)=["']_csrf["']/i
       ];
       for (const p of patterns) {
         const m = html.match(p);
@@ -15798,6 +15800,7 @@
         CFG,
         DW_LAYER_GROUPS,
         DW_OVERLAY_GROUPS,
+        QldTokenManager,
         tileToBBox4326,
         tileToBBox3857,
         utfGridCellToLatLng,

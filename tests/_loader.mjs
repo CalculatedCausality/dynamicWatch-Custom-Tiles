@@ -13,7 +13,7 @@ const SCRIPT_PATH = path.join(HERE, "..", "dynamicwatch-custom-tiles.user.js");
 
 const HELPERS = [
 	// config/grouping
-	"CFG", "DW_LAYER_GROUPS", "DW_OVERLAY_GROUPS",
+	"CFG", "DW_LAYER_GROUPS", "DW_OVERLAY_GROUPS", "QldTokenManager",
 	// tile geometry
 	"tileToBBox4326", "tileToBBox3857", "utfGridCellToLatLng",
 	"_overzoomPlacement",

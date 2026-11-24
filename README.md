@@ -335,6 +335,10 @@ bash tests/run.sh --ci   # plain text output
 - **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, refreshing names, Build Up Ahead (adding, one-step Undo, replacing only its own waypoints), list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
 
+### Release notes — 7.23.2
+
+- Fixed: **QLD Globe** imagery stayed blank. The QLD Globe site changed how its page carries the security code the script needs to get an access token, so no token was issued.
+
 ### Release notes — 7.23.1
 
 - **AllTrails Trail Map shows trails only.** The parking, toilet and other place pins are gone.

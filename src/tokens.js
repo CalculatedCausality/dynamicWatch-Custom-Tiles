@@ -198,8 +198,10 @@ export class QldTokenManager extends TokenManagerBase {
 			/window\._csrf\s*=\s*["']([^"']+)["']/,
 			/['"_]csrf['"]\s*:\s*["']([^"']{20,80})["']/,
 			/csrfToken\s*:\s*["']([^"']{20,80})["']/,
-			/<input[^>]+name=["']_csrf["'][^>]+value=["']([^"']+)["']/i,
-			/<input[^>]+value=["']([^"']+)["'][^>]+name=["']_csrf["']/i,
+			// The page's hidden field, named or (since late 2026) only id'd
+			// "_csrf", in either attribute order.
+			/<input[^>]+(?:name|id)=["']_csrf["'][^>]+value=["']([^"']+)["']/i,
+			/<input[^>]+value=["']([^"']+)["'][^>]+(?:name|id)=["']_csrf["']/i,
 		];
 		for (const p of patterns) {
 			const m = html.match(p);

@@ -1589,6 +1589,17 @@ t("AllTrails tooltips: access warnings, plain names, escaped tile text", () => {
 	}
 });
 
+t("QLD Globe security code is found in the page's hidden field however it is marked", () => {
+	const code = "it2QrstARA9863ac5b4403aa4b62b84551a677b7f48abcdefg";
+	const Q = dw.QldTokenManager;
+	// The live page since late 2026: id only, no name.
+	eq(Q._csrfFromHtml(`<input id="_csrf" type="hidden" value="${code}">`), code);
+	eq(Q._csrfFromHtml(`<input type="hidden" value="${code}" id="_csrf">`), code);
+	eq(Q._csrfFromHtml(`<input type="hidden" name="_csrf" value="${code}">`), code, "the older name form still works");
+	eq(Q._csrfFromHtml(`<input id="other" value="${code}">`), null);
+	eq(Q._xsrfFromSetCookie(`Set-Cookie: language=en; Path=/\r\nset-cookie: XSRF-TOKEN=${encodeURIComponent(code)}; Path=/`), code);
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —
