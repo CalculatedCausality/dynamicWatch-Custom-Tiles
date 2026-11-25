@@ -103,6 +103,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 | Layer | Notes |
 |---|---|
 | **Historic Map Sheets** | Footprint index of QLD's scanned historical maps — parish, town, topographic (incl. 1:4,752 goldfield sheets that plot individual shafts), and exploration series, 1860s–2012, filtered to local scales. **Right-click** (or long-press) a spot and the location menu lists the sheets covering it, each with a link to the scan and an **"Overlay ▦"** action that superimposes that scan on the live map. It warps through a **3×3 grid of draggable control points** (corners *plus* edge-midpoints and centre) so you can rubber-sheet out local paper/scan distortion and line old shaft/mine symbols up with real-world positions Your alignment is remembered per sheet in the browser (the 25 most recent), and **Hide points** clears the handles away so a route can be drawn over the sheet |
+| **Survey Marks** | Queensland's ~124,000 survey control marks (brass plaques, star pickets, bolts in concrete, trig stations), coloured by condition: green good, orange not found, yellow disturbed, damaged or unstable; destroyed marks are left out. Hover for the mark number and name, type, street, surveyed height above sea level, condition and last visit; right-click (or long-press) a spot for the same with a link to the mark's PDF survey report, where there is one. Appears from zoom 13 (street level) |
 
 **Heatmaps**
 
@@ -158,7 +159,7 @@ A few layers show inline tooltips on hover:
 - **State Land** — name, kind of tenure, lot/plan, area, and locality
 - **Land Use** — land-use class, national code, and year mapped
 
-With any mining overlay, State Land or Land Use on, **right-click** (or long-press on a phone) a spot and the location menu lists everything recorded there, not only the one under the pointer.
+With any mining overlay, State Land, Land Use or Survey Marks on, **right-click** (or long-press on a phone) a spot and the location menu lists everything recorded there, not only the one under the pointer.
 - **INTVL Global Map** — the runner's name, level and city, territory size, the claiming run's distance, time and pace, when it was captured, and how much that runner holds on screen
 
 ### POIs along your route
@@ -334,6 +335,10 @@ bash tests/run.sh --ci   # plain text output
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
 - **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, refreshing names, Build Up Ahead (adding, one-step Undo, replacing only its own waypoints), list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.24.0
+
+- New **Survey Marks** overlay (in Reference, off by default): Queensland's survey control marks coloured by condition, with height, last visit and a link to each mark's survey report.
 
 ### Release notes — 7.23.2
 

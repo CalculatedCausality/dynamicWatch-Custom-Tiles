@@ -132,6 +132,7 @@ export const CFG = {
 	LAYER_HIST_MAPS: "Historic Map Sheets",
 	LAYER_LAND_USE: "Land Use",
 	LAYER_STATE_LAND: "State Land",
+	LAYER_SURVEY_MARKS: "Survey Marks",
 	LAYER_TOPO:    "QLD Topo",
 	LAYER_INTVL_GLOBAL: "INTVL Global Map",
 	LAYER_GEOCACHING: "Geocaches",
@@ -350,6 +351,13 @@ export const CFG = {
 	QLD_STATE_LAND_LAYER_ID: 13,
 	QLD_STATE_LAND_MIN_ZOOM: 11,
 
+	// Survey control marks (plaques, pickets, trig stations). The server
+	// draws them below 1:144,400, i.e. from zoom 13.
+	QLD_SURVEY_SERVICE:
+		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+		"Location/SurveyControl/MapServer",
+	QLD_SURVEY_MIN_ZOOM: 13,
+
 	// Historical printed map sheets index (parish/town/topographic/
 	// exploration/… scans, 1860s-2012). Footprint overlay + click lists
 	// the sheets covering a point, each with a scan link; a scan can be
@@ -480,7 +488,7 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Reference",
-		names:  [CFG.LAYER_HIST_MAPS],
+		names:  [CFG.LAYER_HIST_MAPS, CFG.LAYER_SURVEY_MARKS],
 	},
 	{
 		header: "Live data",

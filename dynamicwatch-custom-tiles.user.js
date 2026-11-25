@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.23.2
+// @version      7.24.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -165,6 +165,7 @@
     LAYER_HIST_MAPS: "Historic Map Sheets",
     LAYER_LAND_USE: "Land Use",
     LAYER_STATE_LAND: "State Land",
+    LAYER_SURVEY_MARKS: "Survey Marks",
     LAYER_TOPO: "QLD Topo",
     LAYER_INTVL_GLOBAL: "INTVL Global Map",
     LAYER_GEOCACHING: "Geocaches",
@@ -339,6 +340,10 @@
     QLD_STATE_LAND_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/PlanningCadastre/LandParcelPropertyFramework/MapServer",
     QLD_STATE_LAND_LAYER_ID: 13,
     QLD_STATE_LAND_MIN_ZOOM: 11,
+    // Survey control marks (plaques, pickets, trig stations). The server
+    // draws them below 1:144,400, i.e. from zoom 13.
+    QLD_SURVEY_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Location/SurveyControl/MapServer",
+    QLD_SURVEY_MIN_ZOOM: 13,
     // Historical printed map sheets index (parish/town/topographic/
     // exploration/… scans, 1860s-2012). Footprint overlay + click lists
     // the sheets covering a point, each with a scan link; a scan can be
@@ -449,7 +454,7 @@
     },
     {
       header: "Reference",
-      names: [CFG.LAYER_HIST_MAPS]
+      names: [CFG.LAYER_HIST_MAPS, CFG.LAYER_SURVEY_MARKS]
     },
     {
       header: "Live data",
@@ -11601,6 +11606,130 @@
     return { StateLandLayerProvider: StateLandLayerProvider2, LandUseLayerProvider: LandUseLayerProvider2 };
   }
 
+  // src/providers/qld-survey.js
+  var FIELD = "sirpub.prop.qld_surveycontrol_scdb.mrkcnd_de";
+  var LAYERS = [3, 4, 16];
+  var WHERE = `${FIELD} <> 'Destroyed'`;
+  var SURVEY_CONDITIONS = [
+    { value: "Good", rgb: [22, 163, 74] },
+    { value: "Not Found", rgb: [234, 88, 12] },
+    { value: "Disturbed", rgb: [202, 138, 4] },
+    { value: "Damaged", rgb: [202, 138, 4] },
+    { value: "Unstable", rgb: [202, 138, 4] },
+    { value: "Buried", rgb: [107, 114, 128] },
+    { value: "Submerged", rgb: [37, 99, 235] }
+  ];
+  function surveyDynamicLayers() {
+    const sym = (rgb) => ({
+      type: "esriSMS",
+      style: "esriSMSCircle",
+      color: [...rgb, 235],
+      size: 7,
+      outline: { color: [255, 255, 255, 255], width: 1.2 }
+    });
+    const renderer = {
+      type: "uniqueValue",
+      field1: FIELD,
+      defaultSymbol: sym([107, 114, 128]),
+      uniqueValueInfos: SURVEY_CONDITIONS.map((c) => ({ value: c.value, label: c.value, symbol: sym(c.rgb) }))
+    };
+    return JSON.stringify(LAYERS.map((id) => ({
+      id,
+      source: { type: "mapLayer", mapLayerId: id },
+      definitionExpression: WHERE,
+      drawingInfo: { renderer }
+    })));
+  }
+  function _val(v) {
+    if (v === null || v === void 0) return "";
+    const s = String(v).trim();
+    return s && !/^(null|none|unknown)$/i.test(s) ? s : "";
+  }
+  function _surveyYear(v) {
+    const s = _val(v);
+    if (!s) return "";
+    if (/^\d{11,13}$/.test(s)) return String(new Date(Number(s)).getUTCFullYear());
+    const m = /\b(1[89]\d\d|20\d\d)\b/.exec(s);
+    return m ? m[1] : "";
+  }
+  function _surveyReportUrl(v) {
+    const s = _val(v);
+    if (!/^https:\/\//i.test(s) || /["\\\s]/.test(s)) return "";
+    try {
+      const u = new URL(s);
+      return u.protocol === "https:" && (u.hostname === "qld.gov.au" || u.hostname.endsWith(".qld.gov.au")) && !u.username && !u.password && !u.port ? u.href : "";
+    } catch (_) {
+      return "";
+    }
+  }
+  function _formatSurveyMark(attrs) {
+    const a = attrs || {};
+    const id = _val(a["Permanent mark"]);
+    const name = _val(a["Alternate name 1"]);
+    const type = _val(a["Mark type"]).replace(/^Other\s+/i, "");
+    const cond = _val(a["Mark condition"]);
+    const visited = _surveyYear(a["Last visit date"]);
+    const installed = _surveyYear(a["Installed date"]);
+    const by = _val(a["Installed by"]);
+    const where = _val(a["Locality description"]);
+    const height = Number(_val(a["AHD height"]));
+    const report = _surveyReportUrl(a["Report link"] || a["Report Link"]);
+    const title = name ? `${name} (PM ${id})` : id ? `PM ${id}` : "Survey mark";
+    const lines = [esc`<b>${title}</b>`];
+    const kind = type ? type.charAt(0).toUpperCase() + type.slice(1).toLowerCase() : "";
+    if (kind || where) lines.push(_escHtml([kind, where ? where.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : ""].filter(Boolean).join(" · ")));
+    if (Number.isFinite(height) && _val(a["AHD height"])) lines.push(esc`Height ${height.toFixed(1)} m above sea level`);
+    const state = [cond, visited ? `last visited ${visited}` : ""].filter(Boolean).join(", ");
+    if (state) lines.push(cond && cond !== "Good" ? esc`<span class="dw-at-warn">${state}</span>` : _escHtml(state));
+    const hist = [installed ? `installed ${installed}` : "", by ? `by ${by}` : ""].filter(Boolean).join(" ");
+    if (hist) lines.push(esc`<span class="dw-cad-sub">${hist}</span>`);
+    if (report) lines.push(esc`<a href="${report}" target="_blank" rel="noopener noreferrer">Survey report (PDF) ↗</a>`);
+    return lines.join("<br>");
+  }
+  var LAYER_DEFS = Object.fromEntries(LAYERS.map((id) => [id, WHERE]));
+  function surveyIdentifySource() {
+    return {
+      layerName: CFG.LAYER_SURVEY_MARKS,
+      heading: "Survey marks",
+      baseUrl: CFG.QLD_SURVEY_SERVICE,
+      layers: "all:" + LAYERS.join(","),
+      layerDefs: LAYER_DEFS,
+      tolerance: 6,
+      minZoom: CFG.QLD_SURVEY_MIN_ZOOM,
+      format: _formatSurveyMark
+    };
+  }
+  function createQldSurveyProvider({ makeHoverIdentify: makeHoverIdentify2 }) {
+    const src = surveyIdentifySource();
+    const installHover = makeHoverIdentify2({
+      baseUrl: src.baseUrl,
+      layers: src.layers,
+      layerDefs: src.layerDefs,
+      tolerance: 6,
+      minZoom: CFG.QLD_SURVEY_MIN_ZOOM,
+      tipClass: "dw-qpws-tip",
+      // The tooltip cannot be clicked, so its report link is left to the pop-up.
+      formatTooltip: (attrs) => _formatSurveyMark({ ...attrs, "Report link": "", "Report Link": "" })
+    });
+    return arcgisExportProvider({
+      baseUrl: CFG.QLD_SURVEY_SERVICE,
+      extraParams: "&dynamicLayers=" + encodeURIComponent(surveyDynamicLayers()),
+      pane: "dwSurveyPane",
+      paneZIndex: 402,
+      opacity: 1,
+      minZoom: CFG.QLD_SURVEY_MIN_ZOOM,
+      maxZoom: 25,
+      attribution: 'Survey marks &copy; <a href="https://www.qld.gov.au/environment/land/title/surveying" target="_blank" rel="noreferrer">State of Queensland (Resources)</a>',
+      onAdd: (layer, map) => installHover(layer, map),
+      onRemove: (layer) => {
+        if (layer._dwHoverOff) {
+          layer._dwHoverOff();
+          layer._dwHoverOff = null;
+        }
+      }
+    });
+  }
+
   // src/utils/alltrails.js
   function allTrailsExploreUrl(view) {
     const v = view || {};
@@ -14466,6 +14595,7 @@
   var { QpwsLayerProvider, NationalParksLayerProvider } = createQldEnvironmentProviders({ makeHoverIdentify, gmJsonGet });
   var { HistoricMinesLayerProvider, MineShaftsLayerProvider, HistoricLeasesLayerProvider, LeasePointsLayerProvider } = createQldMiningProviders({ makeHoverIdentify });
   var { StateLandLayerProvider, LandUseLayerProvider } = createQldLandProviders({ makeHoverIdentify });
+  var SurveyMarksLayerProvider = createQldSurveyProvider({ makeHoverIdentify });
   var CustomTilesApp = class {
     constructor() {
       this.qldToken = new QldTokenManager({
@@ -14657,6 +14787,7 @@
         addOverlay(CFG.LAYER_HIST_MAPS, new HistoricalMapsIndexProvider());
         addOverlay(CFG.LAYER_STATE_LAND, new StateLandLayerProvider());
         addOverlay(CFG.LAYER_LAND_USE, new LandUseLayerProvider());
+        addOverlay(CFG.LAYER_SURVEY_MARKS, new SurveyMarksLayerProvider());
         addOverlay(
           CFG.LAYER_INTVL_GLOBAL,
           new IntvlGlobalTilesLayerProvider()
@@ -15048,7 +15179,7 @@
           );
         });
       }
-      for (const src of [...miningIdentifySources(), ...landIdentifySources()]) {
+      for (const src of [...miningIdentifySources(), ...landIdentifySources(), surveyIdentifySource()]) {
         const lyr = this.layers[src.layerName];
         if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
         arcgisIdentify(map, latlng, {
@@ -15801,6 +15932,10 @@
         DW_LAYER_GROUPS,
         DW_OVERLAY_GROUPS,
         QldTokenManager,
+        _formatSurveyMark,
+        _surveyReportUrl,
+        _surveyYear,
+        surveyDynamicLayers,
         tileToBBox4326,
         tileToBBox3857,
         utfGridCellToLatLng,

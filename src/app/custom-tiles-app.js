@@ -57,6 +57,7 @@ import { AussieBushwalkingLayerProvider } from "../providers/aussie-bushwalking.
 import { createQldEnvironmentProviders } from "../providers/qld-environment.js";
 import { _miningSectionHtml, createQldMiningProviders, miningIdentifySources } from "../providers/qld-mining.js";
 import { createQldLandProviders, landIdentifySources } from "../providers/qld-land.js";
+import { createQldSurveyProvider, surveyIdentifySource } from "../providers/qld-survey.js";
 import { allTrailsExploreUrl, allTrailsViewAround } from "../utils/alltrails.js";
 import { AllTrailsLayerProvider } from "../providers/alltrails.js";
 import { RoutePoiController } from "../providers/route-pois.js";
@@ -89,6 +90,7 @@ const { HistoricMinesLayerProvider, MineShaftsLayerProvider, HistoricLeasesLayer
 	createQldMiningProviders({ makeHoverIdentify });
 const { StateLandLayerProvider, LandUseLayerProvider } =
 	createQldLandProviders({ makeHoverIdentify });
+const SurveyMarksLayerProvider = createQldSurveyProvider({ makeHoverIdentify });
 
 /* -- Application ------------------------------------------------------- */
 
@@ -317,6 +319,7 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_HIST_MAPS, new HistoricalMapsIndexProvider());
 			addOverlay(CFG.LAYER_STATE_LAND, new StateLandLayerProvider());
 			addOverlay(CFG.LAYER_LAND_USE, new LandUseLayerProvider());
+			addOverlay(CFG.LAYER_SURVEY_MARKS, new SurveyMarksLayerProvider());
 			addOverlay(CFG.LAYER_INTVL_GLOBAL,
 				new IntvlGlobalTilesLayerProvider());
 
@@ -832,7 +835,7 @@ export class CustomTilesApp {
 		// The hover tooltip shows one feature and needs a mouse; this lists
 		// them all (a goldfield has leases, workings and shafts stacked) and
 		// is the only way to read them on a phone.
-		for (const src of [...miningIdentifySources(), ...landIdentifySources()]) {
+		for (const src of [...miningIdentifySources(), ...landIdentifySources(), surveyIdentifySource()]) {
 			const lyr = this.layers[src.layerName];
 			if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
 			arcgisIdentify(map, latlng, {

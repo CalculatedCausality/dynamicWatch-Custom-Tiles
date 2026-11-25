@@ -1600,6 +1600,48 @@ t("QLD Globe security code is found in the page's hidden field however it is mar
 	eq(Q._xsrfFromSetCookie(`Set-Cookie: language=en; Path=/\r\nset-cookie: XSRF-TOKEN=${encodeURIComponent(code)}; Path=/`), code);
 });
 
+t("Survey Marks: registered in Reference, drawn by condition without destroyed marks", () => {
+	eq(dw.CFG.LAYER_SURVEY_MARKS, "Survey Marks");
+	assert(dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Reference").names.includes("Survey Marks"), "not in Reference");
+	const layers = JSON.parse(dw.surveyDynamicLayers());
+	eq(layers.map((l) => l.id).join(","), "3,4,16");
+	for (const l of layers) {
+		assert(/<> 'Destroyed'/.test(l.definitionExpression), l.definitionExpression);
+		eq(l.drawingInfo.renderer.uniqueValueInfos.find((u) => u.value === "Good").symbol.color.slice(0, 3).join(","), "22,163,74");
+	}
+});
+
+t("_formatSurveyMark: name, type, height, condition, report link; escapes", () => {
+	// Real identify attributes for PM 104392 near Mapleton.
+	const attrs = {
+		"Permanent mark": "104392", "Alternate name 1": "THOMPSONS", "Locality description": "THOMPSONS ROAD",
+		"Mark type": "Standard Plaque", "Installed by": "MAROOCHY SC", "Installed date": "7/1/1993",
+		"Mark condition": "Good", "Last visit date": "5/17/2025", "AHD height": "302.772",
+		"Report link": "https://qspatial.information.qld.gov.au/SurveyReport/SCR104392.pdf",
+	};
+	const html = dw._formatSurveyMark(attrs);
+	assert(html.includes("<b>THOMPSONS (PM 104392)</b>"), html);
+	assert(html.includes("Standard plaque · Thompsons Road"), html);
+	assert(html.includes("Height 302.8 m above sea level"), html);
+	assert(html.includes("Good, last visited 2025") && !html.includes("dw-at-warn"), html);
+	assert(html.includes("installed 1993 by MAROOCHY SC"), html);
+	assert(html.includes('href="https://qspatial.information.qld.gov.au/SurveyReport/SCR104392.pdf"'), html);
+	const lost = dw._formatSurveyMark({ "Permanent mark": "79377", "Mark condition": "Not Found", "AHD height": "Null", "Mark type": "Other STEEL BOLT IN CONC" });
+	assert(lost.includes("<b>PM 79377</b>") && lost.includes("dw-at-warn") && lost.includes("Not Found"), lost);
+	assert(lost.includes("Steel bolt in conc") && !lost.includes("Height"), lost);
+	eq(dw._formatSurveyMark({}), "<b>Survey mark</b>");
+	assert(dw._formatSurveyMark({ "Alternate name 1": "<b>x" }).includes("&lt;b&gt;x"), "not escaped");
+});
+
+t("survey report links must be https on a Queensland Government host", () => {
+	eq(dw._surveyReportUrl("https://qspatial.information.qld.gov.au/SurveyReport/SCR1.pdf"), "https://qspatial.information.qld.gov.au/SurveyReport/SCR1.pdf");
+	for (const bad of ["http://qspatial.information.qld.gov.au/x.pdf", "https://evil.example/x.pdf", "javascript:alert(1)",
+		"https://qld.gov.au.evil.example/x", 'https://a.qld.gov.au/x"onmouseover=1', "Null", null]) eq(dw._surveyReportUrl(bad), "", String(bad));
+	eq(dw._surveyYear("5/17/2025"), "2025");
+	eq(dw._surveyYear("714355200000"), "1992");
+	eq(dw._surveyYear("Null"), "");
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

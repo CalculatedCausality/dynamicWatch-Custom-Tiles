@@ -33,6 +33,7 @@ Current modules:
 - `src/providers/qld-imagery.js` — QLD Roads and QLD Historical imagery providers.
 - `src/providers/alltrails.js` — AllTrails Trail Map overlay: AllTrails' Mapbox-hosted map tiles, and the lookup of the public map key from AllTrails' pages.
 - `src/providers/qld-mining.js` — QLD mining overlays: Historic Mines (workings), Mine Shafts (Abandoned Mine Lands openings), and Historic Mining Leases (MinesPermitsHistoric title footprints), each with hover-identify tooltips.
+- `src/providers/qld-survey.js` — Survey Marks overlay: QLD survey control marks recoloured by condition through `dynamicLayers`, with hover and pop-up formatters.
 - `src/providers/qld-land.js` — QLD land overlays: State Land (the cadastre Tenure layer filtered and recoloured through `dynamicLayers`) and Land Use (QLUMP), with their hover and pop-up formatters.
 - `src/providers/qld-historical-maps.js` — Historic Map Sheets: footprint index of QLD's scanned parish/town/topographic/exploration maps, a click popup listing the sheets at a point with scan links, and a distortable image overlay (CSS `matrix3d` homography, four draggable corners) to rubber-sheet a scan onto the live map.
 - `src/providers/scc-applications.js` — Sunshine Coast Council development-application overlay (Development.i APIs).
