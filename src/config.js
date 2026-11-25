@@ -125,6 +125,10 @@ export const CFG = {
 	LAYER_EASEMENTS: "Easements (QLD)",
 	LAYER_PASTORAL: "Pastoral Districts (QLD)",
 	LAYER_OLD_MARKS: "Old Survey Marks (destroyed)",
+	LAYER_OLD_RAIL: "Old Railways",
+	OVERPASS_URL: "https://overpass-api.de/api/interpreter",
+	OLD_RAIL_MIN_ZOOM: 11,
+	OLD_RAIL_CACHE_KEY: "dw_old_rail_cache",
 	GA_PIPELINES_SERVICE: "https://services.ga.gov.au/gis/rest/services/Oil_Gas_Pipelines/MapServer",
 	QLD_PASTORAL_SERVICE:
 		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Biota/PastoralDistricts/MapServer",
@@ -532,7 +536,7 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Reference",
-		names:  [CFG.LAYER_HIST_MAPS, CFG.LAYER_SURVEY_MARKS, CFG.LAYER_OLD_MARKS],
+		names:  [CFG.LAYER_HIST_MAPS, CFG.LAYER_OLD_RAIL, CFG.LAYER_SURVEY_MARKS, CFG.LAYER_OLD_MARKS],
 	},
 	{
 		header: "Live data",

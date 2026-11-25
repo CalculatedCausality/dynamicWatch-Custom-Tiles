@@ -32,6 +32,7 @@ Current modules:
 - `src/providers/qld-environment.js` — QPWS Estate, National Parks, and their ArcGIS query layer helper.
 - `src/providers/qld-imagery.js` — QLD Roads and QLD Historical imagery providers.
 - `src/providers/ga-radiometrics.js` — Natural Radiation (Australia): Geoscience Australia's 2019 dose-rate grid via WMS, with a GetFeatureInfo hover.
+- `src/providers/old-railways.js` — Old Railways: OpenStreetMap abandoned/disused railways via Overpass, fetched in zoom-10 squares with retries and a 30-day store.
 - `src/providers/extra-layers.js` — Pipelines (GA), Easements (QLD cadastre), Pastoral Districts (QLD) and Old Survey Marks (destroyed), with hover formatters.
 - `src/providers/geology.js` — Geology overlays: Geoscience Australia surface geology and Queensland detailed geology, with age-in-years hover formatters.
 - `src/providers/abs-postcodes.js` — Postcodes and Suburbs overlays: ABS 2021 Postal Areas and Suburbs and Localities outlined and labelled through `dynamicLayers`, with hover and pop-up formatter.

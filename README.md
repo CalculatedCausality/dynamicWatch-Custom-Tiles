@@ -114,6 +114,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 
 | Layer | Notes |
 |---|---|
+| **Old Railways** | Abandoned, disused and removed railway and tramway lines from OpenStreetMap (old branch lines, sugar-cane and timber tramways such as the Mapleton Tramway), as dashed brown lines. Hover for the name, and whether the old alignment is now a road, path or cycle path. Appears from zoom 11. OpenStreetMap's free query service is slow (often a minute) and sometimes busy, so the layer loads about 40 km at a time, retries when busy, and keeps what it has loaded for a month |
 | **Historic Map Sheets** | Footprint index of QLD's scanned historical maps — parish, town, topographic (incl. 1:4,752 goldfield sheets that plot individual shafts), and exploration series, 1860s–2012, filtered to local scales. **Right-click** (or long-press) a spot and the location menu lists the sheets covering it, each with a link to the scan and an **"Overlay ▦"** action that superimposes that scan on the live map. It warps through a **3×3 grid of draggable control points** (corners *plus* edge-midpoints and centre) so you can rubber-sheet out local paper/scan distortion and line old shaft/mine symbols up with real-world positions Your alignment is remembered per sheet in the browser (the 25 most recent), and **Hide points** clears the handles away so a route can be drawn over the sheet |
 | **Survey Marks** | Queensland's ~124,000 survey control marks (brass plaques, star pickets, bolts in concrete, trig stations), coloured by condition: green good, orange not found, yellow disturbed, damaged or unstable; destroyed marks are left out. Hover for the mark number and name, type, street, surveyed height above sea level, condition and last visit; right-click (or long-press) a spot for the same with a link to the mark's PDF survey report, where there is one. Appears from zoom 13 (street level) |
 | **Old Survey Marks (destroyed)** | The 15,718 survey marks Queensland records as destroyed, as grey crosses, with the same details as Survey Marks (when installed, by whom, last visit). Appears from zoom 13 |
@@ -351,6 +352,10 @@ bash tests/run.sh --ci   # plain text output
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
 - **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, refreshing names, Build Up Ahead (adding, one-step Undo, replacing only its own waypoints), list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.35.0
+
+- New **Old Railways** overlay (in Reference, off by default): abandoned and disused railway and tramway lines from OpenStreetMap, noting where the old line is now a road or path. Slow to load the first time; kept for a month. Tampermonkey will ask to allow `overpass-api.de`.
 
 ### Release notes — 7.34.0
 

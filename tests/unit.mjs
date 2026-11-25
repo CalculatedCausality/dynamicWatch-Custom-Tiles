@@ -1840,6 +1840,29 @@ t("pipelines, easements, pastoral districts, destroyed marks: registered and des
 	assert(dw._formatPipeline({ feature_name: "<b>x" }).includes("&lt;b&gt;x"), "not escaped");
 });
 
+t("Old Railways: squares, query, parsing and hover", () => {
+	assert(dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Reference").names.includes("Old Railways"));
+	const tiles = dw.railTilesFor({ west: 152.8, south: -26.75, east: 153.1, north: -26.45 });
+	assert(tiles.length >= 1 && tiles.length <= 4, "a hinterland view is one to four squares: " + tiles.length);
+	const box = dw.railTileBox(tiles[0][0], tiles[0][1]);
+	assert(box.north > box.south && box.east > box.west && box.east - box.west < 0.4, JSON.stringify(box));
+	const q = dw.railQuery({ south: -26.75, west: 152.8, north: -26.45, east: 153.1 });
+	assert(q.includes('way["railway"~"^(abandoned|disused|dismantled|razed)$"](-26.75000,152.80000,-26.45000,153.10000)') && q.includes("out tags geom"), q);
+	// Real Overpass shapes near Nambour.
+	const rails = dw.parseRailways({ elements: [
+		{ type: "way", tags: { highway: "tertiary", name: "Windsor Road", railway: "abandoned", surface: "asphalt" }, geometry: [{ lat: -26.6012345, lon: 152.9512345 }, { lat: -26.602, lon: 152.952 }] },
+		{ type: "way", tags: { "disused:railway": "rail", name: "Paynters Creek Line" }, geometry: [{ lat: -26.6, lon: 152.95 }, { lat: -26.61, lon: 152.96 }] },
+		{ type: "way", tags: { railway: "abandoned" }, geometry: [{ lat: 1, lon: 1 }] },
+		{ type: "node", tags: { railway: "abandoned" } },
+	] });
+	eq(rails.length, 2, "one-point ways and nodes dropped");
+	eq(JSON.stringify(rails[0].g[0]), "[-26.60123,152.95123]");
+	eq(dw._formatOldRailway(rails[0]), "<b>Windsor Road</b><br>Old railway line · now a road");
+	eq(dw._formatOldRailway(rails[1]), "<b>Paynters Creek Line</b><br>Disused railway");
+	eq(dw._formatOldRailway({ n: "", s: "abandoned", h: "cycleway", o: "" }), "<b>Old railway line</b><br>now a cycle path");
+	assert(dw._formatOldRailway({ n: "<b>x", s: "abandoned", h: "", o: "" }).includes("&lt;b&gt;x"), "not escaped");
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

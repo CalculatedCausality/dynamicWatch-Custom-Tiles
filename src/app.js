@@ -21,6 +21,7 @@ import {
 } from './providers/qld-cadastre.js';
 import { _parseAuStreetAddress, _pickJurisdiction } from './providers/cadastre-au.js';
 import { QldTokenManager } from './tokens.js';
+import { _formatOldRailway, parseRailways, railQuery, railTileBox, railTilesFor } from './providers/old-railways.js';
 import { _formatEasement, _formatPastoral, _formatPipeline, destroyedMarksDynamicLayers, pastoralDynamicLayers } from './providers/extra-layers.js';
 import { _formatGaGeology, _formatQldGeology, geologyAgeYears } from './providers/geology.js';
 import { _formatDose, gaDoseInfoUrl, gaDoseTileUrl, gaDoseValue } from './providers/ga-radiometrics.js';
@@ -124,6 +125,7 @@ export function bootUserscript() {
 			_formatTrack, tracksDynamicLayers, TRACK_KINDS,
 			_formatDose, gaDoseInfoUrl, gaDoseTileUrl, gaDoseValue, _formatGaGeology, _formatQldGeology, geologyAgeYears,
 			_formatEasement, _formatPastoral, _formatPipeline, destroyedMarksDynamicLayers, pastoralDynamicLayers,
+			_formatOldRailway, parseRailways, railQuery, railTileBox, railTilesFor,
 			_formatPostcode, postcodeDynamicLayers, _formatSuburb, suburbDynamicLayers, exportTileBBox,
 			_fireMonth, _formatFireScar, _formatParkFire, fireScarDynamicLayers, fireScarLayerId, parkFireDynamicLayers,
 			tileToBBox4326, tileToBBox3857, utfGridCellToLatLng,
