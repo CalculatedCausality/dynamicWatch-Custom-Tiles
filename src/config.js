@@ -121,6 +121,13 @@ export const CFG = {
 	LAYER_SAFECAST: "Radiation (Safecast)",
 	LAYER_GA_RADIATION: "Natural Radiation (Australia)",
 	LAYER_GEOLOGY_AU: "Geology (Australia)",
+	LAYER_PIPELINES: "Pipelines",
+	LAYER_EASEMENTS: "Easements (QLD)",
+	LAYER_PASTORAL: "Pastoral Districts (QLD)",
+	LAYER_OLD_MARKS: "Old Survey Marks (destroyed)",
+	GA_PIPELINES_SERVICE: "https://services.ga.gov.au/gis/rest/services/Oil_Gas_Pipelines/MapServer",
+	QLD_PASTORAL_SERVICE:
+		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Biota/PastoralDistricts/MapServer",
 	LAYER_GEOLOGY_QLD: "Geology (QLD detailed)",
 	GA_GEOLOGY_SERVICE: "https://services.ga.gov.au/gis/rest/services/GA_Surface_Geology/MapServer",
 	QLD_GEOLOGY_SERVICE:
@@ -504,12 +511,12 @@ export const DW_LAYER_GROUPS = [
 export const DW_OVERLAY_GROUPS = [
 	{
 		header: "Property",
-		names:  [CFG.LAYER_CADASTRE, CFG.LAYER_POSTCODES, CFG.LAYER_SUBURBS, CFG.LAYER_STATE_LAND, CFG.LAYER_LAND_USE, CFG.LAYER_SCC_APPS,
+		names:  [CFG.LAYER_CADASTRE, CFG.LAYER_POSTCODES, CFG.LAYER_SUBURBS, CFG.LAYER_EASEMENTS, CFG.LAYER_PASTORAL, CFG.LAYER_STATE_LAND, CFG.LAYER_LAND_USE, CFG.LAYER_SCC_APPS,
 		         CFG.LAYER_QPWS, CFG.LAYER_RELIEF],
 	},
 	{
 		header: "Infrastructure",
-		names:  [CFG.LAYER_INFRA, CFG.LAYER_TELECOM, CFG.LAYER_WATER, CFG.LAYER_MOBILE],
+		names:  [CFG.LAYER_INFRA, CFG.LAYER_PIPELINES, CFG.LAYER_TELECOM, CFG.LAYER_WATER, CFG.LAYER_MOBILE],
 	},
 	{
 		header: "Environment",
@@ -525,7 +532,7 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Reference",
-		names:  [CFG.LAYER_HIST_MAPS, CFG.LAYER_SURVEY_MARKS],
+		names:  [CFG.LAYER_HIST_MAPS, CFG.LAYER_SURVEY_MARKS, CFG.LAYER_OLD_MARKS],
 	},
 	{
 		header: "Live data",

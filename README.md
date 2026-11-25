@@ -51,6 +51,8 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 | **Australia Cadastre** | Property/parcel boundaries for **every state & territory** (QLD, NSW, VIC, SA, WA, TAS, ACT, NT). Click a parcel for lot/plan, area, locality, and — where a street address resolves — recent sale history from OnTheHouse. Rich lot/plan+address for QLD/NSW/VIC/SA/TAS/ACT; WA/NT show locality from the national dataset |
 | **Postcodes** | Every postcode area in Australia as an outline with the postcode written inside, from the Australian Bureau of Statistics' 2021 Postal Areas. Hover for the postcode and its area. These are the ABS's close approximation of Australia Post postcodes, published for statistics; Australia Post's official boundaries are a paid product. Appears from zoom 9 |
 | **Suburbs** | Every suburb and locality in Australia as a teal outline with its name, from the ABS's 2021 Suburbs and Localities (its close approximation of gazetted localities). Hover for the name, state and area. Shows alongside Postcodes, which are grey and dashed. Appears from zoom 11 |
+| **Easements (QLD)** | The strips of land reserved for power lines, pipes, drainage or access, from Queensland's property boundary records. Hover for the lot, plan, area and suburb; the records do not say what each easement is for. Appears from zoom 14 |
+| **Pastoral Districts (QLD)** | Queensland's 15 historic pastoral districts (Moreton, Darling Downs, Mitchell, Burke…) as named outlines |
 | **State Land** | Queensland land the State owns, from the cadastre's tenure records, each kind in its own colour: **national park** (green), **state forest, forest reserve and timber reserve** (brown), **reserves** set aside for a community purpose (teal), **unallocated State land** (orange) and State land **held under lease** (yellow). Hover for the name, kind, lot/plan, area and locality. Appears from zoom 11. A lease is occupied by its holder, so yellow does not mean open to the public |
 | **Land Use** | What each piece of Queensland is used for, from the Queensland Land Use Mapping Program, in the program's own colours (residential red, nature conservation beige, grazing pale, forestry green, water blue…). Hover for the class, its national land-use code and the year it was mapped (2011–2017 depending on the region, so recent subdivisions are missing) |
 | **SCC Applications** | Sunshine Coast Council development/building/plumbing applications as colour-coded markers; an on-map submenu picks current vs decided sets; popups carry the full record, property history, documents, and a deep link into Development.i |
@@ -63,6 +65,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 |---|---|
 | **Power Infrastructure** | Transmission/distribution lines (voltage-coloured), substations, plants, solar farms; sourced from OpenInfraMap vector tiles |
 | **Telecoms** | Telephone exchanges, data centres, masts, antennas from OpenInfraMap |
+| **Pipelines** | Oil and gas pipelines across Australia from Geoscience Australia (updated June 2026): green oil, red gas, dashed where proposed. Hover for the name, length, status and operator. CC BY 4.0 |
 | **Water Infrastructure** | Treatment plants, wastewater plants, reservoirs, towers, wells, pumping stations, trunk pipelines (OpenInfraMap, global) |
 | **Mobile Coverage** | Australian Government ACCC 4G outdoor coverage grid |
 
@@ -113,6 +116,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 |---|---|
 | **Historic Map Sheets** | Footprint index of QLD's scanned historical maps — parish, town, topographic (incl. 1:4,752 goldfield sheets that plot individual shafts), and exploration series, 1860s–2012, filtered to local scales. **Right-click** (or long-press) a spot and the location menu lists the sheets covering it, each with a link to the scan and an **"Overlay ▦"** action that superimposes that scan on the live map. It warps through a **3×3 grid of draggable control points** (corners *plus* edge-midpoints and centre) so you can rubber-sheet out local paper/scan distortion and line old shaft/mine symbols up with real-world positions Your alignment is remembered per sheet in the browser (the 25 most recent), and **Hide points** clears the handles away so a route can be drawn over the sheet |
 | **Survey Marks** | Queensland's ~124,000 survey control marks (brass plaques, star pickets, bolts in concrete, trig stations), coloured by condition: green good, orange not found, yellow disturbed, damaged or unstable; destroyed marks are left out. Hover for the mark number and name, type, street, surveyed height above sea level, condition and last visit; right-click (or long-press) a spot for the same with a link to the mark's PDF survey report, where there is one. Appears from zoom 13 (street level) |
+| **Old Survey Marks (destroyed)** | The 15,718 survey marks Queensland records as destroyed, as grey crosses, with the same details as Survey Marks (when installed, by whom, last visit). Appears from zoom 13 |
 
 **Heatmaps**
 
@@ -347,6 +351,10 @@ bash tests/run.sh --ci   # plain text output
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
 - **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, refreshing names, Build Up Ahead (adding, one-step Undo, replacing only its own waypoints), list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.34.0
+
+- New overlays, all off by default: **Pipelines** (Australia), **Easements (QLD)**, **Pastoral Districts (QLD)** and **Old Survey Marks (destroyed)**.
 
 ### Release notes — 7.33.0
 

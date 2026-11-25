@@ -17,6 +17,7 @@ const HELPERS = [
 	"_formatSurveyMark", "_surveyReportUrl", "_surveyYear", "surveyDynamicLayers",
 	"_formatTrack", "tracksDynamicLayers", "TRACK_KINDS",
 	"_formatDose", "gaDoseInfoUrl", "gaDoseTileUrl", "gaDoseValue", "_formatGaGeology", "_formatQldGeology", "geologyAgeYears",
+	"_formatEasement", "_formatPastoral", "_formatPipeline", "destroyedMarksDynamicLayers", "pastoralDynamicLayers",
 	"_formatPostcode", "postcodeDynamicLayers", "_formatSuburb", "suburbDynamicLayers", "exportTileBBox",
 	"_fireMonth", "_formatFireScar", "_formatParkFire", "fireScarDynamicLayers", "fireScarLayerId", "parkFireDynamicLayers",
 	// tile geometry

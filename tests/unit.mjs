@@ -1822,6 +1822,24 @@ t("geology: ages in years, GA and QLD hovers from real answers; escapes", () => 
 	assert(dw._formatGaGeology({ name: "<b>x" }).includes("&lt;b&gt;x"), "not escaped");
 });
 
+t("pipelines, easements, pastoral districts, destroyed marks: registered and described", () => {
+	const g = (h) => dw.DW_OVERLAY_GROUPS.find((x) => x.header === h).names;
+	assert(g("Infrastructure").includes("Pipelines"));
+	assert(g("Property").includes("Easements (QLD)") && g("Property").includes("Pastoral Districts (QLD)"));
+	assert(g("Reference").includes("Old Survey Marks (destroyed)"));
+	// Real query answer near Brisbane.
+	const p = dw._formatPipeline({ feature_name: "Roma Brisbane Pipeline", status: "Fully capable of operation", operator: "APA", length_km: 440.28, feature_type: "Gas Pipeline" });
+	eq(p, "<b>Roma Brisbane Pipeline</b><br>Gas Pipeline · 440 km<br>In operation · operator APA");
+	const e = dw._formatEasement({ Lot: "A", Plan: "RP98237", "Lot area (m²)": "3", Locality: "Nambour" });
+	assert(e.startsWith("<b>Easement A on RP98237</b><br>3 m² · Nambour"), e);
+	assert(dw._formatPastoral({ DISTRICT: "MORETON" }).startsWith("<b>Moreton pastoral district</b>"));
+	const [l] = JSON.parse(dw.destroyedMarksDynamicLayers());
+	eq(l.source.mapLayerId, 13); eq(l.drawingInfo.renderer.symbol.style, "esriSMSX");
+	const [pd] = JSON.parse(dw.pastoralDynamicLayers());
+	eq(pd.drawingInfo.labelingInfo[0].labelExpression, "[district]", "the data's lower-case field, not the service's DISTRICT");
+	assert(dw._formatPipeline({ feature_name: "<b>x" }).includes("&lt;b&gt;x"), "not escaped");
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.33.0
+// @version      7.34.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -156,6 +156,12 @@
     LAYER_SAFECAST: "Radiation (Safecast)",
     LAYER_GA_RADIATION: "Natural Radiation (Australia)",
     LAYER_GEOLOGY_AU: "Geology (Australia)",
+    LAYER_PIPELINES: "Pipelines",
+    LAYER_EASEMENTS: "Easements (QLD)",
+    LAYER_PASTORAL: "Pastoral Districts (QLD)",
+    LAYER_OLD_MARKS: "Old Survey Marks (destroyed)",
+    GA_PIPELINES_SERVICE: "https://services.ga.gov.au/gis/rest/services/Oil_Gas_Pipelines/MapServer",
+    QLD_PASTORAL_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Biota/PastoralDistricts/MapServer",
     LAYER_GEOLOGY_QLD: "Geology (QLD detailed)",
     GA_GEOLOGY_SERVICE: "https://services.ga.gov.au/gis/rest/services/GA_Surface_Geology/MapServer",
     QLD_GEOLOGY_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/GeoscientificInformation/GeologyDetailed/MapServer",
@@ -462,6 +468,8 @@
         CFG.LAYER_CADASTRE,
         CFG.LAYER_POSTCODES,
         CFG.LAYER_SUBURBS,
+        CFG.LAYER_EASEMENTS,
+        CFG.LAYER_PASTORAL,
         CFG.LAYER_STATE_LAND,
         CFG.LAYER_LAND_USE,
         CFG.LAYER_SCC_APPS,
@@ -471,7 +479,7 @@
     },
     {
       header: "Infrastructure",
-      names: [CFG.LAYER_INFRA, CFG.LAYER_TELECOM, CFG.LAYER_WATER, CFG.LAYER_MOBILE]
+      names: [CFG.LAYER_INFRA, CFG.LAYER_PIPELINES, CFG.LAYER_TELECOM, CFG.LAYER_WATER, CFG.LAYER_MOBILE]
     },
     {
       header: "Environment",
@@ -487,7 +495,7 @@
     },
     {
       header: "Reference",
-      names: [CFG.LAYER_HIST_MAPS, CFG.LAYER_SURVEY_MARKS]
+      names: [CFG.LAYER_HIST_MAPS, CFG.LAYER_SURVEY_MARKS, CFG.LAYER_OLD_MARKS]
     },
     {
       header: "Live data",
@@ -1031,8 +1039,8 @@
   function hexAlpha(hex, a) {
     const m = /^#([0-9a-f]{6})$/i.exec(hex);
     if (!m) return hex;
-    const v = parseInt(m[1], 16);
-    return `rgba(${v >> 16 & 255},${v >> 8 & 255},${v & 255},${a})`;
+    const v2 = parseInt(m[1], 16);
+    return `rgba(${v2 >> 16 & 255},${v2 >> 8 & 255},${v2 & 255},${a})`;
   }
   function pointInRing(px, py, ring) {
     let inside = false;
@@ -1070,9 +1078,9 @@
     return years + "y" + (rem ? " " + rem + "mo" : "") + " ago";
   }
   function intvlArea(m2) {
-    const v = Number(m2) || 0;
-    if (v < 1e5) return Math.round(v).toLocaleString() + " m²";
-    const km2 = v / 1e6;
+    const v2 = Number(m2) || 0;
+    if (v2 < 1e5) return Math.round(v2).toLocaleString() + " m²";
+    const km2 = v2 / 1e6;
     return (km2 < 10 ? km2.toFixed(2) : km2.toFixed(1)) + " km²";
   }
   function intvlOwnerKey(props) {
@@ -3773,34 +3781,34 @@
     const corners = ring.slice(0, 4).map((p) => [Number(p[0]), Number(p[1])]);
     return corners.every((p) => isFinite(p[0]) && isFinite(p[1])) ? corners : null;
   }
-  function _vexcelBilinear(corners, u, v) {
-    const a = (1 - u) * (1 - v);
-    const b = u * (1 - v);
-    const d = u * v;
-    const e = (1 - u) * v;
+  function _vexcelBilinear(corners, u, v2) {
+    const a = (1 - u) * (1 - v2);
+    const b = u * (1 - v2);
+    const d = u * v2;
+    const e = (1 - u) * v2;
     return [
       a * corners[0][0] + b * corners[1][0] + d * corners[2][0] + e * corners[3][0],
       a * corners[0][1] + b * corners[1][1] + d * corners[2][1] + e * corners[3][1]
     ];
   }
   function _vexcelInvBilinear(corners, lng, lat) {
-    let u = 0.5, v = 0.5;
+    let u = 0.5, v2 = 0.5;
     for (let i = 0; i < 15; i++) {
-      const p = _vexcelBilinear(corners, u, v);
+      const p = _vexcelBilinear(corners, u, v2);
       const fx = p[0] - lng, fy = p[1] - lat;
       const du = 1e-4, dv = 1e-4;
-      const pu = _vexcelBilinear(corners, u + du, v);
-      const pv = _vexcelBilinear(corners, u, v + dv);
+      const pu = _vexcelBilinear(corners, u + du, v2);
+      const pv = _vexcelBilinear(corners, u, v2 + dv);
       const j00 = (pu[0] - p[0]) / du, j01 = (pv[0] - p[0]) / dv;
       const j10 = (pu[1] - p[1]) / du, j11 = (pv[1] - p[1]) / dv;
       const det = j00 * j11 - j01 * j10;
       if (!det) break;
       u -= (j11 * fx - j01 * fy) / det;
-      v -= (-j10 * fx + j00 * fy) / det;
+      v2 -= (-j10 * fx + j00 * fy) / det;
       u = Math.max(0, Math.min(1, u));
-      v = Math.max(0, Math.min(1, v));
+      v2 = Math.max(0, Math.min(1, v2));
     }
-    return [u, v];
+    return [u, v2];
   }
   function _pointInQuad(corners, lng, lat) {
     for (let i = 0; i < corners.length; i++) {
@@ -7336,17 +7344,17 @@
         if (t >= 36 && t <= 37) return "#2980B9";
         return "#90A4AE";
       }
-      function renderShip(group, v) {
-        const fill = shipColor(v.type);
-        const svg = `<svg viewBox="0 0 14 20" width="14" height="20" xmlns="http://www.w3.org/2000/svg"><g transform="translate(7,10) rotate(${v.hdg})"><polygon points="0,-9 4.5,8 0,5 -4.5,8" fill="${fill}" stroke="#333" stroke-width="0.7"/></g></svg>`;
+      function renderShip(group, v2) {
+        const fill = shipColor(v2.type);
+        const svg = `<svg viewBox="0 0 14 20" width="14" height="20" xmlns="http://www.w3.org/2000/svg"><g transform="translate(7,10) rotate(${v2.hdg})"><polygon points="0,-9 4.5,8 0,5 -4.5,8" fill="${fill}" stroke="#333" stroke-width="0.7"/></g></svg>`;
         const icon = L.divIcon({
           className: "dw-marine-icon",
           html: svg,
           iconSize: [14, 20],
           iconAnchor: [7, 10]
         });
-        L.marker([v.lat, v.lon], { icon, pane: "dwMarinePane", interactive: true }).bindTooltip(
-          esc`<b>${v.name}</b><br>MMSI: ${v.mmsi}<br>Speed: ${v.spdKts} kts Hdg: ${Math.round(v.hdg)}°`,
+        L.marker([v2.lat, v2.lon], { icon, pane: "dwMarinePane", interactive: true }).bindTooltip(
+          esc`<b>${v2.name}</b><br>MMSI: ${v2.mmsi}<br>Speed: ${v2.spdKts} kts Hdg: ${Math.round(v2.hdg)}°`,
           { className: "dw-marine-tip", sticky: true }
         ).addTo(group);
       }
@@ -7361,7 +7369,7 @@
           iconSize: [size, size],
           iconAnchor: [size / 2, size / 2]
         });
-        const sample = vessels.slice(0, 5).map((v) => _escHtml(v.name)).join("<br>");
+        const sample = vessels.slice(0, 5).map((v2) => _escHtml(v2.name)).join("<br>");
         const more = vessels.length > 5 ? `<br><i>+${vessels.length - 5} more</i>` : "";
         L.marker([lat, lon], { icon, pane: "dwMarinePane", interactive: true }).bindTooltip(
           `<b>${count} vessels</b><br><span class="dw-cad-sub">${sample}${more}</span>`,
@@ -7377,21 +7385,21 @@
         group.clearLayers();
         const pick = (obj, ...keys) => {
           for (const k of keys) {
-            const v = obj[k];
-            if (v !== void 0 && v !== null && v !== "") return v;
+            const v2 = obj[k];
+            if (v2 !== void 0 && v2 !== null && v2 !== "") return v2;
           }
           return "";
         };
         const vessels = [];
-        for (const v of rows) {
-          const lat = parseFloat(pick(v, "LAT", "lat"));
-          const lon = parseFloat(pick(v, "LON", "lon"));
+        for (const v2 of rows) {
+          const lat = parseFloat(pick(v2, "LAT", "lat"));
+          const lon = parseFloat(pick(v2, "LON", "lon"));
           if (!isFinite(lat) || !isFinite(lon)) continue;
-          const name = String(pick(v, "SHIPNAME", "shipname", "NAME", "name", "MMSI") || "").trim() || "Unknown";
-          const mmsi = pick(v, "MMSI", "mmsi") || "";
-          const type = parseInt(pick(v, "SHIPTYPE", "shiptype", "TYPE", "type") || "0") || 0;
-          const hdg = parseFloat(pick(v, "HEADING", "heading", "COURSE", "course") || "0") || 0;
-          const rawSpd = parseFloat(pick(v, "SPEED", "speed") || "0") || 0;
+          const name = String(pick(v2, "SHIPNAME", "shipname", "NAME", "name", "MMSI") || "").trim() || "Unknown";
+          const mmsi = pick(v2, "MMSI", "mmsi") || "";
+          const type = parseInt(pick(v2, "SHIPTYPE", "shiptype", "TYPE", "type") || "0") || 0;
+          const hdg = parseFloat(pick(v2, "HEADING", "heading", "COURSE", "course") || "0") || 0;
+          const rawSpd = parseFloat(pick(v2, "SPEED", "speed") || "0") || 0;
           const spdKts = rawSpd > 102 ? (rawSpd / 10).toFixed(1) : rawSpd.toFixed(1);
           vessels.push({ lat, lon, name, mmsi, type, hdg, spdKts });
         }
@@ -7399,17 +7407,17 @@
         const CELL_PX = 50;
         const zoom = map.getZoom();
         const cells = /* @__PURE__ */ new Map();
-        for (const v of vessels) {
-          const pt = map.project([v.lat, v.lon], zoom);
+        for (const v2 of vessels) {
+          const pt = map.project([v2.lat, v2.lon], zoom);
           const key = Math.floor(pt.x / CELL_PX) + "/" + Math.floor(pt.y / CELL_PX);
           let cell = cells.get(key);
           if (!cell) {
             cell = { vessels: [], sumLat: 0, sumLon: 0 };
             cells.set(key, cell);
           }
-          cell.vessels.push(v);
-          cell.sumLat += v.lat;
-          cell.sumLon += v.lon;
+          cell.vessels.push(v2);
+          cell.sumLat += v2.lat;
+          cell.sumLon += v2.lon;
         }
         for (const cell of cells.values()) {
           if (cell.vessels.length === 1) {
@@ -7483,9 +7491,9 @@
                   return obj;
                 });
               }
-              for (const v of rows) {
-                const key = v.MMSI || v.mmsi || String(v.LAT || v.lat) + "," + String(v.LON || v.lon);
-                if (key && !vessels.has(key)) vessels.set(key, v);
+              for (const v2 of rows) {
+                const key = v2.MMSI || v2.mmsi || String(v2.LAT || v2.lat) + "," + String(v2.LON || v2.lon);
+                if (key && !vessels.has(key)) vessels.set(key, v2);
               }
               done();
             });
@@ -7655,9 +7663,9 @@
   };
 
   // src/providers/qld-cadastre.js
-  function _cadVal(v) {
-    if (v === null || v === void 0) return "";
-    const s = String(v).trim();
+  function _cadVal(v2) {
+    if (v2 === null || v2 === void 0) return "";
+    const s = String(v2).trim();
     return s && s !== "Null" ? s : "";
   }
   function _formatCadastreTooltip(attrs, addressInfo, omitSalesLink) {
@@ -8116,11 +8124,11 @@
   };
   var NAT_LAYER = CFG.NATIONAL_CADASTRE_SERVICE + "/" + CFG.NATIONAL_CADASTRE_LAYER;
   function _titleCase(s) {
-    const v = _cadVal(s);
-    return v ? v.toLowerCase().replace(/\b([a-z])/g, (_, c) => c.toUpperCase()) : "";
+    const v2 = _cadVal(s);
+    return v2 ? v2.toLowerCase().replace(/\b([a-z])/g, (_, c) => c.toUpperCase()) : "";
   }
-  function _num(v) {
-    const n = parseFloat(v);
+  function _num(v2) {
+    const n = parseFloat(v2);
     return isFinite(n) ? n : NaN;
   }
   var _ST_TYPES = /* @__PURE__ */ new Set([
@@ -8613,8 +8621,8 @@
         return readVarint(buf, off).v;
       }
       if (fn === 6 && wt === 0) {
-        const v = readVarint(buf, off).v;
-        return v >>> 1 ^ -(v & 1);
+        const v2 = readVarint(buf, off).v;
+        return v2 >>> 1 ^ -(v2 & 1);
       }
       if (fn === 7 && wt === 0) {
         return readVarint(buf, off).v !== 0;
@@ -9827,7 +9835,7 @@
           step();
         });
       },
-      (err, v) => cb(err ? null : v)
+      (err, v2) => cb(err ? null : v2)
     );
   }
   function _onSccPopupOpen(e) {
@@ -10755,8 +10763,8 @@
   }
   var PowerInfraLayerProvider = class extends LayerProvider {
     create() {
-      function fmtVoltage(v) {
-        const n = parseInt(v, 10) || 0;
+      function fmtVoltage(v2) {
+        const n = parseInt(v2, 10) || 0;
         if (!n) return null;
         if (n >= 1e3) {
           const kv = n / 1e3;
@@ -10765,26 +10773,26 @@
         return n + " V";
       }
       function lineColor(voltageStr) {
-        const v = parseInt(voltageStr, 10) || 0;
-        if (v >= 3e5) return "#D9534F";
-        if (v >= 1e5) return "#F0A500";
-        if (v >= 33e3) return "#FFD93D";
-        if (v > 0) return "#9CCC65";
+        const v2 = parseInt(voltageStr, 10) || 0;
+        if (v2 >= 3e5) return "#D9534F";
+        if (v2 >= 1e5) return "#F0A500";
+        if (v2 >= 33e3) return "#FFD93D";
+        if (v2 > 0) return "#9CCC65";
         return "#aaa";
       }
       function lineWeight(power, voltageStr) {
-        const v = parseInt(voltageStr, 10) || 0;
-        if (power === "line") return v >= 3e5 ? 3 : v >= 1e5 ? 2.5 : 2;
+        const v2 = parseInt(voltageStr, 10) || 0;
+        if (power === "line") return v2 >= 3e5 ? 3 : v2 >= 1e5 ? 2.5 : 2;
         if (power === "cable") return 1.6;
         return 1.2;
       }
       const pointIcon = (g, f, s) => oimIcon("dw-infra-icon", g, f, s || 16);
-      function kvToV(v) {
-        const x = parseFloat(v);
+      function kvToV(v2) {
+        const x = parseFloat(v2);
         return x ? String(Math.round(x * 1e3)) : "";
       }
-      function fmtMW(v) {
-        const x = parseFloat(v);
+      function fmtMW(v2) {
+        const x = parseFloat(v2);
         if (!x) return "";
         return (Number.isInteger(x) ? x : x < 10 ? x.toFixed(2) : x.toFixed(1)) + " MW";
       }
@@ -11332,24 +11340,24 @@
   };
 
   // src/providers/qld-mining.js
-  function _mineVal(v) {
-    if (v === null || v === void 0) return "";
-    const s = String(v).trim();
+  function _mineVal(v2) {
+    if (v2 === null || v2 === void 0) return "";
+    const s = String(v2).trim();
     return s && s.toLowerCase() !== "null" ? s : "";
   }
   function _pickAny(a, keys) {
     for (const k of keys) {
-      const v = _mineVal(a[k]);
-      if (v) return v;
+      const v2 = _mineVal(a[k]);
+      if (v2) return v2;
     }
     return "";
   }
   function _mineYear(value) {
-    const v = _mineVal(value);
-    if (!v) return "";
+    const v2 = _mineVal(value);
+    if (!v2) return "";
     let year = "";
-    if (/^-?\d{9,}$/.test(v)) year = String(new Date(Number(v)).getUTCFullYear());
-    else year = (/(?:^|\D)(\d{4})(?:\D|$)/.exec(v) || [])[1] || "";
+    if (/^-?\d{9,}$/.test(v2)) year = String(new Date(Number(v2)).getUTCFullYear());
+    else year = (/(?:^|\D)(\d{4})(?:\D|$)/.exec(v2) || [])[1] || "";
     return year >= "1800" && year <= "2100" ? year : "";
   }
   function _allCommodities(value) {
@@ -11606,15 +11614,15 @@
   }
 
   // src/providers/qld-land.js
-  function _landVal(v) {
-    if (v === null || v === void 0) return "";
-    const s = String(v).trim();
+  function _landVal(v2) {
+    if (v2 === null || v2 === void 0) return "";
+    const s = String(v2).trim();
     return s && s.toLowerCase() !== "null" && s.toLowerCase() !== "none" ? s : "";
   }
   function _landPick(a, keys) {
     for (const k of keys) {
-      const v = _landVal(a[k]);
-      if (v) return v;
+      const v2 = _landVal(a[k]);
+      if (v2) return v2;
     }
     return "";
   }
@@ -11843,20 +11851,20 @@
       drawingInfo: { renderer }
     })));
   }
-  function _val(v) {
-    if (v === null || v === void 0) return "";
-    const s = String(v).trim();
+  function _val(v2) {
+    if (v2 === null || v2 === void 0) return "";
+    const s = String(v2).trim();
     return s && !/^(null|none|unknown)$/i.test(s) ? s : "";
   }
-  function _surveyYear(v) {
-    const s = _val(v);
+  function _surveyYear(v2) {
+    const s = _val(v2);
     if (!s) return "";
     if (/^\d{11,13}$/.test(s)) return String(new Date(Number(s)).getUTCFullYear());
     const m = /\b(1[89]\d\d|20\d\d)\b/.exec(s);
     return m ? m[1] : "";
   }
-  function _surveyReportUrl(v) {
-    const s = _val(v);
+  function _surveyReportUrl(v2) {
+    const s = _val(v2);
     if (!/^https:\/\//i.test(s) || /["\\\s]/.test(s)) return "";
     try {
       const u = new URL(s);
@@ -11952,9 +11960,9 @@
       drawingInfo: { renderer: { type: "simple", label, symbol: { type: "esriSLS", style, color: [...rgb, 235], width } }, showLabels: false }
     })));
   }
-  function _val2(v) {
-    if (v === null || v === void 0) return "";
-    const s = String(v).trim();
+  function _val2(v2) {
+    if (v2 === null || v2 === void 0) return "";
+    const s = String(v2).trim();
     return s && !/^(null|none|unknown|na)$/i.test(s) ? s : "";
   }
   var OWNERS = {
@@ -12089,13 +12097,13 @@
       pass(302, fireScarLayerId(year - 1), [234, 88, 12], 90, String(year - 1))
     ]);
   }
-  function _val3(v) {
-    if (v === null || v === void 0) return "";
-    const s = String(v).trim();
+  function _val3(v2) {
+    if (v2 === null || v2 === void 0) return "";
+    const s = String(v2).trim();
     return s && !/^(null|none)$/i.test(s) ? s : "";
   }
-  function _fireMonth(v) {
-    const s = _val3(v);
+  function _fireMonth(v2) {
+    const s = _val3(v2);
     if (!s) return "";
     let d = null;
     if (/^-?\d{11,13}$/.test(s)) d = new Date(Number(s));
@@ -12105,8 +12113,8 @@
     }
     return d && !isNaN(d) && d.getUTCFullYear() > 1900 ? `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}` : "";
   }
-  var _ha = (v) => {
-    const n = Number(_val3(v));
+  var _ha = (v2) => {
+    const n = Number(_val3(v2));
     return n > 0 ? (n >= 100 ? Math.round(n).toLocaleString("en-AU") : n.toFixed(n < 10 ? 1 : 0)) + " ha" : "";
   };
   function _formatParkFire(attrs) {
@@ -12219,16 +12227,16 @@
   }
   function gaDoseValue(data) {
     const f = data && Array.isArray(data.features) ? data.features[0] : null;
-    const v = f && f.properties ? Number(f.properties.GRAY_INDEX) : NaN;
-    return Number.isFinite(v) && v >= 0 && v < 1e5 ? v : null;
+    const v2 = f && f.properties ? Number(f.properties.GRAY_INDEX) : NaN;
+    return Number.isFinite(v2) && v2 >= 0 && v2 < 1e5 ? v2 : null;
   }
   var WORLD_AVG = 59;
   function _formatDose(value) {
     if (value == null) return "";
-    const v = value < 10 ? value.toFixed(1) : String(Math.round(value));
+    const v2 = value < 10 ? value.toFixed(1) : String(Math.round(value));
     const ratio = value / WORLD_AVG;
     const compare = ratio < 0.67 ? "below the world average outdoors" : ratio <= 1.5 ? "about the world average outdoors" : ratio <= 3 ? "above the world average outdoors" : "well above the world average outdoors (often granite or mineral sands)";
-    return esc`<b>Natural radiation ${v} nGy/h</b><br>${compare} (${WORLD_AVG} nGy/h)` + `<br><span class="dw-cad-sub">Gamma from the ground, Geoscience Australia 2019 airborne survey</span>`;
+    return esc`<b>Natural radiation ${v2} nGy/h</b><br>${compare} (${WORLD_AVG} nGy/h)` + `<br><span class="dw-cad-sub">Gamma from the ground, Geoscience Australia 2019 airborne survey</span>`;
   }
   function fetchGaDose(map, latlng, cb) {
     const p = L.CRS.EPSG3857.project(latlng);
@@ -12236,7 +12244,7 @@
     return gmJsonGet(gaDoseInfoUrl(p.x, p.y, mpp), { timeout: 15e3 }, (err, data) => cb(err ? null : gaDoseValue(data)));
   }
   function gaDoseIdentify(map, latlng, cb) {
-    fetchGaDose(map, latlng, (v) => cb(v == null ? "" : `<div class="dw-mine-hd">Natural radiation here</div><div class="dw-mine-list"><div class="dw-mine-row">${_formatDose(v)}</div></div>`));
+    fetchGaDose(map, latlng, (v2) => cb(v2 == null ? "" : `<div class="dw-mine-hd">Natural radiation here</div><div class="dw-mine-list"><div class="dw-mine-row">${_formatDose(v2)}</div></div>`));
   }
   var GaRadiometricsLayerProvider = class extends LayerProvider {
     create() {
@@ -12253,13 +12261,13 @@
           this._dwMove = (e) => {
             clearTimeout(timer);
             const ll = e.latlng, my = ++gen;
-            timer = setTimeout(() => fetchGaDose(map, ll, (v) => {
+            timer = setTimeout(() => fetchGaDose(map, ll, (v2) => {
               if (my !== gen || !this._map) return;
-              if (v == null) {
+              if (v2 == null) {
                 if (tip._map) tip.remove();
                 return;
               }
-              tip.setLatLng(ll).setContent(_formatDose(v));
+              tip.setLatLng(ll).setContent(_formatDose(v2));
               if (!tip._map) tip.addTo(map);
             }), 300);
           };
@@ -12348,8 +12356,8 @@
     if (youngest < 0.02) return `up to about ${fmtMa(oldest)} years old`;
     return `about ${fmtMa(oldest).replace(/ (million|billion|thousand)$/, "")}–${fmtMa(youngest)} years old`;
   }
-  var _val4 = (v) => {
-    const s = v == null ? "" : String(v).trim();
+  var _val4 = (v2) => {
+    const s = v2 == null ? "" : String(v2).trim();
     return s && !/^(null|none|-999)$/i.test(s) ? s : "";
   };
   var sentence = (s) => {
@@ -12452,6 +12460,183 @@
       onRemove: off
     });
     return { GeologyAustraliaProvider: GeologyAustraliaProvider2, GeologyQldProvider: GeologyQldProvider2 };
+  }
+
+  // src/providers/extra-layers.js
+  var v = (x) => {
+    const s = x == null ? "" : String(x).trim();
+    return s && !/^(null|none)$/i.test(s) ? s : "";
+  };
+  function _formatPipeline(attrs) {
+    const a = attrs || {};
+    const name = v(a.Name || a.feature_name);
+    const type = v(a["Feature Type"] || a.feature_type) || "Pipeline";
+    const status = v(a.Status || a.status);
+    const operator = v(a.Operator || a.operator);
+    const km = Number(v(a["Length Km"] || a.length_km));
+    const lines = [esc`<b>${name || type}</b>`];
+    const facts = [name ? type : "", km > 0 ? `${km >= 10 ? Math.round(km) : km.toFixed(1)} km` : ""].filter(Boolean).join(" · ");
+    if (facts) lines.push(_escHtml(facts));
+    const st = status === "Fully capable of operation" ? "In operation" : status;
+    if (st || operator) lines.push(_escHtml([st, operator ? "operator " + operator : ""].filter(Boolean).join(" · ")));
+    return lines.join("<br>");
+  }
+  function _formatEasement(attrs) {
+    const a = attrs || {};
+    const lot = v(a.Lot), plan = v(a.Plan);
+    const m2 = Number(v(a["Lot area (m²)"]));
+    const lines = [esc`<b>Easement ${lot}${plan ? " on " + plan : ""}</b>`];
+    const facts = [m2 > 0 ? m2 >= 1e4 ? `${(m2 / 1e4).toFixed(1)} ha` : `${Math.round(m2).toLocaleString("en-AU")} m²` : "", v(a.Locality)].filter(Boolean).join(" · ");
+    if (facts) lines.push(_escHtml(facts));
+    lines.push(`<span class="dw-cad-sub">A strip reserved for power, pipes, drainage or access; the record does not say which</span>`);
+    return lines.join("<br>");
+  }
+  function _formatPastoral(attrs) {
+    const a = attrs || {};
+    const d = v(a.DISTRICT || a.district);
+    const name = d ? d.charAt(0) + d.slice(1).toLowerCase() : "";
+    return esc`<b>${name || "Pastoral"} pastoral district</b>` + `<br><span class="dw-cad-sub">One of Queensland's 15 historic pastoral districts</span>`;
+  }
+  function destroyedMarksDynamicLayers() {
+    return JSON.stringify([{
+      id: 13,
+      source: { type: "mapLayer", mapLayerId: 13 },
+      drawingInfo: { renderer: { type: "simple", symbol: {
+        type: "esriSMS",
+        style: "esriSMSX",
+        color: [107, 114, 128, 230],
+        size: 7,
+        outline: { color: [107, 114, 128, 230], width: 1.4 }
+      } }, showLabels: false }
+    }]);
+  }
+  function pastoralDynamicLayers() {
+    return JSON.stringify([{
+      id: 0,
+      source: { type: "mapLayer", mapLayerId: 0 },
+      drawingInfo: {
+        renderer: { type: "simple", symbol: {
+          type: "esriSFS",
+          style: "esriSFSNull",
+          outline: { type: "esriSLS", style: "esriSLSDashDot", color: [146, 64, 14, 220], width: 1.6 }
+        } },
+        showLabels: true,
+        labelingInfo: [{
+          labelExpression: "[district]",
+          labelPlacement: "esriServerPolygonPlacementAlwaysHorizontal",
+          symbol: {
+            type: "esriTS",
+            color: [120, 53, 15, 255],
+            haloColor: [255, 255, 255, 255],
+            haloSize: 2,
+            font: { family: "Arial", size: 11, weight: "bold" }
+          }
+        }]
+      }
+    }]);
+  }
+  function extraIdentifySources() {
+    return [
+      {
+        layerName: CFG.LAYER_PIPELINES,
+        heading: "Pipelines",
+        baseUrl: CFG.GA_PIPELINES_SERVICE,
+        layers: "all:0,1",
+        tolerance: 5,
+        minZoom: 6,
+        format: _formatPipeline
+      },
+      {
+        layerName: CFG.LAYER_EASEMENTS,
+        heading: "Easements",
+        baseUrl: CFG.QLD_STATE_LAND_SERVICE,
+        layers: "all:9",
+        tolerance: 1,
+        minZoom: 14,
+        format: _formatEasement
+      },
+      {
+        layerName: CFG.LAYER_PASTORAL,
+        heading: "Pastoral district",
+        baseUrl: CFG.QLD_PASTORAL_SERVICE,
+        layers: "all:0",
+        tolerance: 0,
+        minZoom: 4,
+        format: _formatPastoral
+      },
+      {
+        layerName: CFG.LAYER_OLD_MARKS,
+        heading: "Destroyed survey marks",
+        baseUrl: CFG.QLD_SURVEY_SERVICE,
+        layers: "all:13",
+        tolerance: 6,
+        minZoom: CFG.QLD_SURVEY_MIN_ZOOM,
+        format: _formatSurveyMark
+      }
+    ];
+  }
+  function createExtraProviders({ makeHoverIdentify: makeHoverIdentify2 }) {
+    const [pipe, ease, past, marks] = extraIdentifySources();
+    const off = (layer) => {
+      if (layer._dwHoverOff) {
+        layer._dwHoverOff();
+        layer._dwHoverOff = null;
+      }
+    };
+    const hover = (src, format) => makeHoverIdentify2({
+      baseUrl: src.baseUrl,
+      layers: src.layers,
+      tolerance: src.tolerance,
+      minZoom: src.minZoom,
+      tipClass: "dw-qpws-tip",
+      formatTooltip: format || src.format
+    });
+    const hp = hover(pipe), he = hover(ease), ha = hover(past);
+    const hm = hover(marks, (a) => _formatSurveyMark({ ...a, "Report link": "", "Report Link": "" }));
+    const prov = (o, install) => arcgisExportProvider({ ...o, onAdd: (layer, map) => install(layer, map), onRemove: off });
+    return {
+      PipelinesProvider: prov({
+        baseUrl: CFG.GA_PIPELINES_SERVICE,
+        showLayers: "0,1",
+        pane: "dwPipelinePane",
+        paneZIndex: 408,
+        opacity: 1,
+        minZoom: 4,
+        maxZoom: 25,
+        attribution: 'Pipelines &copy; <a href="https://www.ga.gov.au/" target="_blank" rel="noreferrer">Geoscience Australia</a> (CC BY 4.0)'
+      }, hp),
+      EasementsProvider: prov({
+        baseUrl: CFG.QLD_STATE_LAND_SERVICE,
+        showLayers: "9",
+        pane: "dwEasementPane",
+        paneZIndex: 389,
+        opacity: 0.9,
+        minZoom: 14,
+        maxZoom: 25,
+        attribution: 'Easements &copy; <a href="https://www.data.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (Resources)</a>'
+      }, he),
+      PastoralProvider: prov({
+        baseUrl: CFG.QLD_PASTORAL_SERVICE,
+        tileSize: 512,
+        extraParams: "&dynamicLayers=" + encodeURIComponent(pastoralDynamicLayers()),
+        pane: "dwPastoralPane",
+        paneZIndex: 380,
+        opacity: 0.8,
+        minZoom: 4,
+        maxZoom: 25,
+        attribution: 'Pastoral districts &copy; <a href="https://www.data.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland</a>'
+      }, ha),
+      OldMarksProvider: prov({
+        baseUrl: CFG.QLD_SURVEY_SERVICE,
+        extraParams: "&dynamicLayers=" + encodeURIComponent(destroyedMarksDynamicLayers()),
+        pane: "dwOldMarksPane",
+        paneZIndex: 401,
+        opacity: 1,
+        minZoom: CFG.QLD_SURVEY_MIN_ZOOM,
+        maxZoom: 25,
+        attribution: 'Survey marks &copy; <a href="https://www.qld.gov.au/environment/land/title/surveying" target="_blank" rel="noreferrer">State of Queensland (Resources)</a>'
+      }, hm)
+    };
   }
 
   // src/providers/abs-postcodes.js
@@ -12610,8 +12795,8 @@
 
   // src/utils/alltrails.js
   function allTrailsExploreUrl(view) {
-    const v = view || {};
-    const n = Number(v.north), s = Number(v.south), w = Number(v.west), e = Number(v.east);
+    const v2 = view || {};
+    const n = Number(v2.north), s = Number(v2.south), w = Number(v2.west), e = Number(v2.east);
     if (![n, s, w, e].every(Number.isFinite) || n <= s || e <= w) return "";
     if (n > 90 || s < -90 || w < -180 || e > 180) return "";
     const f = (x) => x.toFixed(5);
@@ -12646,7 +12831,7 @@
   }
 
   // src/providers/alltrails.js
-  var clean2 = (v, max) => String(v == null ? "" : v).replace(/\s+/g, " ").trim().slice(0, max);
+  var clean2 = (v2, max) => String(v2 == null ? "" : v2).replace(/\s+/g, " ").trim().slice(0, max);
   var ROUTE_COLORS = { hiking: "#15803d", mountain_biking: "#b45309", biking: "#1d4ed8", running: "#be123c" };
   var ROUTE_NAMES = { hiking: "Walking route", mountain_biking: "Mountain bike route", biking: "Cycling route", running: "Running route" };
   var NETWORKS = {
@@ -12670,9 +12855,9 @@
   var HIGHWAYS = { path: "Path", track: "Track", footway: "Footpath", cycleway: "Cycleway", bridleway: "Bridle path", steps: "Steps" };
   function atAccess(props) {
     const p = props || {};
-    for (const v of [p.f, p.a, p.ac]) {
-      if (v === "private" || v === "no" || v === "permit") return v;
-      if (v === "yes" || v === "designated" || v === "permissive") return "";
+    for (const v2 of [p.f, p.a, p.ac]) {
+      if (v2 === "private" || v2 === "no" || v2 === "permit") return v2;
+      if (v2 === "yes" || v2 === "designated" || v2 === "permissive") return "";
     }
     return "";
   }
@@ -12710,8 +12895,8 @@
   var _lookup = null;
   function storedToken() {
     try {
-      const v = JSON.parse(GM_getValue(CFG.ALLTRAILS_TOKEN_KEY, "null"));
-      return v && typeof v.tok === "string" ? v.tok : "";
+      const v2 = JSON.parse(GM_getValue(CFG.ALLTRAILS_TOKEN_KEY, "null"));
+      return v2 && typeof v2.tok === "string" ? v2.tok : "";
     } catch (_) {
       return "";
     }
@@ -12976,8 +13161,8 @@
   }
   function routeSignature(paths) {
     let h = 2166136261, n = 0;
-    const mix = (v) => {
-      h = Math.imul(h ^ (v | 0), 16777619) >>> 0;
+    const mix = (v2) => {
+      h = Math.imul(h ^ (v2 | 0), 16777619) >>> 0;
     };
     for (const path of paths || []) {
       mix(2147483647);
@@ -13266,17 +13451,17 @@
     const points = [{ i: 0, v: values[0] }];
     let dir = 0, hi = { i: 0, v: values[0] }, lo = { i: 0, v: values[0] };
     for (let i = 1; i < values.length; i++) {
-      const v = values[i];
-      if (v > hi.v) hi = { i, v };
-      if (v < lo.v) lo = { i, v };
-      if (dir >= 0 && hi.v - v > hysteresis) {
+      const v2 = values[i];
+      if (v2 > hi.v) hi = { i, v: v2 };
+      if (v2 < lo.v) lo = { i, v: v2 };
+      if (dir >= 0 && hi.v - v2 > hysteresis) {
         if (hi.i > points[points.length - 1].i) points.push(hi);
         dir = -1;
-        lo = { i, v };
-      } else if (dir <= 0 && v - lo.v > hysteresis) {
+        lo = { i, v: v2 };
+      } else if (dir <= 0 && v2 - lo.v > hysteresis) {
         if (lo.i > points[points.length - 1].i) points.push(lo);
         dir = 1;
-        hi = { i, v };
+        hi = { i, v: v2 };
       }
     }
     const end = dir > 0 ? hi : dir < 0 ? lo : { i: values.length - 1, v: values[values.length - 1] };
@@ -13996,7 +14181,7 @@
     if (e < QLD_BOX.west || w > QLD_BOX.east || n < QLD_BOX.south || s > QLD_BOX.north) return [];
     const where = `${SM}alt1_nm IS NOT NULL AND ${SM}mrkcnd_de = 'Good'`;
     const fields = ["mrk_id", "alt1_nm", "mrktype_de", "ahdheight"].map((f) => SM + f).join(",");
-    return [3, 4, 16].map((id) => `${CFG.QLD_SURVEY_SERVICE}/${id}/query?where=${encodeURIComponent(where)}&geometry=${[w, s, e, n].map((v) => v.toFixed(5)).join(",")}&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326&spatialRel=esriSpatialRelIntersects&outFields=${encodeURIComponent(fields)}&returnGeometry=true&f=json`);
+    return [3, 4, 16].map((id) => `${CFG.QLD_SURVEY_SERVICE}/${id}/query?where=${encodeURIComponent(where)}&geometry=${[w, s, e, n].map((v2) => v2.toFixed(5)).join(",")}&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326&spatialRel=esriSpatialRelIntersects&outFields=${encodeURIComponent(fields)}&returnGeometry=true&f=json`);
   }
   function markName(raw) {
     return String(raw || "").trim().split(/\s+/).map((w) => /^[A-Z]+$/.test(w) ? w.charAt(0) + w.slice(1).toLowerCase() : w).join(" ");
@@ -14972,17 +15157,17 @@
     }
     return r;
   }
-  function _multmv(m, v) {
+  function _multmv(m, v2) {
     return [
-      m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
-      m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
-      m[6] * v[0] + m[7] * v[1] + m[8] * v[2]
+      m[0] * v2[0] + m[1] * v2[1] + m[2] * v2[2],
+      m[3] * v2[0] + m[4] * v2[1] + m[5] * v2[2],
+      m[6] * v2[0] + m[7] * v2[1] + m[8] * v2[2]
     ];
   }
   function _basisToPoints(p) {
     const m = [p[0][0], p[1][0], p[2][0], p[0][1], p[1][1], p[2][1], 1, 1, 1];
-    const v = _multmv(_adj(m), [p[3][0], p[3][1], 1]);
-    return _multmm(m, [v[0], 0, 0, 0, v[1], 0, 0, 0, v[2]]);
+    const v2 = _multmv(_adj(m), [p[3][0], p[3][1], 1]);
+    return _multmm(m, [v2[0], 0, 0, 0, v2[1], 0, 0, 0, v2[2]]);
   }
   function _general2DProjection(src, dst) {
     return _multmm(_basisToPoints(dst), _adj(_basisToPoints(src)));
@@ -15071,10 +15256,10 @@
     const [NW, NE, SE, SW] = opts.corners;
     const gridLL = [];
     for (let r = 0; r <= _GRID; r++) for (let cc = 0; cc <= _GRID; cc++) {
-      const u = cc / _GRID, v = r / _GRID;
+      const u = cc / _GRID, v2 = r / _GRID;
       const tLat = NW[0] + (NE[0] - NW[0]) * u, tLng = NW[1] + (NE[1] - NW[1]) * u;
       const bLat = SW[0] + (SE[0] - SW[0]) * u, bLng = SW[1] + (SE[1] - SW[1]) * u;
-      gridLL.push([tLat + (bLat - tLat) * v, tLng + (bLng - tLng) * v]);
+      gridLL.push([tLat + (bLat - tLat) * v2, tLng + (bLng - tLng) * v2]);
     }
     const cornerIcon = L.divIcon({ className: "dw-histmap-handle", iconSize: [16, 16] });
     const midIcon = L.divIcon({ className: "dw-histmap-handle dw-histmap-handle--mid", iconSize: [14, 14] });
@@ -15185,15 +15370,15 @@
   }
   function _pick(a, keys) {
     for (const k of keys) {
-      const v = a[k];
-      if (v !== null && v !== void 0 && String(v).trim() && String(v).trim().toLowerCase() !== "null") {
-        return String(v).trim();
+      const v2 = a[k];
+      if (v2 !== null && v2 !== void 0 && String(v2).trim() && String(v2).trim().toLowerCase() !== "null") {
+        return String(v2).trim();
       }
     }
     return "";
   }
-  function _yearOf(v) {
-    const m = String(v || "").match(/\b(1[6-9]\d\d|20\d\d)\b/);
+  function _yearOf(v2) {
+    const m = String(v2 || "").match(/\b(1[6-9]\d\d|20\d\d)\b/);
     return m ? m[1] : "";
   }
   function _histMapScanUrl(value) {
@@ -15581,6 +15766,7 @@
   var PostcodeLayerProvider = createPostcodeProvider({ makeHoverIdentify });
   var SuburbLayerProvider = createSuburbProvider({ makeHoverIdentify });
   var { GeologyAustraliaProvider, GeologyQldProvider } = createGeologyProviders({ makeHoverIdentify });
+  var { PipelinesProvider, EasementsProvider, PastoralProvider, OldMarksProvider } = createExtraProviders({ makeHoverIdentify });
   var CustomTilesApp = class {
     constructor() {
       this.qldToken = new QldTokenManager({
@@ -15758,6 +15944,10 @@
         addOverlay(CFG.LAYER_GA_RADIATION, new GaRadiometricsLayerProvider());
         addOverlay(CFG.LAYER_GEOLOGY_AU, new GeologyAustraliaProvider());
         addOverlay(CFG.LAYER_GEOLOGY_QLD, new GeologyQldProvider());
+        addOverlay(CFG.LAYER_PIPELINES, new PipelinesProvider());
+        addOverlay(CFG.LAYER_EASEMENTS, new EasementsProvider());
+        addOverlay(CFG.LAYER_PASTORAL, new PastoralProvider());
+        addOverlay(CFG.LAYER_OLD_MARKS, new OldMarksProvider());
         addOverlay(CFG.LAYER_SAFECAST, new SafecastLayerProvider());
         addOverlay(CFG.LAYER_INFRA, new PowerInfraLayerProvider());
         addOverlay(CFG.LAYER_TELECOM, new TelecomsLayerProvider());
@@ -16181,7 +16371,8 @@
         ...fireIdentifySources((/* @__PURE__ */ new Date()).getFullYear()),
         postcodeIdentifySource(),
         suburbIdentifySource(),
-        ...geologyIdentifySources()
+        ...geologyIdentifySources(),
+        ...extraIdentifySources()
       ]) {
         const lyr = this.layers[src.layerName];
         if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
@@ -16974,6 +17165,11 @@
         _formatGaGeology,
         _formatQldGeology,
         geologyAgeYears,
+        _formatEasement,
+        _formatPastoral,
+        _formatPipeline,
+        destroyedMarksDynamicLayers,
+        pastoralDynamicLayers,
         _formatPostcode,
         postcodeDynamicLayers,
         _formatSuburb,
