@@ -1726,6 +1726,13 @@ t("fire formatters: kind, month, park, area; escapes", () => {
 	assert(dw._formatFireScar({ Month: 1, Year: 2026, "Area(ha)": 103.2 }).startsWith("<b>Burnt, January 2026</b>"), "numeric month");
 });
 
+t("years read from identify dates come out right in either day/month order", () => {
+	// The server writes dates in the request's language: en-US month/day,
+	// en-AU day/month. Only the year is used from these, which is safe.
+	for (const s of ["6/14/1872", "14/6/1872", "6/14/1872 12:00:00 AM", "14/6/1872 12:00:00 AM"]) eq(dw._mineYear(s), "1872", s);
+	for (const s of ["5/17/2025", "17/5/2025", "5/17/2025 3:04:00 PM"]) eq(dw._surveyYear(s), "2025", s);
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —
