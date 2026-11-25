@@ -66,7 +66,9 @@ await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 45_000 });
 
 // Wait for plan + script + 3D button
 await page.waitForSelector(".leaflet-planner-controls", { timeout: 30_000 });
-await page.waitForSelector(".dw-3d-btn",                { timeout: 10_000 });
+// The script adds the button once it has the map; under machine load that
+// can take well over 10 s after the planner toolbar appears.
+await page.waitForSelector(".dw-3d-btn",                { timeout: 30_000 });
 
 // Dismiss any boot-time modal aggressively. dynamic.watch sometimes
 // pops a help modal that doesn't carry the `.fade.in` classes (older
