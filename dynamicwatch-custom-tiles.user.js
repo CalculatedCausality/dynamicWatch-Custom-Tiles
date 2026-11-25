@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.27.0
+// @version      7.28.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -13068,6 +13068,15 @@
       icon: "fa-wrench",
       color: "#00838f",
       types: ["bicycle_repair_station", "bicycle"]
+    },
+    // Queensland only; hidden until switched on in the list.
+    {
+      id: "marks",
+      label: "Survey marks",
+      glyph: "△",
+      color: "#15803d",
+      types: ["survey_mark"],
+      defaultHidden: true
     }
   ];
   var CATEGORY = Object.fromEntries(POI_CATEGORIES.map((c) => [c.id, c]));
@@ -13111,7 +13120,8 @@
     climb: "Climb",
     climb_top: "Top of climb",
     creek_crossing: "Creek crossing",
-    track_section: "Track or road"
+    track_section: "Track or road",
+    survey_mark: "Survey mark"
   };
   var TYPE_GLYPHS = { peak: "▲", volcano: "▲" };
   var COURSE_TYPES = /* @__PURE__ */ new Set(["climb", "climb_top", "creek_crossing", "track_section"]);
@@ -13346,7 +13356,8 @@
     track: 6,
     views: 7,
     shelter: 7,
-    bike: 7
+    bike: 7,
+    marks: 8
   };
   var TYPE_PRIORITY = { picnic_site: 8, parking: 9 };
   function waypointPriority(poi) {
@@ -13482,6 +13493,83 @@
       }
     };
   }
+  var SM = "sirpub.prop.qld_surveycontrol_scdb.";
+  var QLD_BOX = { west: 137.9, south: -29.3, east: 153.7, north: -9 };
+  function surveyMarkQueryUrls(box) {
+    const [w, s, e, n] = box;
+    if (e < QLD_BOX.west || w > QLD_BOX.east || n < QLD_BOX.south || s > QLD_BOX.north) return [];
+    const where = `${SM}alt1_nm IS NOT NULL AND ${SM}mrkcnd_de = 'Good'`;
+    const fields = ["mrk_id", "alt1_nm", "mrktype_de", "ahdheight"].map((f) => SM + f).join(",");
+    return [3, 4, 16].map((id) => `${CFG.QLD_SURVEY_SERVICE}/${id}/query?where=${encodeURIComponent(where)}&geometry=${[w, s, e, n].map((v) => v.toFixed(5)).join(",")}&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326&spatialRel=esriSpatialRelIntersects&outFields=${encodeURIComponent(fields)}&returnGeometry=true&f=json`);
+  }
+  function markName(raw) {
+    return String(raw || "").trim().split(/\s+/).map((w) => /^[A-Z]+$/.test(w) ? w.charAt(0) + w.slice(1).toLowerCase() : w).join(" ");
+  }
+  function parseSurveyMarks(data) {
+    const out = [];
+    for (const f of data && Array.isArray(data.features) ? data.features : []) {
+      const a = f.attributes || {}, g = f.geometry || {};
+      const name = markName(a[SM + "alt1_nm"]);
+      if (!name || !Number.isFinite(g.x) || !Number.isFinite(g.y)) continue;
+      const ele = Number(a[SM + "ahdheight"]);
+      out.push({
+        category: "marks",
+        type: "survey_mark",
+        name,
+        lng: g.x,
+        lat: g.y,
+        ele: a[SM + "ahdheight"] != null && Number.isFinite(ele) ? Math.round(ele) : null,
+        markId: String(a[SM + "mrk_id"] || "")
+      });
+    }
+    return out;
+  }
+  function routeBox(parts, padM) {
+    let w = 180, s = 90, e = -180, n = -90;
+    for (const part of parts) for (const [lng, lat] of part) {
+      if (lng < w) w = lng;
+      if (lng > e) e = lng;
+      if (lat < s) s = lat;
+      if (lat > n) n = lat;
+    }
+    const dLat = padM / 111320, dLng = padM / (111320 * Math.max(0.1, Math.cos((s + n) / 2 * Math.PI / 180)));
+    return [w - dLng, s - dLat, e + dLng, n + dLat];
+  }
+  function fetchSurveyMarks(box, cb) {
+    const urls = surveyMarkQueryUrls(box);
+    if (!urls.length) {
+      cb([]);
+      return { cancel() {
+      } };
+    }
+    let left = urls.length, done = false;
+    const marks = [], handles = [];
+    const one = () => {
+      if (--left === 0 && !done) {
+        done = true;
+        cb(marks);
+      }
+    };
+    for (const url of urls) {
+      try {
+        handles.push(gmJsonGet(url, { timeout: 2e4 }, (err, data) => {
+          if (!err) marks.push(...parseSurveyMarks(data));
+          one();
+        }));
+      } catch (_) {
+        one();
+      }
+    }
+    return { cancel() {
+      done = true;
+      for (const h of handles) {
+        try {
+          gmCancel(h);
+        } catch (_) {
+        }
+      }
+    } };
+  }
   function poiError(code, message) {
     const error = new Error(message);
     error.code = code;
@@ -13505,10 +13593,12 @@
     }
     const samples = resampleRoute(route);
     let cancelled = false, inner = null, elevationJob = null, tileResult = null, elevation = null;
+    let marks = null, marksJob = null;
     const stop = () => {
       cancelled = true;
       if (inner) inner.cancel();
       if (elevationJob && elevationJob.cancel) elevationJob.cancel();
+      if (marksJob && marksJob.cancel) marksJob.cancel();
     };
     const fail = (error) => {
       if (!cancelled) {
@@ -13517,11 +13607,11 @@
       }
     };
     const finish = () => {
-      if (cancelled || !tileResult || !elevation) return;
+      if (cancelled || !tileResult || !elevation || !marks) return;
       cancelled = true;
       const lines = tileResult.tiles.flatMap(tileLines);
       const features = courseFeatures({ route, samples, elevations: elevation.values, lines, metric: opts.metric !== false });
-      const pois = selectRoutePois(tileResult.tiles, route, radius).concat(features).sort((a, b) => a.along - b.along || a.offset - b.offset);
+      const pois = selectRoutePois(tileResult.tiles.concat([{ pois: marks, busStops: [] }]), route, radius).concat(features).sort((a, b) => a.along - b.along || a.offset - b.offset);
       cb(null, {
         pois,
         route,
@@ -13540,6 +13630,14 @@
       });
     } catch (e) {
       elevation = { err: e, values: null };
+    }
+    try {
+      marksJob = (opts.fetchSurveyMarks || fetchSurveyMarks)(routeBox(parts, radius + 50), (list) => {
+        marks = Array.isArray(list) ? list : [];
+        finish();
+      });
+    } catch (e) {
+      marks = [];
     }
     (opts.resolveTemplate || resolveTileTemplate)((err, template) => {
       if (cancelled) return;
@@ -13578,9 +13676,13 @@
     }
     const radius = Number(prefs.radius);
     const nameMode = prefs.nameMode === "km-time" ? "km" : prefs.nameMode;
+    const known = Array.isArray(prefs.known) ? prefs.known : [];
+    const hidden = Array.isArray(prefs.hidden) ? prefs.hidden.filter((id) => CATEGORY[id]) : [];
+    for (const cat of POI_CATEGORIES) if (cat.defaultHidden && !known.includes(cat.id) && !hidden.includes(cat.id)) hidden.push(cat.id);
     return {
       radius: POI_RADIUS_OPTIONS.includes(radius) ? radius : 100,
-      hidden: Array.isArray(prefs.hidden) ? prefs.hidden.filter((id) => CATEGORY[id]) : [],
+      hidden,
+      known: POI_CATEGORIES.map((c) => c.id),
       nameMode: NAME_MODES.some((m) => m.id === nameMode) ? nameMode : "name"
     };
   }

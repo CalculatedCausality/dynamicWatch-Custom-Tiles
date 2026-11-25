@@ -108,7 +108,9 @@ test("POI waypoints use the chosen name mode; a saved distance-and-time mode fal
 	try {
 		const ctl = new RoutePoiController({});
 		ctl._renderPanel = () => {};
-		assert.deepEqual(ctl._prefs, { radius: 100, hidden: [], nameMode: "km" });
+		// Survey marks start hidden; `known` records the categories seen.
+		assert.deepEqual({ ...ctl._prefs, known: undefined }, { radius: 100, hidden: ["marks"], nameMode: "km", known: undefined });
+		assert.ok(ctl._prefs.known.includes("water") && ctl._prefs.known.includes("marks"));
 		const poi = (id, km) => ({ id, name: "Tap", type: "drinking_water", category: "water",
 			lat: north(km)[1], lng: 0, passes: [{ along: km * 1000, offset: 0 }], along: km * 1000, offset: 0 });
 		ctl._addWaypoint(poi("a", 5));

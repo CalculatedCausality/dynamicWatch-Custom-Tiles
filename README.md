@@ -175,6 +175,8 @@ It also finds **course points** on the route itself, so your watch's Up Ahead li
 - **Creek crossings**, named where the map names the creek
 - **Track sections**: where the route moves onto a differently named track or road, such as `Turpentine Track`
 
+In Queensland it also lists **named survey marks** near the route (the hilltop and landmark stations, such as Baroon or Big Pineapple, not the numbered plaques in footpaths), each with its surveyed height. Their chip starts switched off; tap it to show them.
+
 Each kind has its own chip, so you can hide the ones you don't want before adding waypoints.
 
 **Build Up Ahead** makes the plan's waypoints match what's shown, in one step:
@@ -338,6 +340,10 @@ bash tests/run.sh --ci   # plain text output
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
 - **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, refreshing names, Build Up Ahead (adding, one-step Undo, replacing only its own waypoints), list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.28.0
+
+- The POI finder lists **named survey marks** near the route in Queensland, with their surveyed heights. Their chip starts switched off.
 
 ### Release notes — 7.27.0
 

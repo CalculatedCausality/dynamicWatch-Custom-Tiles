@@ -8,6 +8,7 @@ import {
 import {
 	RoutePoiController, SUPPLY_GAPS, classifyPoi, decodePoiTile, findRoutePois, formatRange, tileLines,
 	formatRouteDistance, selectRoutePois, supplyGap, waypointName,
+	loadPrefs, parseSurveyMarks, routeBox, surveyMarkQueryUrls,
 } from "../src/providers/route-pois.js";
 
 // ~111 m per 0.001° of latitude; routes run north from the equator so
@@ -388,4 +389,67 @@ test("an edited route re-runs the search once it has settled, not while it is ch
 	ctl._checkRoute();
 	ctl._checkRoute();
 	assert.deepEqual(searches, [true], "cleared POIs stop following the route");
+});
+
+test("survey marks: Queensland-only query for named good marks, without a record limit", () => {
+	const urls = surveyMarkQueryUrls([152.8, -26.75, 153.0, -26.55]);
+	assert.equal(urls.length, 3, "the three GDA sublayers");
+	for (const u of urls) {
+		const q = new URL(u).searchParams;
+		assert.match(q.get("where"), /alt1_nm IS NOT NULL AND .*mrkcnd_de = 'Good'/);
+		assert.equal(q.get("geometry"), "152.80000,-26.75000,153.00000,-26.55000");
+		// With resultRecordCount this server returns only a couple of matches.
+		assert.equal(q.get("resultRecordCount"), null);
+	}
+	assert.deepEqual(surveyMarkQueryUrls([150.9, -34, 151.3, -33.7]), [], "Sydney is outside Queensland");
+});
+
+test("survey marks: answers become named POIs with heights", () => {
+	const S = "sirpub.prop.qld_surveycontrol_scdb.";
+	const marks = parseSurveyMarks({ features: [
+		{ attributes: { [S + "mrk_id"]: "104392", [S + "alt1_nm"]: "BIG PINEAPPLE", [S + "ahdheight"]: 302.772 }, geometry: { x: 152.911, y: -26.646 } },
+		{ attributes: { [S + "mrk_id"]: "37398", [S + "alt1_nm"]: "SEAQ 322", [S + "ahdheight"]: null }, geometry: { x: 152.938, y: -26.706 } },
+		{ attributes: { [S + "alt1_nm"]: "" }, geometry: { x: 1, y: 1 } },
+		{ attributes: { [S + "alt1_nm"]: "NOWHERE" }, geometry: {} },
+	] });
+	assert.deepEqual(marks.map((m) => [m.name, m.ele, m.category, m.type]),
+		[["Big Pineapple", 303, "marks", "survey_mark"], ["Seaq 322", null, "marks", "survey_mark"]]);
+	assert.deepEqual(parseSurveyMarks(null), []);
+	const box = routeBox([[[153, -26.7], [153.1, -26.6]]], 1000);
+	assert.ok(box[0] < 153 && box[2] > 153.1 && box[1] < -26.7 && box[3] > -26.6, "padded around the route");
+});
+
+test("survey marks along the route join the results; a failed query leaves them out", async () => {
+	const template = "https://tiles.openfreemap.org/test/{z}/{x}/{y}.pbf";
+	const paths = [[[153.0, -26.7], [153.12, -26.7]]];
+	const base = { resolveTemplate: (cb) => cb(null, template), fetchElevations: (_p, cb) => { cb(new Error("no dem")); return { cancel() {} }; } };
+	const run = (fetchSurveyMarks) => new Promise((resolve) => {
+		const transport = fakeTransport();
+		let out = null;
+		findRoutePois(paths, 100, { ...base, fetchTile: transport.fetchTile, fetchSurveyMarks }, (err, value) => { out = { err, value }; });
+		(async () => { for (let i = 0; i < 200 && !out; i++) await transport.flush(); resolve(out); })();
+	});
+	const near = { category: "marks", type: "survey_mark", name: "Baroon", ele: 412, lng: 153.05, lat: -26.7004, markId: "1" };
+	const far = { ...near, name: "Faraway", lat: -26.65, markId: "2" };
+	const ok = await run((box, cb) => { assert.ok(box[0] < 153 && box[2] > 153.12); cb([near, far]); return { cancel() {} }; });
+	assert.equal(ok.err, null);
+	assert.deepEqual(ok.value.pois.filter((p) => p.category === "marks").map((p) => p.name), ["Baroon"], "only marks within reach of the route");
+	const failed = await run((_box, cb) => { cb(null); return { cancel() {} }; });
+	assert.equal(failed.err, null);
+	assert.equal(failed.value.pois.filter((p) => p.category === "marks").length, 0);
+});
+
+test("survey marks start hidden until the user has seen the category", () => {
+	const store = {};
+	globalThis.GM_getValue = (k, d) => (k in store ? store[k] : d);
+	globalThis.GM_setValue = (k, v) => { store[k] = v; };
+	try {
+		assert.ok(loadPrefs().hidden.includes("marks"), "new users: hidden");
+		store.dw_route_poi_prefs = JSON.stringify({ hidden: ["food"] });
+		assert.deepEqual(loadPrefs().hidden.sort(), ["food", "marks"], "existing users who never saw it: hidden too");
+		const p = loadPrefs();
+		p.hidden = p.hidden.filter((id) => id !== "marks");
+		store.dw_route_poi_prefs = JSON.stringify(p);
+		assert.deepEqual(loadPrefs().hidden, ["food"], "once switched on it stays on");
+	} finally { delete globalThis.GM_getValue; delete globalThis.GM_setValue; }
 });

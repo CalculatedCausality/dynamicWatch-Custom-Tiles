@@ -55,6 +55,9 @@ export const POI_CATEGORIES = [
 		types: ["pharmacy", "hospital", "defibrillator"] },
 	{ id: "bike", label: "Bike", icon: "fa-wrench", color: "#00838f",
 		types: ["bicycle_repair_station", "bicycle"] },
+	// Queensland only; hidden until switched on in the list.
+	{ id: "marks", label: "Survey marks", glyph: "△", color: "#15803d",
+		types: ["survey_mark"], defaultHidden: true },
 ];
 
 const CATEGORY = Object.fromEntries(POI_CATEGORIES.map((c) => [c.id, c]));
@@ -73,7 +76,7 @@ const TYPE_LABELS = {
 	defibrillator: "Defibrillator", bicycle_repair_station: "Bike repair",
 	bicycle: "Bike shop", parking: "Car park", picnic_site: "Picnic area",
 	climb: "Climb", climb_top: "Top of climb", creek_crossing: "Creek crossing",
-	track_section: "Track or road",
+	track_section: "Track or road", survey_mark: "Survey mark",
 };
 const TYPE_GLYPHS = { peak: "▲", volcano: "▲" };
 const COURSE_TYPES = new Set(["climb", "climb_top", "creek_crossing", "track_section"]);
@@ -316,7 +319,7 @@ export function planUpAhead(pois, waypoints) {
 // from the list (`taken`).
 const CATEGORY_PRIORITY = {
 	water: 0, toilets: 1, food: 2, shop: 2, medical: 3, climb: 4, climbtop: 4, creek: 5, track: 6,
-	views: 7, shelter: 7, bike: 7,
+	views: 7, shelter: 7, bike: 7, marks: 8,
 };
 const TYPE_PRIORITY = { picnic_site: 8, parking: 9 };
 
@@ -458,6 +461,81 @@ export function loadPoiTiles(tiles, { template, z, fetchTile = gmFetchTile, conc
 	};
 }
 
+/* -- Survey marks (Queensland) --------------------------------------------
+ * Named survey marks in good condition, from the same government service as
+ * the Survey Marks overlay. Most marks are numbered plaques in footpaths;
+ * the named ones (Baroon, Montville, Big Pineapple…) are the hilltop and
+ * landmark stations worth a waypoint. Each carries a surveyed height.
+ */
+const SM = "sirpub.prop.qld_surveycontrol_scdb.";
+const QLD_BOX = { west: 137.9, south: -29.3, east: 153.7, north: -9.0 };
+
+// Query URLs for the named, good marks in a [west, south, east, north] box,
+// or [] when the box is outside Queensland. No resultRecordCount: this
+// server then returns only a couple of the matches.
+export function surveyMarkQueryUrls(box) {
+	const [w, s, e, n] = box;
+	if (e < QLD_BOX.west || w > QLD_BOX.east || n < QLD_BOX.south || s > QLD_BOX.north) return [];
+	const where = `${SM}alt1_nm IS NOT NULL AND ${SM}mrkcnd_de = 'Good'`;
+	const fields = ["mrk_id", "alt1_nm", "mrktype_de", "ahdheight"].map((f) => SM + f).join(",");
+	return [3, 4, 16].map((id) => `${CFG.QLD_SURVEY_SERVICE}/${id}/query` +
+		`?where=${encodeURIComponent(where)}` +
+		`&geometry=${[w, s, e, n].map((v) => v.toFixed(5)).join(",")}&geometryType=esriGeometryEnvelope` +
+		`&inSR=4326&outSR=4326&spatialRel=esriSpatialRelIntersects` +
+		`&outFields=${encodeURIComponent(fields)}&returnGeometry=true&f=json`);
+}
+
+// "BIG PINEAPPLE" → "Big Pineapple"; words with digits stay as written.
+function markName(raw) {
+	return String(raw || "").trim().split(/\s+/)
+		.map((w) => (/^[A-Z]+$/.test(w) ? w.charAt(0) + w.slice(1).toLowerCase() : w)).join(" ");
+}
+
+// One query answer → survey-mark POIs ready for selectRoutePois.
+export function parseSurveyMarks(data) {
+	const out = [];
+	for (const f of (data && Array.isArray(data.features)) ? data.features : []) {
+		const a = f.attributes || {}, g = f.geometry || {};
+		const name = markName(a[SM + "alt1_nm"]);
+		if (!name || !Number.isFinite(g.x) || !Number.isFinite(g.y)) continue;
+		const ele = Number(a[SM + "ahdheight"]);
+		out.push({
+			category: "marks", type: "survey_mark", name, lng: g.x, lat: g.y,
+			ele: a[SM + "ahdheight"] != null && Number.isFinite(ele) ? Math.round(ele) : null,
+			markId: String(a[SM + "mrk_id"] || ""),
+		});
+	}
+	return out;
+}
+
+// Route parts → [west, south, east, north], padded by `padM` metres.
+export function routeBox(parts, padM) {
+	let w = 180, s = 90, e = -180, n = -90;
+	for (const part of parts) for (const [lng, lat] of part) {
+		if (lng < w) w = lng; if (lng > e) e = lng; if (lat < s) s = lat; if (lat > n) n = lat;
+	}
+	const dLat = padM / 111320, dLng = padM / (111320 * Math.max(0.1, Math.cos(((s + n) / 2) * Math.PI / 180)));
+	return [w - dLng, s - dLat, e + dLng, n + dLat];
+}
+
+// The marks along a route; errors leave the list empty rather than fail the search.
+function fetchSurveyMarks(box, cb) {
+	const urls = surveyMarkQueryUrls(box);
+	if (!urls.length) { cb([]); return { cancel() {} }; }
+	let left = urls.length, done = false;
+	const marks = [], handles = [];
+	const one = () => { if (--left === 0 && !done) { done = true; cb(marks); } };
+	for (const url of urls) {
+		try {
+			handles.push(gmJsonGet(url, { timeout: 20000 }, (err, data) => {
+				if (!err) marks.push(...parseSurveyMarks(data));
+				one();
+			}));
+		} catch (_) { one(); }
+	}
+	return { cancel() { done = true; for (const h of handles) { try { gmCancel(h); } catch (_) {} } } };
+}
+
 function poiError(code, message) {
 	const error = new Error(message);
 	error.code = code;
@@ -484,18 +562,20 @@ export function findRoutePois(paths, radius, opts, cb) {
 	}
 	const samples = resampleRoute(route);
 	let cancelled = false, inner = null, elevationJob = null, tileResult = null, elevation = null;
+	let marks = null, marksJob = null;
 	const stop = () => {
 		cancelled = true;
 		if (inner) inner.cancel();
 		if (elevationJob && elevationJob.cancel) elevationJob.cancel();
+		if (marksJob && marksJob.cancel) marksJob.cancel();
 	};
 	const fail = (error) => { if (!cancelled) { stop(); cb(error); } };
 	const finish = () => {
-		if (cancelled || !tileResult || !elevation) return;
+		if (cancelled || !tileResult || !elevation || !marks) return;
 		cancelled = true;
 		const lines = tileResult.tiles.flatMap(tileLines);
 		const features = courseFeatures({ route, samples, elevations: elevation.values, lines, metric: opts.metric !== false });
-		const pois = selectRoutePois(tileResult.tiles, route, radius).concat(features)
+		const pois = selectRoutePois(tileResult.tiles.concat([{ pois: marks, busStops: [] }]), route, radius).concat(features)
 			.sort((a, b) => a.along - b.along || a.offset - b.offset);
 		cb(null, {
 			pois, route, samples, elevations: elevation.values, elevationError: elevation.err || null,
@@ -510,6 +590,14 @@ export function findRoutePois(paths, radius, opts, cb) {
 		});
 	} catch (e) {
 		elevation = { err: e, values: null };
+	}
+	try {
+		marksJob = (opts.fetchSurveyMarks || fetchSurveyMarks)(routeBox(parts, radius + 50), (list) => {
+			marks = Array.isArray(list) ? list : [];
+			finish();
+		});
+	} catch (e) {
+		marks = [];
 	}
 	(opts.resolveTemplate || resolveTileTemplate)((err, template) => {
 		if (cancelled) return;
@@ -543,15 +631,21 @@ function toPage(value) {
 	return typeof cloneInto === "function" ? cloneInto(value, pageWindow()) : value;
 }
 
-function loadPrefs() {
+export function loadPrefs() {
 	let prefs = {};
 	try { prefs = JSON.parse(GM_getValue(CFG.ROUTE_POI_PREFS_KEY, "{}")) || {}; } catch (_) {}
 	const radius = Number(prefs.radius);
 	// 7.15's "distance + time" names fall back to distance only.
 	const nameMode = prefs.nameMode === "km-time" ? "km" : prefs.nameMode;
+	// A category added since the user last saved starts hidden when it is
+	// marked defaultHidden; `known` remembers which ones they have seen.
+	const known = Array.isArray(prefs.known) ? prefs.known : [];
+	const hidden = Array.isArray(prefs.hidden) ? prefs.hidden.filter((id) => CATEGORY[id]) : [];
+	for (const cat of POI_CATEGORIES) if (cat.defaultHidden && !known.includes(cat.id) && !hidden.includes(cat.id)) hidden.push(cat.id);
 	return {
 		radius: POI_RADIUS_OPTIONS.includes(radius) ? radius : 100,
-		hidden: Array.isArray(prefs.hidden) ? prefs.hidden.filter((id) => CATEGORY[id]) : [],
+		hidden,
+		known: POI_CATEGORIES.map((c) => c.id),
 		nameMode: NAME_MODES.some((m) => m.id === nameMode) ? nameMode : "name",
 	};
 }
