@@ -1801,6 +1801,27 @@ t("Natural Radiation (Australia): GA WMS tile and value requests, dose reading",
 	eq(dw._formatDose(null), "");
 });
 
+t("geology: ages in years, GA and QLD hovers from real answers; escapes", () => {
+	const env = dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Environment").names;
+	assert(env.includes("Geology (Australia)") && env.includes("Geology (QLD detailed)"));
+	eq(dw.geologyAgeYears("Late Triassic to Early Jurassic"), "about 252–145 million years old");
+	eq(dw.geologyAgeYears("TERTIARY"), "about 66–3 million years old");
+	eq(dw.geologyAgeYears("Quaternary"), "up to about 3 million years old");
+	eq(dw.geologyAgeYears("Archaean"), "about 4.0–2.5 billion years old");
+	eq(dw.geologyAgeYears("unknown"), "");
+	// Real identify answers at Nambour (GA) and Mapleton (QLD).
+	const ga = dw._formatGaGeology({ name: "Woogaroo Subgroup", lithology: "sedimentary siliciclastic; organic-rich rock",
+		geologicHistory: "Late Triassic to Early Jurassic", description: "Thin to thick bedded, fine to medium-grained, quartz-lithic and quartzose sandstone" });
+	assert(ga.startsWith("<b>Woogaroo Subgroup</b><br>Sedimentary siliciclastic, organic-rich rock"), ga);
+	assert(ga.includes("Late Triassic to Early Jurassic (about 252–145 million years old)"), ga);
+	const qld = dw._formatQldGeology({ "Rock Unit Name": "Tv-SEQ", "Dominant Rock": "BASALT", "Lithological Summary": "Mainly basalt flows", Age: "TERTIARY", "Rock Unit Key (Solid)": "-999" });
+	assert(qld.startsWith("<b>Basalt (Tv)</b><br>Tertiary (about 66–3 million years old)"), qld);
+	assert(dw._formatQldGeology({ "Rock Unit Name": "Woogaroo Subgroup", "Dominant Rock": "SEDIMENTARY ROCK" }).startsWith("<b>Woogaroo Subgroup</b><br>Sedimentary rock"), "named unit keeps its name");
+	assert(dw._formatGaGeology({ name: "mafic volcanic rocks 38495" }).startsWith("<b>mafic volcanic rocks</b>"), "record number dropped");
+	assert(qld.includes("Mainly basalt flows"), qld);
+	assert(dw._formatGaGeology({ name: "<b>x" }).includes("&lt;b&gt;x"), "not escaped");
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

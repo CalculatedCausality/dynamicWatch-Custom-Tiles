@@ -62,6 +62,7 @@ import { createQldSurveyProvider, surveyIdentifySource } from "../providers/qld-
 import { createQldTracksProvider, tracksIdentifySource } from "../providers/qld-tracks.js";
 import { createQldFireProviders, fireIdentifySources } from "../providers/qld-fire.js";
 import { GaRadiometricsLayerProvider, gaDoseIdentify } from "../providers/ga-radiometrics.js";
+import { createGeologyProviders, geologyIdentifySources } from "../providers/geology.js";
 import { createPostcodeProvider, createSuburbProvider, postcodeIdentifySource, suburbIdentifySource } from "../providers/abs-postcodes.js";
 import { allTrailsExploreUrl, allTrailsViewAround } from "../utils/alltrails.js";
 import { AllTrailsLayerProvider } from "../providers/alltrails.js";
@@ -100,6 +101,7 @@ const QldTracksLayerProvider = createQldTracksProvider({ makeHoverIdentify });
 const { ParkFireLayerProvider, FireScarLayerProvider } = createQldFireProviders({ makeHoverIdentify });
 const PostcodeLayerProvider = createPostcodeProvider({ makeHoverIdentify });
 const SuburbLayerProvider = createSuburbProvider({ makeHoverIdentify });
+const { GeologyAustraliaProvider, GeologyQldProvider } = createGeologyProviders({ makeHoverIdentify });
 
 /* -- Application ------------------------------------------------------- */
 
@@ -314,6 +316,8 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_MOBILE,     new MobileCoverageLayerProvider());
 			addOverlay(CFG.LAYER_SEAMARKS,   new OpenSeaMapLayerProvider());
 			addOverlay(CFG.LAYER_GA_RADIATION, new GaRadiometricsLayerProvider());
+			addOverlay(CFG.LAYER_GEOLOGY_AU, new GeologyAustraliaProvider());
+			addOverlay(CFG.LAYER_GEOLOGY_QLD, new GeologyQldProvider());
 			addOverlay(CFG.LAYER_SAFECAST,   new SafecastLayerProvider());
 			addOverlay(CFG.LAYER_INFRA,      new PowerInfraLayerProvider());
 			addOverlay(CFG.LAYER_TELECOM,    new TelecomsLayerProvider());
@@ -852,7 +856,7 @@ export class CustomTilesApp {
 		// them all (a goldfield has leases, workings and shafts stacked) and
 		// is the only way to read them on a phone.
 		for (const src of [...miningIdentifySources(), ...landIdentifySources(), surveyIdentifySource(),
-			tracksIdentifySource(), ...fireIdentifySources(new Date().getFullYear()), postcodeIdentifySource(), suburbIdentifySource()]) {
+			tracksIdentifySource(), ...fireIdentifySources(new Date().getFullYear()), postcodeIdentifySource(), suburbIdentifySource(), ...geologyIdentifySources()]) {
 			const lyr = this.layers[src.layerName];
 			if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
 			arcgisIdentify(map, latlng, {

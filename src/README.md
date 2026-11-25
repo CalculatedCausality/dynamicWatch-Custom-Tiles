@@ -31,6 +31,8 @@ Current modules:
 - `src/providers/qld-cadastre.js` — QLD parcel address resolver, the shared OnTheHouse sales pipeline, and the cadastre tooltip formatter used by all jurisdictions.
 - `src/providers/qld-environment.js` — QPWS Estate, National Parks, and their ArcGIS query layer helper.
 - `src/providers/qld-imagery.js` — QLD Roads and QLD Historical imagery providers.
+- `src/providers/ga-radiometrics.js` — Natural Radiation (Australia): Geoscience Australia's 2019 dose-rate grid via WMS, with a GetFeatureInfo hover.
+- `src/providers/geology.js` — Geology overlays: Geoscience Australia surface geology and Queensland detailed geology, with age-in-years hover formatters.
 - `src/providers/abs-postcodes.js` — Postcodes and Suburbs overlays: ABS 2021 Postal Areas and Suburbs and Localities outlined and labelled through `dynamicLayers`, with hover and pop-up formatter.
 - `src/providers/alltrails.js` — AllTrails Trail Map overlay: AllTrails' Mapbox-hosted map tiles, and the lookup of the public map key from AllTrails' pages.
 - `src/providers/qld-mining.js` — QLD mining overlays: Historic Mines (workings), Mine Shafts (Abandoned Mine Lands openings), and Historic Mining Leases (MinesPermitsHistoric title footprints), each with hover-identify tooltips.

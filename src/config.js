@@ -120,6 +120,12 @@ export const CFG = {
 	LAYER_SEAMARKS: "OpenSeaMap",
 	LAYER_SAFECAST: "Radiation (Safecast)",
 	LAYER_GA_RADIATION: "Natural Radiation (Australia)",
+	LAYER_GEOLOGY_AU: "Geology (Australia)",
+	LAYER_GEOLOGY_QLD: "Geology (QLD detailed)",
+	GA_GEOLOGY_SERVICE: "https://services.ga.gov.au/gis/rest/services/GA_Surface_Geology/MapServer",
+	QLD_GEOLOGY_SERVICE:
+		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+		"GeoscientificInformation/GeologyDetailed/MapServer",
 	// Geoscience Australia National Geophysical Grids WMS (CORS-open).
 	GA_GEOPHYS_WMS: "https://services.ga.gov.au/gis/geophysical-grids/ows",
 	SAFECAST_TILES: "https://s3-ap-northeast-1.amazonaws.com/te512jp.safecast.org/{z}/{x}/{y}.png",
@@ -507,7 +513,7 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Environment",
-		names:  [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_PARK_FIRES, CFG.LAYER_FIRE_SCARS, CFG.LAYER_GA_RADIATION, CFG.LAYER_SAFECAST, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS],
+		names:  [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_PARK_FIRES, CFG.LAYER_FIRE_SCARS, CFG.LAYER_GA_RADIATION, CFG.LAYER_GEOLOGY_AU, CFG.LAYER_GEOLOGY_QLD, CFG.LAYER_SAFECAST, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS],
 	},
 	{
 		header: "Walks",

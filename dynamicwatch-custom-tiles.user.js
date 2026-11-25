@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.32.1
+// @version      7.33.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -155,6 +155,10 @@
     LAYER_SEAMARKS: "OpenSeaMap",
     LAYER_SAFECAST: "Radiation (Safecast)",
     LAYER_GA_RADIATION: "Natural Radiation (Australia)",
+    LAYER_GEOLOGY_AU: "Geology (Australia)",
+    LAYER_GEOLOGY_QLD: "Geology (QLD detailed)",
+    GA_GEOLOGY_SERVICE: "https://services.ga.gov.au/gis/rest/services/GA_Surface_Geology/MapServer",
+    QLD_GEOLOGY_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/GeoscientificInformation/GeologyDetailed/MapServer",
     // Geoscience Australia National Geophysical Grids WMS (CORS-open).
     GA_GEOPHYS_WMS: "https://services.ga.gov.au/gis/geophysical-grids/ows",
     SAFECAST_TILES: "https://s3-ap-northeast-1.amazonaws.com/te512jp.safecast.org/{z}/{x}/{y}.png",
@@ -471,7 +475,7 @@
     },
     {
       header: "Environment",
-      names: [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_PARK_FIRES, CFG.LAYER_FIRE_SCARS, CFG.LAYER_GA_RADIATION, CFG.LAYER_SAFECAST, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS]
+      names: [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_PARK_FIRES, CFG.LAYER_FIRE_SCARS, CFG.LAYER_GA_RADIATION, CFG.LAYER_GEOLOGY_AU, CFG.LAYER_GEOLOGY_QLD, CFG.LAYER_SAFECAST, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS]
     },
     {
       header: "Walks",
@@ -7150,7 +7154,7 @@
           return a.comments.filter((c) => c && c.isThumbsUp).length;
         return 0;
       };
-      const clip = (s, n) => {
+      const clip2 = (s, n) => {
         const t = String(s || "").trim().replace(/\s+/g, " ");
         return t.length > n ? t.slice(0, n - 1) + "…" : t;
       };
@@ -7178,9 +7182,9 @@
           const meta = [placeStr(a), agoStr(a.pubMillis)].filter(Boolean).join(" · ");
           const thumbs = thumbsCount(a);
           const thumbStr = thumbs ? ` · 👍 ${thumbs}` : "";
-          const desc = clip(a.reportDescription, 160);
+          const desc = clip2(a.reportDescription, 160);
           const descStr = desc ? esc`<br><i>${desc}</i>` : "";
-          const by = clip(a.reportBy || a.provider, 48);
+          const by = clip2(a.reportBy || a.provider, 48);
           const byStr = by ? esc`<br><span class="dw-cad-sub">via ${by}</span>` : "";
           const metaStr = meta || thumbStr ? esc`<br><span class="dw-cad-sub">${meta}${thumbStr}</span>` : "";
           const tip = esc`<b>${style.glyph} ${title}</b>` + descStr + metaStr + byStr;
@@ -7215,11 +7219,11 @@
           const delayStr = j.delay > 0 ? "+" + Math.round(j.delay / 60) + " min" : "";
           const lenStr = j.length != null ? (j.length / 1e3).toFixed(1) + " km" : "";
           const place = placeStr(j);
-          const endTo = clip(j.endNode, 40);
+          const endTo = clip2(j.endNode, 40);
           const head = "Traffic" + (place ? " — " + place : "") + (endTo ? " → " + endTo : "");
           const meta = [spdStr, delayStr, lenStr, agoStr(j.updateMillis)].filter(Boolean).join(" · ");
           const ca = j.causeAlert;
-          const cause = ca ? clip(alertTitle(ca) + (ca.reportDescription ? " — " + ca.reportDescription : ""), 140) : "";
+          const cause = ca ? clip2(alertTitle(ca) + (ca.reportDescription ? " — " + ca.reportDescription : ""), 140) : "";
           const causeStr = cause ? esc`<br><span class="dw-cad-sub">Cause: ${cause}</span>` : "";
           const tip = esc`<b>\u{1F697} ${head}</b>` + (meta ? esc`<br><span class="dw-cad-sub">${meta}</span>` : "") + causeStr;
           keep(
@@ -12292,6 +12296,164 @@
     }
   };
 
+  // src/providers/geology.js
+  var PERIODS = [
+    ["holocene", 0.012, 0],
+    ["pleistocene", 2.6, 0.012],
+    ["quaternary", 2.6, 0],
+    ["pliocene", 5.3, 2.6],
+    ["miocene", 23, 5.3],
+    ["neogene", 23, 2.6],
+    ["oligocene", 34, 23],
+    ["eocene", 56, 34],
+    ["paleocene", 66, 56],
+    ["palaeocene", 66, 56],
+    ["paleogene", 66, 23],
+    ["palaeogene", 66, 23],
+    ["tertiary", 66, 2.6],
+    ["cainozoic", 66, 0],
+    ["cenozoic", 66, 0],
+    ["cretaceous", 145, 66],
+    ["jurassic", 201, 145],
+    ["triassic", 252, 201],
+    ["mesozoic", 252, 66],
+    ["permian", 299, 252],
+    ["carboniferous", 359, 299],
+    ["devonian", 419, 359],
+    ["silurian", 444, 419],
+    ["ordovician", 485, 444],
+    ["cambrian", 539, 485],
+    ["palaeozoic", 539, 252],
+    ["paleozoic", 539, 252],
+    ["neoproterozoic", 1e3, 539],
+    ["mesoproterozoic", 1600, 1e3],
+    ["paleoproterozoic", 2500, 1600],
+    ["palaeoproterozoic", 2500, 1600],
+    ["proterozoic", 2500, 539],
+    ["neoarchean", 2800, 2500],
+    ["mesoarchean", 3200, 2800],
+    ["archean", 4e3, 2500],
+    ["archaean", 4e3, 2500]
+  ];
+  var fmtMa = (ma) => ma >= 1e3 ? `${(ma / 1e3).toFixed(ma >= 1e4 ? 0 : 1)} billion` : ma >= 1 ? `${Math.round(ma)} million` : `${Math.round(ma * 1e3)} thousand`;
+  function geologyAgeYears(text) {
+    const t = String(text || "").toLowerCase();
+    let oldest = 0, youngest = Infinity;
+    for (const [name, start, end] of PERIODS) {
+      if (!new RegExp(`\\b${name}\\b`).test(t)) continue;
+      oldest = Math.max(oldest, start);
+      youngest = Math.min(youngest, end);
+    }
+    if (!oldest) return "";
+    if (youngest < 0.02) return `up to about ${fmtMa(oldest)} years old`;
+    return `about ${fmtMa(oldest).replace(/ (million|billion|thousand)$/, "")}–${fmtMa(youngest)} years old`;
+  }
+  var _val4 = (v) => {
+    const s = v == null ? "" : String(v).trim();
+    return s && !/^(null|none|-999)$/i.test(s) ? s : "";
+  };
+  var sentence = (s) => {
+    const t = _val4(s);
+    if (!t) return "";
+    return t === t.toUpperCase() ? t.charAt(0) + t.slice(1).toLowerCase() : t;
+  };
+  var clip = (s, n) => {
+    const t = _val4(s);
+    return t.length > n ? t.slice(0, n - 1).trimEnd() + "…" : t;
+  };
+  function _formatGaGeology(attrs) {
+    const a = attrs || {};
+    const name = _val4(a.name).replace(/\s+\d{3,}$/, "");
+    const rock = _val4(a.lithology).replace(/;\s*/g, ", ");
+    const age = _val4(a.geologicHistory);
+    const desc = clip(a.description, 180);
+    const lines = [esc`<b>${name || "Rock unit"}</b>`];
+    if (rock) lines.push(_escHtml(rock.charAt(0).toUpperCase() + rock.slice(1)));
+    const years = geologyAgeYears(age);
+    if (age) lines.push(_escHtml(years ? `${age} (${years})` : age));
+    if (desc) lines.push(esc`<span class="dw-cad-sub">${desc}</span>`);
+    return lines.join("<br>");
+  }
+  function _formatQldGeology(attrs) {
+    const a = attrs || {};
+    const name = _val4(a["Rock Unit Name"]).replace(/-SEQ$/, "");
+    const rock = sentence(a["Dominant Rock"]);
+    const summary = clip(a["Lithological Summary"], 180);
+    const age = sentence(a.Age);
+    const codeOnly = name && !/\s/.test(name) && name.length <= 6;
+    const lines = [esc`<b>${codeOnly ? `${rock || "Rock unit"} (${name})` : name || rock || "Rock unit"}</b>`];
+    if (rock && !codeOnly && name) lines.push(_escHtml(rock));
+    const years = geologyAgeYears(age);
+    if (age) lines.push(_escHtml(years ? `${age} (${years})` : age));
+    if (summary && summary.toLowerCase() !== rock.toLowerCase()) lines.push(esc`<span class="dw-cad-sub">${summary}</span>`);
+    return lines.join("<br>");
+  }
+  function geologyIdentifySources() {
+    return [
+      {
+        layerName: CFG.LAYER_GEOLOGY_QLD,
+        heading: "Geology (QLD detailed)",
+        baseUrl: CFG.QLD_GEOLOGY_SERVICE,
+        layers: "visible:15",
+        tolerance: 0,
+        minZoom: 9,
+        format: _formatQldGeology
+      },
+      {
+        layerName: CFG.LAYER_GEOLOGY_AU,
+        heading: "Geology",
+        baseUrl: CFG.GA_GEOLOGY_SERVICE,
+        layers: "visible:4,11",
+        tolerance: 0,
+        minZoom: 5,
+        format: _formatGaGeology
+      }
+    ];
+  }
+  function createGeologyProviders({ makeHoverIdentify: makeHoverIdentify2 }) {
+    const [qld, au] = geologyIdentifySources();
+    const off = (layer) => {
+      if (layer._dwHoverOff) {
+        layer._dwHoverOff();
+        layer._dwHoverOff = null;
+      }
+    };
+    const hover = (src) => makeHoverIdentify2({
+      baseUrl: src.baseUrl,
+      layers: src.layers,
+      tolerance: 0,
+      minZoom: src.minZoom,
+      tipClass: "dw-qpws-tip",
+      formatTooltip: src.format
+    });
+    const installAu = hover(au), installQld = hover(qld);
+    const GeologyAustraliaProvider2 = arcgisExportProvider({
+      baseUrl: CFG.GA_GEOLOGY_SERVICE,
+      showLayers: "4,11",
+      pane: "dwGeologyAuPane",
+      paneZIndex: 381,
+      opacity: 0.55,
+      minZoom: 4,
+      maxZoom: 25,
+      attribution: 'Surface geology &copy; <a href="https://www.ga.gov.au/" target="_blank" rel="noreferrer">Geoscience Australia</a> (CC BY 4.0)',
+      onAdd: (layer, map) => installAu(layer, map),
+      onRemove: off
+    });
+    const GeologyQldProvider2 = arcgisExportProvider({
+      baseUrl: CFG.QLD_GEOLOGY_SERVICE,
+      showLayers: "15,4",
+      pane: "dwGeologyQldPane",
+      paneZIndex: 382,
+      opacity: 0.6,
+      minZoom: 9,
+      maxZoom: 25,
+      attribution: 'Detailed geology &copy; <a href="https://www.data.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (Geological Survey of Queensland)</a>',
+      onAdd: (layer, map) => installQld(layer, map),
+      onRemove: off
+    });
+    return { GeologyAustraliaProvider: GeologyAustraliaProvider2, GeologyQldProvider: GeologyQldProvider2 };
+  }
+
   // src/providers/abs-postcodes.js
   function postcodeDynamicLayers() {
     return JSON.stringify([{
@@ -15418,6 +15580,7 @@
   var { ParkFireLayerProvider, FireScarLayerProvider } = createQldFireProviders({ makeHoverIdentify });
   var PostcodeLayerProvider = createPostcodeProvider({ makeHoverIdentify });
   var SuburbLayerProvider = createSuburbProvider({ makeHoverIdentify });
+  var { GeologyAustraliaProvider, GeologyQldProvider } = createGeologyProviders({ makeHoverIdentify });
   var CustomTilesApp = class {
     constructor() {
       this.qldToken = new QldTokenManager({
@@ -15593,6 +15756,8 @@
         addOverlay(CFG.LAYER_MOBILE, new MobileCoverageLayerProvider());
         addOverlay(CFG.LAYER_SEAMARKS, new OpenSeaMapLayerProvider());
         addOverlay(CFG.LAYER_GA_RADIATION, new GaRadiometricsLayerProvider());
+        addOverlay(CFG.LAYER_GEOLOGY_AU, new GeologyAustraliaProvider());
+        addOverlay(CFG.LAYER_GEOLOGY_QLD, new GeologyQldProvider());
         addOverlay(CFG.LAYER_SAFECAST, new SafecastLayerProvider());
         addOverlay(CFG.LAYER_INFRA, new PowerInfraLayerProvider());
         addOverlay(CFG.LAYER_TELECOM, new TelecomsLayerProvider());
@@ -16015,7 +16180,8 @@
         tracksIdentifySource(),
         ...fireIdentifySources((/* @__PURE__ */ new Date()).getFullYear()),
         postcodeIdentifySource(),
-        suburbIdentifySource()
+        suburbIdentifySource(),
+        ...geologyIdentifySources()
       ]) {
         const lyr = this.layers[src.layerName];
         if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
@@ -16805,6 +16971,9 @@
         gaDoseInfoUrl,
         gaDoseTileUrl,
         gaDoseValue,
+        _formatGaGeology,
+        _formatQldGeology,
+        geologyAgeYears,
         _formatPostcode,
         postcodeDynamicLayers,
         _formatSuburb,
