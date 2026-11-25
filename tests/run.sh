@@ -77,7 +77,7 @@ if [ "$MODE" != live ]; then
 		"$HERE/vexcel-cache.mjs" "$HERE/vexcel-csv.mjs" "$HERE/lightpoll-token.mjs" \
 		"$HERE/route-pois.mjs" "$HERE/route-profile.mjs" "$HERE/route-features.mjs" \
 		"$HERE/userscript-menu.mjs" "$HERE/planner-toolbar.mjs" "$HERE/mode-3d-sync.mjs" \
-		"$HERE/aussie-bushwalking.mjs" \
+		"$HERE/aussie-bushwalking.mjs" "$HERE/hover-stack.mjs" \
 		"$HERE/release-scripts.mjs"
 	REGRESSION_RC=$RUN_RC
 

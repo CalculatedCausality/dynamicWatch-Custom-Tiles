@@ -1,3 +1,4 @@
+import { hoverSlot } from "../ui/hover-stack.js";
 import { gmJsonGet } from "../utils/http.js";
 
 // One-shot ArcGIS point identify. Used by hover identify and popup enrichment.
@@ -59,13 +60,8 @@ export function arcgisEnvelopeQuery(layerUrl, latlng, opts, cb) {
 export function makeHoverIdentify(opts) {
 	const debounceMs = opts.debounceMs || 200;
 	return function install(layer, map) {
-		const tooltip = L.tooltip({
-			sticky:    true,
-			opacity:   0.95,
-			className: opts.tipClass,
-			direction: "right",
-			offset:    [12, 0],
-		});
+		// A slot in the shared hover box, so overlays don't cover each other.
+		const tooltip = hoverSlot({ className: opts.tipClass, order: opts.hoverOrder });
 		let lastOid = null;
 		let lastAttrs = null;
 		let debounce = null;

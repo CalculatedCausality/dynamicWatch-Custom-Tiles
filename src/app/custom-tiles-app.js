@@ -1151,6 +1151,10 @@ export class CustomTilesApp {
 			".dw-popup-coords:hover { color: #374151; }",
 			".dw-popup-coords--copied { color: #16a34a !important; }",
 			".dw-qpws-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
+			// One shared hover box: each overlay's part keeps its text styles but
+			// not a second frame; parts are split by a thin rule.
+			".dw-hover-stack .dw-hover-part { padding: 0; margin: 0; border: 0; background: none; box-shadow: none; }",
+			".dw-hover-stack .dw-hover-sep { border-top: 1px solid #d1d5db; margin: 4px -7px; }",
 			".dw-qpws-tip b { font-weight: 700; }",
 			".dw-infra-tip { font-size: 11px; line-height: 1.4; }",
 			".dw-abw-icon { background: none; border: 0; }",

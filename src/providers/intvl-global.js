@@ -1,6 +1,7 @@
 import { CFG } from "../config.js";
 import { LayerProvider } from "../layers/provider-factories.js";
 import { gmCancel, gmGet } from "../utils/http.js";
+import { hoverSlot } from "../ui/hover-stack.js";
 import { hexAlpha, pointInRing, intvlAgo, intvlTrustedActivityTime, intvlOwnerKey, intvlOwnerStats, intvlTooltipHtml, intvlLeaderboard, intvlLeaderboardHtml } from "../utils/intvl.js";
 import { mvtDecode, prepareLayers } from "../utils/mvt.js";
 
@@ -82,13 +83,9 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 				// signal; we fall back to Leaflet's UA-based mobile flag.
 				const noHover = L.Browser.mobile ||
 					(window.matchMedia && window.matchMedia("(hover: none)").matches);
-				this._tooltip = L.tooltip({
-					sticky:    true,
-					opacity:   0.95,
-					className: "dw-intvl-tip",
-					direction: noHover ? "auto" : "right",
-					offset:    [12, 0],
-				});
+				// A slot in the shared hover box (first in it), so other overlays'
+				// details show under the runner instead of on top.
+				this._tooltip = hoverSlot({ className: "dw-intvl-tip", order: 10 });
 				this._hoverDebounce = null;
 				this._lastFeatKey   = null;
 

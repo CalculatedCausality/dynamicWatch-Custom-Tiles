@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.31.0
+// @version      7.32.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -501,6 +501,77 @@
     }
   ];
 
+  // src/ui/hover-stack.js
+  var stacks = /* @__PURE__ */ new WeakMap();
+  function stackFor(map) {
+    let s = stacks.get(map);
+    if (!s) {
+      s = { slots: /* @__PURE__ */ new Set(), latlng: null, tip: null };
+      stacks.set(map, s);
+    }
+    return s;
+  }
+  function hoverStackHtml(slots) {
+    return [...slots].filter((s) => s._html).sort((a, b) => a.order - b.order || a.id - b.id).map((s) => `<div class="dw-hover-part${s.className ? " " + s.className : ""}">${s._html}</div>`).join(`<div class="dw-hover-sep"></div>`);
+  }
+  function render(map) {
+    const s = stackFor(map);
+    const html = hoverStackHtml(s.slots);
+    if (!html) {
+      if (s.tip && s.tip._map) s.tip.remove();
+      return;
+    }
+    if (!s.tip) {
+      s.tip = L.tooltip({ sticky: true, opacity: 0.95, className: "dw-qpws-tip dw-hover-stack", direction: "right", offset: [12, 0] });
+    }
+    s.tip.setLatLng(s.latlng).setContent(html);
+    if (!s.tip._map) s.tip.addTo(map);
+  }
+  var nextId = 0;
+  function hoverSlot(opts = {}) {
+    const slot = {
+      id: ++nextId,
+      order: opts.order ?? 50,
+      className: opts.className || "",
+      _map: null,
+      _html: "",
+      _latlng: null,
+      setLatLng(latlng) {
+        this._latlng = latlng;
+        if (this._map) {
+          stackFor(this._map).latlng = latlng;
+          render(this._map);
+        }
+        return this;
+      },
+      setContent(html) {
+        this._html = html || "";
+        if (this._map) render(this._map);
+        return this;
+      },
+      getLatLng() {
+        return this._latlng;
+      },
+      addTo(map) {
+        this._map = map;
+        const s = stackFor(map);
+        s.slots.add(this);
+        if (this._latlng) s.latlng = this._latlng;
+        render(map);
+        return this;
+      },
+      remove() {
+        const map = this._map;
+        if (!map) return this;
+        this._map = null;
+        stackFor(map).slots.delete(this);
+        render(map);
+        return this;
+      }
+    };
+    return slot;
+  }
+
   // src/utils/http.js
   function gmGet(url, opts, cb) {
     if (typeof opts === "function") {
@@ -680,13 +751,7 @@
   function makeHoverIdentify(opts) {
     const debounceMs = opts.debounceMs || 200;
     return function install(layer, map) {
-      const tooltip = L.tooltip({
-        sticky: true,
-        opacity: 0.95,
-        className: opts.tipClass,
-        direction: "right",
-        offset: [12, 0]
-      });
+      const tooltip = hoverSlot({ className: opts.tipClass, order: opts.hoverOrder });
       let lastOid = null;
       let lastAttrs = null;
       let debounce = null;
@@ -7089,7 +7154,7 @@
         const t = String(s || "").trim().replace(/\s+/g, " ");
         return t.length > n ? t.slice(0, n - 1) + "…" : t;
       };
-      const render = (group, data) => {
+      const render2 = (group, data) => {
         const prev = group._dwWaze instanceof Map ? group._dwWaze : /* @__PURE__ */ new Map();
         const next = /* @__PURE__ */ new Map();
         const keep = (key, make, update) => {
@@ -7226,7 +7291,7 @@
               }
             }, (err, data) => {
               if (err || !data || !isCurrent()) return;
-              render(group, data);
+              render2(group, data);
             });
           });
         }
@@ -8700,13 +8765,7 @@
           }
           L.GridLayer.prototype.onAdd.call(this, map);
           const noHover = L.Browser.mobile || window.matchMedia && window.matchMedia("(hover: none)").matches;
-          this._tooltip = L.tooltip({
-            sticky: true,
-            opacity: 0.95,
-            className: "dw-intvl-tip",
-            direction: noHover ? "auto" : "right",
-            offset: [12, 0]
-          });
+          this._tooltip = hoverSlot({ className: "dw-intvl-tip", order: 10 });
           this._hoverDebounce = null;
           this._lastFeatKey = null;
           if (!noHover) {
@@ -12183,7 +12242,7 @@
           L.TileLayer.prototype.onAdd.call(this, map);
           const noHover = L.Browser.mobile || window.matchMedia && window.matchMedia("(hover: none)").matches;
           if (noHover) return;
-          const tip = L.tooltip({ sticky: true, opacity: 0.95, className: "dw-qpws-tip", direction: "right", offset: [12, 0] });
+          const tip = hoverSlot({ className: "dw-qpws-tip", order: 60 });
           let timer = null, gen = 0;
           this._dwMove = (e) => {
             clearTimeout(timer);
@@ -16228,6 +16287,10 @@
         ".dw-popup-coords:hover { color: #374151; }",
         ".dw-popup-coords--copied { color: #16a34a !important; }",
         ".dw-qpws-tip { font-size: 11px; line-height: 1.35; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
+        // One shared hover box: each overlay's part keeps its text styles but
+        // not a second frame; parts are split by a thin rule.
+        ".dw-hover-stack .dw-hover-part { padding: 0; margin: 0; border: 0; background: none; box-shadow: none; }",
+        ".dw-hover-stack .dw-hover-sep { border-top: 1px solid #d1d5db; margin: 4px -7px; }",
         ".dw-qpws-tip b { font-weight: 700; }",
         ".dw-infra-tip { font-size: 11px; line-height: 1.4; }",
         ".dw-abw-icon { background: none; border: 0; }",

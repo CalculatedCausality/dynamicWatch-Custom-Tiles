@@ -35,7 +35,7 @@ remote outages. Each runner exits with the sum of component exit codes
 
 ```bash
 node tests/unit.mjs
-node --test tests/polling-data-layer.mjs tests/viewport-layers.mjs tests/vexcel-capture.mjs tests/vexcel-tile-batch.mjs tests/vexcel-http.mjs tests/vexcel-protocol-report.mjs tests/vexcel-cache.mjs tests/vexcel-csv.mjs tests/lightpoll-token.mjs tests/route-pois.mjs tests/route-profile.mjs tests/route-features.mjs tests/planner-toolbar.mjs tests/mode-3d-sync.mjs tests/aussie-bushwalking.mjs tests/userscript-menu.mjs tests/release-scripts.mjs
+node --test tests/polling-data-layer.mjs tests/viewport-layers.mjs tests/vexcel-capture.mjs tests/vexcel-tile-batch.mjs tests/vexcel-http.mjs tests/vexcel-protocol-report.mjs tests/vexcel-cache.mjs tests/vexcel-csv.mjs tests/lightpoll-token.mjs tests/route-pois.mjs tests/route-profile.mjs tests/route-features.mjs tests/planner-toolbar.mjs tests/mode-3d-sync.mjs tests/aussie-bushwalking.mjs tests/hover-stack.mjs tests/userscript-menu.mjs tests/release-scripts.mjs
 node tests/check-secrets.mjs
 node tests/e2e/verify-vexcel-report.mjs
 bash tests/smoke.sh        # live endpoint liveness

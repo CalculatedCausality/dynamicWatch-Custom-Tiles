@@ -55,3 +55,5 @@ Current modules:
 - `src/utils/intvl.js` — INTVL formatting and geometry helpers.
 - `src/utils/mvt.js` — minimal MVT/PBF parsing and INTVL tile preprocessing helpers.
 - `src/utils/tile-geometry.js` — pure tile projection helpers.
+
+- `src/ui/hover-stack.js` — the shared hover box: tooltip-shaped slots whose contents one tooltip per map shows together.

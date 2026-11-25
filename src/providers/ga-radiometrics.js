@@ -3,6 +3,7 @@ import { LayerProvider } from "../layers/provider-factories.js";
 import { esc } from "../utils/html.js";
 import { gmJsonGet } from "../utils/http.js";
 import { tileToBBox3857 } from "../utils/tile-geometry.js";
+import { hoverSlot } from "../ui/hover-stack.js";
 
 /* -- Natural Radiation (Australia) ------------------------------------------
  * Geoscience Australia's Radiometric Grid of Australia (Radmap) v4 2019,
@@ -74,7 +75,7 @@ export class GaRadiometricsLayerProvider extends LayerProvider {
 				L.TileLayer.prototype.onAdd.call(this, map);
 				const noHover = L.Browser.mobile || (window.matchMedia && window.matchMedia("(hover: none)").matches);
 				if (noHover) return;
-				const tip = L.tooltip({ sticky: true, opacity: 0.95, className: "dw-qpws-tip", direction: "right", offset: [12, 0] });
+				const tip = hoverSlot({ className: "dw-qpws-tip", order: 60 });
 				let timer = null, gen = 0;
 				this._dwMove = (e) => {
 					clearTimeout(timer);
