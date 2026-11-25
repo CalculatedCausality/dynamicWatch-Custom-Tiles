@@ -26,7 +26,7 @@ const HELPERS = [
 	"hexAlpha", "pointInRing", "prepareLayers",
 	// INTVL formatters
 	"intvlActivityTime", "intvlAgo", "intvlArea", "intvlOwnerKey", "intvlOwnerStats", "intvlRunLine",
-	"intvlSharedNames", "intvlTooltipHtml", "intvlTrustedActivityTime",
+	"intvlSharedNames", "intvlTooltipHtml", "intvlTrustedActivityTime", "intvlLeaderboard", "intvlLeaderboardHtml",
 	"allTrailsExploreUrl", "allTrailsViewAround", "allTrailsChunkUrls", "allTrailsTokenIn",
 	"atAccess", "atPopupHtml", "atRouteHtml", "atSegmentHtml", "atToElements",
 	// Cadastre / OnTheHouse formatters (underscore-prefixed module-scope)

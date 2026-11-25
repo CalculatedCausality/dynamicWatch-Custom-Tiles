@@ -1370,6 +1370,20 @@ export class CustomTilesApp {
 			// INTVL territory tooltip — same minimalist style as cadastre.
 			".dw-intvl-tip { font-size: 11px; line-height: 1.4; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
 			".dw-intvl-tip b { font-weight: 700; }",
+			".dw-intvl-lb { position: absolute; top: 60px; right: 10px; z-index: 800; width: 230px; background: rgba(255,255,255,.96); border: 1px solid #999; border-radius: 8px; font-size: 12px; box-shadow: 0 1px 6px rgba(0,0,0,.25); overflow: hidden; }",
+			".dw-intvl-lb-head { display: block; width: 100%; padding: 6px 9px; border: 0; background: #f3f4f6; font: 700 12px/1.3 inherit; text-align: left; cursor: pointer; }",
+			".dw-intvl-lb-head::after { content: ' ▾'; color: #6b7280; }",
+			".dw-intvl-lb--closed .dw-intvl-lb-head::after { content: ' ▸'; }",
+			".dw-intvl-lb--closed .dw-intvl-lb-rows { display: none; }",
+			".dw-intvl-lb-rows { max-height: 300px; overflow-y: auto; }",
+			".dw-intvl-lb-row { display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 9px; border: 0; border-top: 1px solid #eee; background: none; font: 12px/1.3 inherit; text-align: left; cursor: pointer; }",
+			".dw-intvl-lb-row:hover { background: #eff6ff; }",
+			".dw-intvl-lb-row--pinned { background: #dbeafe; font-weight: 700; }",
+			".dw-intvl-lb-n { width: 14px; color: #6b7280; text-align: right; }",
+			".dw-intvl-lb-sw { flex: none; width: 10px; height: 10px; border: 1px solid #444; }",
+			".dw-intvl-lb-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+			".dw-intvl-lb-fig { color: #374151; white-space: nowrap; }",
+			".dw-intvl-lb-empty { padding: 6px 9px; color: #6b7280; }",
 			// Sales popup — opened by clicking the "Sales ↗" link in the
 			// cadastre tooltip. Uses Leaflet's popup primitive so it
 			// inherits autopan + map-anchored behaviour for free.

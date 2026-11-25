@@ -206,6 +206,8 @@ export const CFG = {
 	INTVL_TILES_BASE:
 		"https://d1yalngj9nsyl4.cloudfront.net/single-player/run",
 	INTVL_TILES_MAX_NATIVE_Z: 11,
+	// The runner pinned in the INTVL leaderboard (their userHash).
+	INTVL_PIN_KEY: "dw_intvl_pinned",
 
 	// `startTime` in the territories layer is an integer DAY count, but
 	// NOT days since the Unix epoch — it counts days since a custom app

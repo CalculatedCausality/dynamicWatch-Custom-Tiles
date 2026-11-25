@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.25.0
+// @version      7.26.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -232,6 +232,8 @@
     // rendering each polygon once at its true location.
     INTVL_TILES_BASE: "https://d1yalngj9nsyl4.cloudfront.net/single-player/run",
     INTVL_TILES_MAX_NATIVE_Z: 11,
+    // The runner pinned in the INTVL leaderboard (their userHash).
+    INTVL_PIN_KEY: "dw_intvl_pinned",
     // `startTime` in the territories layer is an integer DAY count, but
     // NOT days since the Unix epoch — it counts days since a custom app
     // epoch ~1977-09-03, i.e. it runs 2802 days behind the Unix day
@@ -1035,6 +1037,33 @@
       lines.push(`<span class="dw-cad-sub">Holds ${st.count} territories on this part of the map, ${_escHtml(intvlArea(st.area))} in all</span>`);
     }
     return lines.join("<br>");
+  }
+  function intvlLeaderboard(tiles, bounds, limit) {
+    const b = bounds || {};
+    const seen = /* @__PURE__ */ new Set();
+    const byOwner = /* @__PURE__ */ new Map();
+    for (const prepared of tiles || []) for (const layer of prepared) for (const f of layer.features) {
+      const p = f.props || {};
+      if (seen.has(p.runId)) continue;
+      if ([p.minLng, p.minLat, p.maxLng, p.maxLat].every(Number.isFinite) && (p.maxLng < b.west || p.minLng > b.east || p.maxLat < b.south || p.minLat > b.north)) continue;
+      seen.add(p.runId);
+      const key = intvlOwnerKey(p);
+      if (!key) continue;
+      let o = byOwner.get(key);
+      if (!o) {
+        const name = typeof p.username === "string" && p.username.trim() ? p.username.trim() : "";
+        o = { key, name, anonymous: !name, colour: f.colour || p.colour, count: 0, area: 0, latest: 0 };
+        byOwner.set(key, o);
+      }
+      o.count++;
+      o.area += Number(p.currentArea) || 0;
+      if (typeof p.startTime === "number" && p.startTime > o.latest) o.latest = p.startTime;
+    }
+    return [...byOwner.values()].sort((a, b2) => b2.area - a.area || b2.count - a.count).slice(0, limit || 10);
+  }
+  function intvlLeaderboardHtml(rows, pinned) {
+    if (!rows.length) return `<div class="dw-intvl-lb-empty">No territories loaded here yet.</div>`;
+    return rows.map((r, i) => `<button type="button" class="dw-intvl-lb-row${r.key === pinned ? " dw-intvl-lb-row--pinned" : ""}" data-key="${_escHtml(r.key)}" title="${r.key === pinned ? "Unpin" : "Pin this runner's territory"}"><span class="dw-intvl-lb-n">${i + 1}</span><span class="dw-intvl-lb-sw" style="background:${_safeColor(r.colour, "#3b82f6")}"></span><span class="dw-intvl-lb-name">${_escHtml(r.name || "Anonymous runner")}</span><span class="dw-intvl-lb-fig">${_escHtml(intvlArea(r.area))} · ${r.count}</span></button>`).join("");
   }
 
   // src/runtime/mode-3d.js
@@ -8753,6 +8782,31 @@
             this._tileFeatures.delete(tileKey(c.z, c.x, c.y));
           };
           this.on("tileunload", this._onTileUnload);
+          try {
+            this._pinned = String(GM_getValue(CFG.INTVL_PIN_KEY, "") || "");
+          } catch (_) {
+            this._pinned = "";
+          }
+          this._highlight = "";
+          this._setHighlight("");
+          this._lb = L.DomUtil.create("div", "dw-intvl-lb leaflet-control", map.getContainer());
+          this._lb.innerHTML = `<button type="button" class="dw-intvl-lb-head" aria-expanded="true">INTVL leaders on screen</button><div class="dw-intvl-lb-rows"></div>`;
+          L.DomEvent.disableClickPropagation(this._lb);
+          L.DomEvent.disableScrollPropagation(this._lb);
+          this._lb.addEventListener("click", (e) => {
+            const head = e.target.closest(".dw-intvl-lb-head");
+            if (head) {
+              const open = this._lb.classList.toggle("dw-intvl-lb--closed") === false;
+              head.setAttribute("aria-expanded", String(open));
+              return;
+            }
+            const row = e.target.closest(".dw-intvl-lb-row");
+            if (!row) return;
+            this._pin(row.dataset.key === this._pinned ? "" : row.dataset.key);
+          });
+          this._onViewChange = () => this._queueBoard();
+          map.on("moveend", this._onViewChange);
+          this._queueBoard();
         },
         onRemove(map) {
           clearTimeout(this._hoverDebounce);
@@ -8772,6 +8826,12 @@
             map.off("dragstart zoomstart", this._onPressDragStart);
           }
           this.off("tileunload", this._onTileUnload);
+          clearTimeout(this._boardTimer);
+          if (this._onViewChange) map.off("moveend", this._onViewChange);
+          if (this._lb) {
+            this._lb.remove();
+            this._lb = null;
+          }
           this._clearTooltip();
           this._tooltip = null;
           this._tileFeatures && this._tileFeatures.clear();
@@ -8788,16 +8848,51 @@
           this._lastFeatKey = null;
           this._setHighlight("");
         },
-        // Make one runner's territories stand out by dimming the rest.
-        // Only repaints when the runner under the pointer changes.
+        // Make one runner's territories stand out by dimming the rest:
+        // the one under the pointer, else the pinned one. Only repaints
+        // when that changes.
         _setHighlight(ownerKey) {
-          if ((this._highlight || "") === ownerKey) return;
-          this._highlight = ownerKey;
+          this._hoverKey = ownerKey || "";
+          const want = this._hoverKey || this._pinned || "";
+          if ((this._highlight || "") === want) return;
+          this._highlight = want;
           if (!this._tileFeatures || !this._tileCtx) return;
           for (const [key, ctx] of this._tileCtx) {
             const prepared = this._tileFeatures.get(key);
             if (prepared) this._renderTile(ctx, prepared, TILE_PX);
           }
+        },
+        _pin(key) {
+          this._pinned = key || "";
+          try {
+            GM_setValue(CFG.INTVL_PIN_KEY, this._pinned);
+          } catch (_) {
+          }
+          this._setHighlight(this._hoverKey || "");
+          this._renderBoard();
+        },
+        _queueBoard() {
+          clearTimeout(this._boardTimer);
+          this._boardTimer = setTimeout(() => this._renderBoard(), 300);
+        },
+        _renderBoard() {
+          if (!this._lb || !this._map) return;
+          const b = this._map.getBounds();
+          const rows = intvlLeaderboard(
+            this._tileFeatures ? this._tileFeatures.values() : [],
+            { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() },
+            10
+          );
+          if (this._pinned && !rows.some((r) => r.key === this._pinned)) {
+            const all = intvlLeaderboard(
+              this._tileFeatures ? this._tileFeatures.values() : [],
+              { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() },
+              1e6
+            );
+            const mine = all.find((r) => r.key === this._pinned);
+            if (mine) rows.push(mine);
+          }
+          this._lb.querySelector(".dw-intvl-lb-rows").innerHTML = intvlLeaderboardHtml(rows, this._pinned);
         },
         createTile(coords, done) {
           const canvas = L.DomUtil.create("canvas", "leaflet-tile");
@@ -8829,6 +8924,7 @@
                 prepared
               );
               this._tileCtx.set(tileKey(coords.z, coords.x, coords.y), ctx);
+              this._queueBoard();
             } catch (e) {
               console.warn("[CustomTiles] INTVL global decode:", e);
             }
@@ -15802,6 +15898,20 @@
         // INTVL territory tooltip — same minimalist style as cadastre.
         ".dw-intvl-tip { font-size: 11px; line-height: 1.4; padding: 4px 7px; background: rgba(255,255,255,0.97); border-color: #888; }",
         ".dw-intvl-tip b { font-weight: 700; }",
+        ".dw-intvl-lb { position: absolute; top: 60px; right: 10px; z-index: 800; width: 230px; background: rgba(255,255,255,.96); border: 1px solid #999; border-radius: 8px; font-size: 12px; box-shadow: 0 1px 6px rgba(0,0,0,.25); overflow: hidden; }",
+        ".dw-intvl-lb-head { display: block; width: 100%; padding: 6px 9px; border: 0; background: #f3f4f6; font: 700 12px/1.3 inherit; text-align: left; cursor: pointer; }",
+        ".dw-intvl-lb-head::after { content: ' ▾'; color: #6b7280; }",
+        ".dw-intvl-lb--closed .dw-intvl-lb-head::after { content: ' ▸'; }",
+        ".dw-intvl-lb--closed .dw-intvl-lb-rows { display: none; }",
+        ".dw-intvl-lb-rows { max-height: 300px; overflow-y: auto; }",
+        ".dw-intvl-lb-row { display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 9px; border: 0; border-top: 1px solid #eee; background: none; font: 12px/1.3 inherit; text-align: left; cursor: pointer; }",
+        ".dw-intvl-lb-row:hover { background: #eff6ff; }",
+        ".dw-intvl-lb-row--pinned { background: #dbeafe; font-weight: 700; }",
+        ".dw-intvl-lb-n { width: 14px; color: #6b7280; text-align: right; }",
+        ".dw-intvl-lb-sw { flex: none; width: 10px; height: 10px; border: 1px solid #444; }",
+        ".dw-intvl-lb-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+        ".dw-intvl-lb-fig { color: #374151; white-space: nowrap; }",
+        ".dw-intvl-lb-empty { padding: 6px 9px; color: #6b7280; }",
         // Sales popup — opened by clicking the "Sales ↗" link in the
         // cadastre tooltip. Uses Leaflet's popup primitive so it
         // inherits autopan + map-anchored behaviour for free.
@@ -16083,6 +16193,8 @@
         intvlSharedNames,
         intvlTooltipHtml,
         intvlTrustedActivityTime,
+        intvlLeaderboard,
+        intvlLeaderboardHtml,
         allTrailsExploreUrl,
         allTrailsViewAround,
         allTrailsChunkUrls,

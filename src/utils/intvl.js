@@ -133,3 +133,43 @@ export function intvlTooltipHtml(props, opts) {
 	}
 	return lines.join("<br>");
 }
+
+// Runners ranked by territory area within `bounds` ({west,south,east,north})
+// across the loaded tiles. A territory counts when its own bounding box
+// meets the view; one crossing tile edges is counted once (by runId).
+export function intvlLeaderboard(tiles, bounds, limit) {
+	const b = bounds || {};
+	const seen = new Set();
+	const byOwner = new Map();
+	for (const prepared of tiles || []) for (const layer of prepared) for (const f of layer.features) {
+		const p = f.props || {};
+		if (seen.has(p.runId)) continue;
+		if ([p.minLng, p.minLat, p.maxLng, p.maxLat].every(Number.isFinite) &&
+			(p.maxLng < b.west || p.minLng > b.east || p.maxLat < b.south || p.minLat > b.north)) continue;
+		seen.add(p.runId);
+		const key = intvlOwnerKey(p);
+		if (!key) continue;
+		let o = byOwner.get(key);
+		if (!o) {
+			const name = typeof p.username === "string" && p.username.trim() ? p.username.trim() : "";
+			o = { key, name, anonymous: !name, colour: f.colour || p.colour, count: 0, area: 0, latest: 0 };
+			byOwner.set(key, o);
+		}
+		o.count++;
+		o.area += Number(p.currentArea) || 0;
+		if (typeof p.startTime === "number" && p.startTime > o.latest) o.latest = p.startTime;
+	}
+	return [...byOwner.values()].sort((a, b2) => b2.area - a.area || b2.count - a.count).slice(0, limit || 10);
+}
+
+// The leaderboard panel's rows. `pinned` is the pinned runner's key.
+export function intvlLeaderboardHtml(rows, pinned) {
+	if (!rows.length) return `<div class="dw-intvl-lb-empty">No territories loaded here yet.</div>`;
+	return rows.map((r, i) =>
+		`<button type="button" class="dw-intvl-lb-row${r.key === pinned ? " dw-intvl-lb-row--pinned" : ""}" data-key="${_escHtml(r.key)}" title="${r.key === pinned ? "Unpin" : "Pin this runner's territory"}">` +
+		`<span class="dw-intvl-lb-n">${i + 1}</span>` +
+		`<span class="dw-intvl-lb-sw" style="background:${_safeColor(r.colour, "#3b82f6")}"></span>` +
+		`<span class="dw-intvl-lb-name">${_escHtml(r.name || "Anonymous runner")}</span>` +
+		`<span class="dw-intvl-lb-fig">${_escHtml(intvlArea(r.area))} · ${r.count}</span>` +
+		`</button>`).join("");
+}

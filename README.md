@@ -79,7 +79,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 | **Live Flights** | Aircraft positions from OpenSky Network, refreshed every 10s |
 | **Marine Vessels** | Ship positions from MarineTraffic, refreshed every 20s |
 | **Waze Traffic** | Waze live-map reports — police, crashes, hazards, closures — plus jams coloured by severity and active wazers, refreshed every 30s |
-| **INTVL Global Map** | The INTVL run-territory game's public global map. Hover (or long-press on a phone) a territory to see **who holds it**, their level and city, its size, the run that claimed it (distance, time, pace) and when. Everyone else's territory dims while you hover, so that runner's holdings stand out, with a count and total for the part of the map on screen. Runners who chose to be anonymous show as "Anonymous runner" |
+| **INTVL Global Map** | The INTVL run-territory game's public global map. Hover (or long-press on a phone) a territory to see **who holds it**, their level and city, its size, the run that claimed it (distance, time, pace) and when. Everyone else's territory dims while you hover, so that runner's holdings stand out, with a count and total for the part of the map on screen. Runners who chose to be anonymous show as "Anonymous runner". A **leaderboard panel** (top right) ranks the runners holding the most territory on screen; click a runner to **pin** their territory lit (it stays pinned between visits), click again to unpin |
 | **Geocaches** | Geocaches from geocaching.com via the public tile API (no login required); shows Groundspeak's real per-type icons (traditional/mystery/earthcache/…), clickable through to each cache's page; click also fetches difficulty/terrain/owner/favourites |
 
 **Walks**
@@ -336,6 +336,10 @@ bash tests/run.sh --ci   # plain text output
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
 - **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, refreshing names, Build Up Ahead (adding, one-step Undo, replacing only its own waypoints), list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.26.0
+
+- **INTVL leaderboard:** with INTVL Global Map on, a panel ranks the runners holding the most territory on screen. Click a runner to pin their territory lit; it stays pinned between visits.
 
 ### Release notes — 7.25.0
 

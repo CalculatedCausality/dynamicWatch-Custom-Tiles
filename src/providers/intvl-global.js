@@ -1,7 +1,7 @@
 import { CFG } from "../config.js";
 import { LayerProvider } from "../layers/provider-factories.js";
 import { gmCancel, gmGet } from "../utils/http.js";
-import { hexAlpha, pointInRing, intvlAgo, intvlTrustedActivityTime, intvlOwnerKey, intvlOwnerStats, intvlTooltipHtml } from "../utils/intvl.js";
+import { hexAlpha, pointInRing, intvlAgo, intvlTrustedActivityTime, intvlOwnerKey, intvlOwnerStats, intvlTooltipHtml, intvlLeaderboard, intvlLeaderboardHtml } from "../utils/intvl.js";
 import { mvtDecode, prepareLayers } from "../utils/mvt.js";
 
 /* -- INTVL Global Map (public Mapbox Vector Tile pyramid) ------------
@@ -204,6 +204,33 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 					this._tileFeatures.delete(tileKey(c.z, c.x, c.y));
 				};
 				this.on("tileunload", this._onTileUnload);
+
+				// Leaderboard panel: who holds the most on screen. A row pins
+				// that runner's territory lit (remembered between visits).
+				try { this._pinned = String(GM_getValue(CFG.INTVL_PIN_KEY, "") || ""); } catch (_) { this._pinned = ""; }
+				// Light a remembered pin straight away; tiles still loading draw with it.
+				this._highlight = "";
+				this._setHighlight("");
+				this._lb = L.DomUtil.create("div", "dw-intvl-lb leaflet-control", map.getContainer());
+				this._lb.innerHTML =
+					`<button type="button" class="dw-intvl-lb-head" aria-expanded="true">INTVL leaders on screen</button>` +
+					`<div class="dw-intvl-lb-rows"></div>`;
+				L.DomEvent.disableClickPropagation(this._lb);
+				L.DomEvent.disableScrollPropagation(this._lb);
+				this._lb.addEventListener("click", (e) => {
+					const head = e.target.closest(".dw-intvl-lb-head");
+					if (head) {
+						const open = this._lb.classList.toggle("dw-intvl-lb--closed") === false;
+						head.setAttribute("aria-expanded", String(open));
+						return;
+					}
+					const row = e.target.closest(".dw-intvl-lb-row");
+					if (!row) return;
+					this._pin(row.dataset.key === this._pinned ? "" : row.dataset.key);
+				});
+				this._onViewChange = () => this._queueBoard();
+				map.on("moveend", this._onViewChange);
+				this._queueBoard();
 			},
 
 			onRemove(map) {
@@ -224,6 +251,9 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 					map.off("dragstart zoomstart", this._onPressDragStart);
 				}
 				this.off("tileunload", this._onTileUnload);
+				clearTimeout(this._boardTimer);
+				if (this._onViewChange) map.off("moveend", this._onViewChange);
+				if (this._lb) { this._lb.remove(); this._lb = null; }
 				this._clearTooltip();
 				this._tooltip = null;
 				this._tileFeatures && this._tileFeatures.clear();
@@ -243,16 +273,46 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 				this._setHighlight("");
 			},
 
-			// Make one runner's territories stand out by dimming the rest.
-			// Only repaints when the runner under the pointer changes.
+			// Make one runner's territories stand out by dimming the rest:
+			// the one under the pointer, else the pinned one. Only repaints
+			// when that changes.
 			_setHighlight(ownerKey) {
-				if ((this._highlight || "") === ownerKey) return;
-				this._highlight = ownerKey;
+				this._hoverKey = ownerKey || "";
+				const want = this._hoverKey || this._pinned || "";
+				if ((this._highlight || "") === want) return;
+				this._highlight = want;
 				if (!this._tileFeatures || !this._tileCtx) return;
 				for (const [key, ctx] of this._tileCtx) {
 					const prepared = this._tileFeatures.get(key);
 					if (prepared) this._renderTile(ctx, prepared, TILE_PX);
 				}
+			},
+
+			_pin(key) {
+				this._pinned = key || "";
+				try { GM_setValue(CFG.INTVL_PIN_KEY, this._pinned); } catch (_) {}
+				this._setHighlight(this._hoverKey || "");
+				this._renderBoard();
+			},
+
+			_queueBoard() {
+				clearTimeout(this._boardTimer);
+				this._boardTimer = setTimeout(() => this._renderBoard(), 300);
+			},
+
+			_renderBoard() {
+				if (!this._lb || !this._map) return;
+				const b = this._map.getBounds();
+				const rows = intvlLeaderboard(this._tileFeatures ? this._tileFeatures.values() : [],
+					{ west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() }, 10);
+				// Keep a pinned runner who is off this list visible at the bottom.
+				if (this._pinned && !rows.some((r) => r.key === this._pinned)) {
+					const all = intvlLeaderboard(this._tileFeatures ? this._tileFeatures.values() : [],
+						{ west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() }, 1e6);
+					const mine = all.find((r) => r.key === this._pinned);
+					if (mine) rows.push(mine);
+				}
+				this._lb.querySelector(".dw-intvl-lb-rows").innerHTML = intvlLeaderboardHtml(rows, this._pinned);
 			},
 
 			createTile(coords, done) {
@@ -295,6 +355,7 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 						this._tileFeatures.set(
 							tileKey(coords.z, coords.x, coords.y), prepared);
 						this._tileCtx.set(tileKey(coords.z, coords.x, coords.y), ctx);
+						this._queueBoard();
 					} catch (e) {
 						console.warn("[CustomTiles] INTVL global decode:", e);
 					}

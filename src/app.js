@@ -76,7 +76,7 @@ import {
 	_sccLoadState,
 } from './providers/scc-applications.js';
 import { _escHtml, esc, _safeColor, _fmtPrice, _fmtDate } from './utils/html.js';
-import { hexAlpha, pointInRing, intvlActivityTime, intvlAgo, intvlArea, intvlOwnerKey, intvlOwnerStats, intvlRunLine, intvlSharedNames, intvlTooltipHtml, intvlTrustedActivityTime } from './utils/intvl.js';
+import { hexAlpha, pointInRing, intvlActivityTime, intvlAgo, intvlArea, intvlOwnerKey, intvlOwnerStats, intvlRunLine, intvlSharedNames, intvlTooltipHtml, intvlTrustedActivityTime, intvlLeaderboard, intvlLeaderboardHtml } from './utils/intvl.js';
 import {
 	mvtDecode,
 	parseLayer,
@@ -121,7 +121,7 @@ export function bootUserscript() {
 			mvtDecode, parseLayer, parseValue, parseFeature,
 			decodeGeometry, zig, readVarint, skipField, utf8,
 			hexAlpha, pointInRing, prepareLayers,
-			intvlActivityTime, intvlAgo, intvlArea, intvlOwnerKey, intvlOwnerStats, intvlRunLine, intvlSharedNames, intvlTooltipHtml, intvlTrustedActivityTime,
+			intvlActivityTime, intvlAgo, intvlArea, intvlOwnerKey, intvlOwnerStats, intvlRunLine, intvlSharedNames, intvlTooltipHtml, intvlTrustedActivityTime, intvlLeaderboard, intvlLeaderboardHtml,
 			allTrailsExploreUrl, allTrailsViewAround, allTrailsChunkUrls, allTrailsTokenIn,
 			atAccess, atPopupHtml, atRouteHtml, atSegmentHtml, atToElements,
 			_cadVal, _escHtml, esc, _safeColor, _fmtPrice, _fmtDate,

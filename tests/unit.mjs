@@ -322,6 +322,29 @@ t("intvlTooltipHtml names the runner, respects anonymity, escapes tile text", ()
 	assert(!bad.includes("red;x"), "unsafe colour used: " + bad);
 });
 
+t("intvlLeaderboard ranks runners by area in view, counting each territory once", () => {
+	const f = (runId, userHash, username, area, box, colour = "#123456") => ({ colour, props: { runId, userHash, username, currentArea: area,
+		minLng: box[0], minLat: box[1], maxLng: box[2], maxLat: box[3], startTime: 100 + runId } });
+	const view = { west: 153, south: -27, east: 153.1, north: -26.9 };
+	const inside = [153.01, -26.99, 153.02, -26.98], outside = [154, -26.99, 154.01, -26.98], edge = [153.09, -26.95, 153.2, -26.94];
+	const tileA = [{ features: [f(1, "a", "Sam", 100, inside), f(2, "a", "Sam", 50, edge), f(3, "b", "Jo", 120, inside), f(9, "c", "Far", 999, outside)] }];
+	const tileB = [{ features: [f(2, "a", "Sam", 50, edge), f(4, "d", undefined, 10, inside)] }];
+	const rows = dw.intvlLeaderboard([tileA, tileB], view, 10);
+	eq(rows.map((r) => `${r.name || "anon"}:${r.count}:${r.area}`).join(","), "Sam:2:150,Jo:1:120,anon:1:10");
+	assert(rows[2].anonymous, "nameless runner marked anonymous");
+	eq(dw.intvlLeaderboard([tileA], view, 1).length, 1, "limit");
+});
+
+t("intvlLeaderboardHtml marks the pinned runner and escapes names", () => {
+	const html = dw.intvlLeaderboardHtml([{ key: "a", name: "<b>Sam", colour: "#123456", area: 2581, count: 2 },
+		{ key: 'x"y', name: "", colour: "red;x", area: 10, count: 1 }], "a");
+	assert(html.includes("dw-intvl-lb-row--pinned") && html.includes('data-key="a"'), html);
+	assert(html.includes("&lt;b&gt;Sam") && !html.includes("<b>Sam"), "not escaped");
+	assert(html.includes("Anonymous runner") && html.includes('data-key="x&quot;y"') && !html.includes("red;x"), html);
+	assert(html.includes("2,581 m² · 2"), html);
+	assert(dw.intvlLeaderboardHtml([], "").includes("No territories"), "empty state");
+});
+
 t("intvlArea formats m² → km²", () => {
 	eq(dw.intvlArea(0), "0 m²");
 	eq(dw.intvlArea(50000), "50,000 m²");
