@@ -32,6 +32,8 @@ Current modules:
 - `src/providers/qld-environment.js` — QPWS Estate, National Parks, and their ArcGIS query layer helper.
 - `src/providers/qld-imagery.js` — QLD Roads and QLD Historical imagery providers.
 - `src/providers/ga-radiometrics.js` — Natural Radiation (Australia): Geoscience Australia's 2019 dose-rate grid via WMS, with a GetFeatureInfo hover.
+- `src/providers/uxo.js` — Unexploded Ordnance (Defence): areas read from Defence's UXO PMTiles file, drawn per category with a hover that finds the areas under the pointer.
+- `src/utils/pmtiles.js` — a small PMTiles v3 reader (header, directories, Hilbert tile ids) over supplied range-fetch and decompress functions.
 - `src/providers/old-railways.js` — Old Railways: OpenStreetMap abandoned/disused railways via Overpass, fetched in zoom-10 squares with retries and a 30-day store.
 - `src/providers/extra-layers.js` — Pipelines (GA), Easements (QLD cadastre), Pastoral Districts (QLD) and Old Survey Marks (destroyed), with hover formatters.
 - `src/providers/geology.js` — Geology overlays: Geoscience Australia surface geology and Queensland detailed geology, with age-in-years hover formatters.

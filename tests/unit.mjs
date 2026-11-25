@@ -1863,6 +1863,22 @@ t("Old Railways: squares, query, parsing and hover", () => {
 	assert(dw._formatOldRailway({ n: "<b>x", s: "abandoned", h: "", o: "" }).includes("&lt;b&gt;x"), "not escaped");
 });
 
+t("UXO: Defence layers kept, parcels skipped, hover text and point-in-area", () => {
+	assert(dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Reference").names.includes("Unexploded Ordnance (Defence)"));
+	const sq = [[{ lat: 0, lon: 0 }, { lat: 0, lon: 1 }, { lat: 1, lon: 1 }, { lat: 1, lon: 0 }]];
+	eq(dw.uxoToElements("parcel", {}, 3, sq), null, "the heavy parcel layer is skipped");
+	eq(dw.uxoToElements("slight-potential-uxo", {}, 1, sq), null, "points skipped");
+	eq(dw.uxoToElements("other-uxo", { siteName: "x" }, 3, sq)[0].kind, "other-uxo");
+	// Real properties near Caloundra.
+	const html = dw._formatUxo("other-uxo", { siteName: "Caloundra Artillery Range", siteCategory: "Other", siteDescription: "Training Area during WW2. Many UXO recovered." });
+	assert(html.startsWith("<b>Caloundra Artillery Range</b><br>Former military training area"), html);
+	assert(html.includes("Many UXO recovered."), html);
+	assert(dw._formatUxo("dca", { name: "Shoalwater Bay Training Area" }).includes("Defence controlled area"));
+	assert(dw._formatUxo("other-uxo", { siteName: "<b>x" }).includes("&lt;b&gt;x"), "not escaped");
+	const hole = [...sq, [{ lat: 0.4, lon: 0.4 }, { lat: 0.4, lon: 0.6 }, { lat: 0.6, lon: 0.6 }, { lat: 0.6, lon: 0.4 }]];
+	assert(dw.polygonContains(sq, 0.5, 0.5) && !dw.polygonContains(hole, 0.5, 0.5) && dw.polygonContains(hole, 0.2, 0.2) && !dw.polygonContains(sq, 2, 2));
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

@@ -19,6 +19,7 @@ const HELPERS = [
 	"_formatDose", "gaDoseInfoUrl", "gaDoseTileUrl", "gaDoseValue", "_formatGaGeology", "_formatQldGeology", "geologyAgeYears",
 	"_formatEasement", "_formatPastoral", "_formatPipeline", "destroyedMarksDynamicLayers", "pastoralDynamicLayers",
 	"_formatOldRailway", "parseRailways", "railQuery", "railTileBox", "railTilesFor",
+	"UXO_KINDS", "_formatUxo", "polygonContains", "uxoToElements",
 	"_formatPostcode", "postcodeDynamicLayers", "_formatSuburb", "suburbDynamicLayers", "exportTileBBox",
 	"_fireMonth", "_formatFireScar", "_formatParkFire", "fireScarDynamicLayers", "fireScarLayerId", "parkFireDynamicLayers",
 	// tile geometry

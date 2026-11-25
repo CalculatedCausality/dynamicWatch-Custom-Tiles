@@ -155,8 +155,11 @@ export function makeVectorTileLayer(opts) {
 			if (!pending) { finish(); return; }
 
 			for (const [x, y, tk] of need) {
-				const h = gmGet(opts.tileUrl(tz, x, y),
-					{ responseType: "arraybuffer", timeout: timeoutMs },
+				// A source can supply its own tile fetch (e.g. ranges of one big
+				// PMTiles file); it answers like gmGet with { status, response }.
+				const fetchTile = opts.fetchTile || ((z, tx, ty, cb) => gmGet(opts.tileUrl(z, tx, ty),
+					{ responseType: "arraybuffer", timeout: timeoutMs }, cb));
+				const h = fetchTile(tz, x, y,
 					(err, r) => {
 						if (myGen !== this._gen || !this._group) {
 							if (--pending === 0) finish();

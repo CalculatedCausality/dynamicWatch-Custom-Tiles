@@ -65,6 +65,7 @@ import { GaRadiometricsLayerProvider, gaDoseIdentify } from "../providers/ga-rad
 import { createGeologyProviders, geologyIdentifySources } from "../providers/geology.js";
 import { createExtraProviders, extraIdentifySources } from "../providers/extra-layers.js";
 import { OldRailwaysLayerProvider } from "../providers/old-railways.js";
+import { UxoLayerProvider } from "../providers/uxo.js";
 import { createPostcodeProvider, createSuburbProvider, postcodeIdentifySource, suburbIdentifySource } from "../providers/abs-postcodes.js";
 import { allTrailsExploreUrl, allTrailsViewAround } from "../utils/alltrails.js";
 import { AllTrailsLayerProvider } from "../providers/alltrails.js";
@@ -326,6 +327,7 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_PASTORAL, new PastoralProvider());
 			addOverlay(CFG.LAYER_OLD_MARKS, new OldMarksProvider());
 			addOverlay(CFG.LAYER_OLD_RAIL, new OldRailwaysLayerProvider());
+			addOverlay(CFG.LAYER_UXO, new UxoLayerProvider());
 			addOverlay(CFG.LAYER_SAFECAST,   new SafecastLayerProvider());
 			addOverlay(CFG.LAYER_INFRA,      new PowerInfraLayerProvider());
 			addOverlay(CFG.LAYER_TELECOM,    new TelecomsLayerProvider());

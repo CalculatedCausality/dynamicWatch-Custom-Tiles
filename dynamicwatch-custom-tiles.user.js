@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.35.0
+// @version      7.36.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -58,6 +58,7 @@
 // @connect      geo.abs.gov.au
 // @connect      services.ga.gov.au
 // @connect      overpass-api.de
+// @connect      tiles-indigo.apps.veris.net.au
 // @connect      cloudfront.net
 // @connect      api.mapbox.com
 // @connect      s3.amazonaws.com
@@ -162,6 +163,10 @@
     LAYER_PASTORAL: "Pastoral Districts (QLD)",
     LAYER_OLD_MARKS: "Old Survey Marks (destroyed)",
     LAYER_OLD_RAIL: "Old Railways",
+    LAYER_UXO: "Unexploded Ordnance (Defence)",
+    // The PMTiles file behind Defence's UXO Mapping Application.
+    UXO_PMTILES: "https://tiles-indigo.apps.veris.net.au/uxo/uxo-area.pmtiles",
+    UXO_MIN_ZOOM: 11,
     OVERPASS_URL: "https://overpass-api.de/api/interpreter",
     OLD_RAIL_MIN_ZOOM: 11,
     OLD_RAIL_CACHE_KEY: "dw_old_rail_cache",
@@ -500,7 +505,7 @@
     },
     {
       header: "Reference",
-      names: [CFG.LAYER_HIST_MAPS, CFG.LAYER_OLD_RAIL, CFG.LAYER_SURVEY_MARKS, CFG.LAYER_OLD_MARKS]
+      names: [CFG.LAYER_HIST_MAPS, CFG.LAYER_UXO, CFG.LAYER_OLD_RAIL, CFG.LAYER_SURVEY_MARKS, CFG.LAYER_OLD_MARKS]
     },
     {
       header: "Live data",
@@ -10707,9 +10712,15 @@
           return;
         }
         for (const [x, y, tk] of need) {
-          const h = gmGet(
-            opts.tileUrl(tz, x, y),
+          const fetchTile = opts.fetchTile || ((z, tx, ty, cb) => gmGet(
+            opts.tileUrl(z, tx, ty),
             { responseType: "arraybuffer", timeout: timeoutMs },
+            cb
+          ));
+          const h = fetchTile(
+            tz,
+            x,
+            y,
             (err, r) => {
               if (myGen !== this._gen || !this._group) {
                 if (--pending === 0) finish();
@@ -12840,6 +12851,287 @@
         }
       });
       return new Layer();
+    }
+  };
+
+  // src/utils/pmtiles.js
+  function readVarint2(bytes, pos) {
+    let result = 0, shift = 0, b;
+    do {
+      b = bytes[pos.i++];
+      result += (b & 127) * 2 ** shift;
+      shift += 7;
+    } while (b & 128);
+    return result;
+  }
+  var u64 = (v2, o) => Number(v2.getBigUint64(o, true));
+  function parsePmHeader(buf) {
+    const v2 = new DataView(buf);
+    const magic = String.fromCharCode(...new Uint8Array(buf, 0, 7));
+    if (magic !== "PMTiles" || v2.getUint8(7) !== 3) throw new Error("not a PMTiles v3 file");
+    return {
+      rootOffset: u64(v2, 8),
+      rootLength: u64(v2, 16),
+      metadataOffset: u64(v2, 24),
+      metadataLength: u64(v2, 32),
+      leafOffset: u64(v2, 40),
+      leafLength: u64(v2, 48),
+      tileDataOffset: u64(v2, 56),
+      tileDataLength: u64(v2, 64),
+      internalCompression: v2.getUint8(97),
+      tileCompression: v2.getUint8(98),
+      tileType: v2.getUint8(99),
+      minZoom: v2.getUint8(100),
+      maxZoom: v2.getUint8(101),
+      minLon: v2.getInt32(102, true) / 1e7,
+      minLat: v2.getInt32(106, true) / 1e7,
+      maxLon: v2.getInt32(110, true) / 1e7,
+      maxLat: v2.getInt32(114, true) / 1e7
+    };
+  }
+  function parsePmDirectory(bytes) {
+    const pos = { i: 0 };
+    const n = readVarint2(bytes, pos);
+    const entries = new Array(n);
+    let last = 0;
+    for (let k = 0; k < n; k++) {
+      last += readVarint2(bytes, pos);
+      entries[k] = { tileId: last, offset: 0, length: 0, runLength: 0 };
+    }
+    for (let k = 0; k < n; k++) entries[k].runLength = readVarint2(bytes, pos);
+    for (let k = 0; k < n; k++) entries[k].length = readVarint2(bytes, pos);
+    for (let k = 0; k < n; k++) {
+      const o = readVarint2(bytes, pos);
+      entries[k].offset = o === 0 && k > 0 ? entries[k - 1].offset + entries[k - 1].length : o - 1;
+    }
+    return entries;
+  }
+  function zxyToTileId(z, x, y) {
+    let acc = 0;
+    for (let t = 0; t < z; t++) acc += 4 ** t;
+    const n = 2 ** z;
+    let d = 0, rx, ry, xx = x, yy = y;
+    for (let s = n / 2; s >= 1; s /= 2) {
+      rx = (xx & s) > 0 ? 1 : 0;
+      ry = (yy & s) > 0 ? 1 : 0;
+      d += s * s * (3 * rx ^ ry);
+      if (ry === 0) {
+        if (rx === 1) {
+          xx = s - 1 - xx;
+          yy = s - 1 - yy;
+        }
+        const tmp = xx;
+        xx = yy;
+        yy = tmp;
+      }
+    }
+    return acc + d;
+  }
+  function findPmEntry(entries, tileId) {
+    let lo = 0, hi = entries.length - 1;
+    while (lo <= hi) {
+      const mid = lo + hi >> 1, c = entries[mid].tileId - tileId;
+      if (c < 0) lo = mid + 1;
+      else if (c > 0) hi = mid - 1;
+      else return entries[mid];
+    }
+    if (hi >= 0) {
+      const e = entries[hi];
+      if (e.runLength === 0) return e;
+      if (tileId - e.tileId < e.runLength) return e;
+    }
+    return null;
+  }
+  function pmtilesReader({ fetchRange, decompress }) {
+    let header = null, root = null, starting = null;
+    const leaves = /* @__PURE__ */ new Map();
+    const range = (o, l) => new Promise((res, rej) => fetchRange(o, l, (e, b) => e ? rej(e) : res(b)));
+    const start = () => starting || (starting = (async () => {
+      const first = await range(0, 16384);
+      header = parsePmHeader(first);
+      let rootBuf = header.rootOffset + header.rootLength <= first.byteLength ? first.slice(header.rootOffset, header.rootOffset + header.rootLength) : await range(header.rootOffset, header.rootLength);
+      root = parsePmDirectory(new Uint8Array(await decompress(rootBuf, header.internalCompression)));
+    })().catch((e) => {
+      starting = null;
+      throw e;
+    }));
+    const leaf = async (offset, length) => {
+      const key = offset + ":" + length;
+      if (!leaves.has(key)) {
+        const p = range(header.leafOffset + offset, length).then((b) => decompress(b, header.internalCompression)).then((b) => parsePmDirectory(new Uint8Array(b)));
+        leaves.set(key, p);
+        p.catch(() => leaves.delete(key));
+        if (leaves.size > 64) leaves.delete(leaves.keys().next().value);
+      }
+      return leaves.get(key);
+    };
+    return {
+      async header() {
+        await start();
+        return header;
+      },
+      // The decompressed tile bytes, or null where the file has no tile.
+      async tile(z, x, y) {
+        await start();
+        if (z < header.minZoom || z > header.maxZoom) return null;
+        const id = zxyToTileId(z, x, y);
+        let dir = root;
+        for (let depth = 0; depth < 4; depth++) {
+          const e = findPmEntry(dir, id);
+          if (!e) return null;
+          if (e.runLength === 0) {
+            dir = await leaf(e.offset, e.length);
+            continue;
+          }
+          const raw = await range(header.tileDataOffset + e.offset, e.length);
+          return decompress(raw, header.tileCompression);
+        }
+        return null;
+      },
+      async metadata() {
+        await start();
+        const b = await range(header.metadataOffset, header.metadataLength);
+        return JSON.parse(new TextDecoder().decode(await decompress(b, header.internalCompression)));
+      }
+    };
+  }
+  async function pmDecompress(buf, code) {
+    if (code === 1 || code === 0) return buf;
+    if (code !== 2) throw new Error("unsupported PMTiles compression " + code);
+    const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return new Response(stream).arrayBuffer();
+  }
+
+  // src/providers/uxo.js
+  var UXO_KINDS = {
+    "substantial-potential-uxo": { label: "Substantial UXO potential", color: "#dc2626", order: 1 },
+    "slight-potential-uxo": { label: "Slight UXO potential", color: "#ea580c", order: 2 },
+    "remote-potential-uxo": { label: "Remote UXO potential", color: "#ca8a04", order: 3 },
+    "other-uxo": { label: "Former military training area (UXO category: Other)", color: "#a16207", order: 4 },
+    "wwii-depth-charge-operations-uxo": { label: "WWII depth charge operations", color: "#0e7490", order: 5 },
+    "sea-dumping-sites-uxo": { label: "Sea dumping site", color: "#2563eb", order: 6 },
+    "dca": { label: "Defence controlled area", color: "#166534", order: 7 }
+  };
+  function uxoToElements(layerName, props, geometryType, rings) {
+    if (geometryType !== 3 || !UXO_KINDS[layerName]) return null;
+    const kept = rings.filter((r) => r.length > 2);
+    return kept.length ? [{ type: "way", kind: layerName, geometry: kept, tags: props }] : null;
+  }
+  function _formatUxo(kind, p) {
+    const k = UXO_KINDS[kind] || { label: "Defence site" };
+    const name = String(p.siteName || p.name || "").trim();
+    const desc = String(p.siteDescription || "").trim();
+    const lines = [esc`<b>${name || k.label}</b>`];
+    if (name) lines.push(_escHtml(k.label));
+    if (desc) lines.push(esc`<span class="dw-cad-sub">${desc.length > 200 ? desc.slice(0, 199) + "…" : desc}</span>`);
+    return lines.join("<br>");
+  }
+  function polygonContains(rings, lat, lon) {
+    let inside = false;
+    for (const ring of rings) if (pointInRing(lon, lat, ring.map((p) => [p.lon, p.lat]))) inside = !inside;
+    return inside;
+  }
+  var reader = null;
+  function uxoReader() {
+    if (!reader) {
+      reader = pmtilesReader({
+        fetchRange: (offset, length, cb) => gmGet(CFG.UXO_PMTILES, {
+          responseType: "arraybuffer",
+          timeout: 3e4,
+          headers: { Range: `bytes=${offset}-${offset + length - 1}` }
+        }, (err, r) => {
+          if (err || !r || r.status !== 206 && r.status !== 200 || !r.response) cb(err || new Error("http " + (r && r.status)));
+          else cb(null, r.response);
+        }),
+        decompress: pmDecompress
+      });
+    }
+    return reader;
+  }
+  var UxoLayerProvider = class extends LayerProvider {
+    create() {
+      const PANE2 = "dwUxoPane", DCA_PANE = "dwUxoDcaPane";
+      let shapes = [];
+      const tip = hoverSlot({ className: "dw-qpws-tip", order: 20 });
+      let onMove = null, onOut = null;
+      const layer = makeVectorTileLayer({
+        label: "UXO",
+        pane: PANE2,
+        paneZIndex: 386,
+        minZoom: CFG.UXO_MIN_ZOOM,
+        // The file's tiles hold every parcel too, so fetch one fixed zoom.
+        maxNativeZoom: 11,
+        maxTiles: 24,
+        attribution: 'UXO areas &copy; <a href="https://www.defence.gov.au/about/locations-property/unexploded-ordnance-australia" target="_blank" rel="noreferrer">Department of Defence</a>',
+        fetchTile: (z, x, y, cb) => {
+          let cancelled = false;
+          uxoReader().tile(z, x, y).then(
+            (buf) => {
+              if (!cancelled) cb(null, buf ? { status: 200, response: buf } : { status: 204, response: null });
+            },
+            (e) => {
+              if (!cancelled) cb(e, null);
+            }
+          );
+          return { aborted: false, _xhr: { abort() {
+            cancelled = true;
+          } } };
+        },
+        missingIsEmpty: true,
+        toElements: uxoToElements,
+        onAdd: (_l, map) => {
+          if (!map.getPane(DCA_PANE)) {
+            const p = map.createPane(DCA_PANE);
+            p.style.zIndex = "385";
+            p.style.opacity = "0.15";
+          }
+          map.getPane(PANE2).style.opacity = "0.35";
+          onMove = (e) => {
+            const { lat, lng } = e.latlng;
+            const hits = shapes.filter((s) => polygonContains(s.geometry, lat, lng)).sort((a, b) => UXO_KINDS[a.kind].order - UXO_KINDS[b.kind].order);
+            const seen = /* @__PURE__ */ new Set(), html = [];
+            for (const s of hits) {
+              const h = _formatUxo(s.kind, s.tags);
+              if (!seen.has(h)) {
+                seen.add(h);
+                html.push(h);
+              }
+            }
+            if (!html.length) {
+              tip.remove();
+              return;
+            }
+            tip.setLatLng(e.latlng).setContent(html.join('<div class="dw-hover-sep"></div>'));
+            if (!tip._map) tip.addTo(map);
+          };
+          onOut = () => tip.remove();
+          map.on("mousemove", onMove);
+          map.on("mouseout", onOut);
+        },
+        onRemove: (_l, map) => {
+          if (onMove) {
+            map.off("mousemove", onMove);
+            map.off("mouseout", onOut);
+          }
+          onMove = onOut = null;
+          tip.remove();
+          shapes = [];
+        },
+        render: (group, elements) => {
+          shapes = elements.filter((e) => e.type === "way");
+          for (const el of [...shapes].sort((a, b) => UXO_KINDS[b.kind].order - UXO_KINDS[a.kind].order)) {
+            const k = UXO_KINDS[el.kind];
+            L.polygon(el.geometry.map((r) => r.map((g) => [g.lat, g.lon])), {
+              pane: el.kind === "dca" ? DCA_PANE : PANE2,
+              interactive: false,
+              stroke: false,
+              fillColor: k.color,
+              fillOpacity: 1
+            }).addTo(group);
+          }
+        }
+      });
+      return layer;
     }
   };
 
@@ -16153,6 +16445,7 @@
         addOverlay(CFG.LAYER_PASTORAL, new PastoralProvider());
         addOverlay(CFG.LAYER_OLD_MARKS, new OldMarksProvider());
         addOverlay(CFG.LAYER_OLD_RAIL, new OldRailwaysLayerProvider());
+        addOverlay(CFG.LAYER_UXO, new UxoLayerProvider());
         addOverlay(CFG.LAYER_SAFECAST, new SafecastLayerProvider());
         addOverlay(CFG.LAYER_INFRA, new PowerInfraLayerProvider());
         addOverlay(CFG.LAYER_TELECOM, new TelecomsLayerProvider());
@@ -17380,6 +17673,10 @@
         railQuery,
         railTileBox,
         railTilesFor,
+        UXO_KINDS,
+        _formatUxo,
+        polygonContains,
+        uxoToElements,
         _formatPostcode,
         postcodeDynamicLayers,
         _formatSuburb,

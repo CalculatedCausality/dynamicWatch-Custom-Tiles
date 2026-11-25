@@ -126,6 +126,10 @@ export const CFG = {
 	LAYER_PASTORAL: "Pastoral Districts (QLD)",
 	LAYER_OLD_MARKS: "Old Survey Marks (destroyed)",
 	LAYER_OLD_RAIL: "Old Railways",
+	LAYER_UXO: "Unexploded Ordnance (Defence)",
+	// The PMTiles file behind Defence's UXO Mapping Application.
+	UXO_PMTILES: "https://tiles-indigo.apps.veris.net.au/uxo/uxo-area.pmtiles",
+	UXO_MIN_ZOOM: 11,
 	OVERPASS_URL: "https://overpass-api.de/api/interpreter",
 	OLD_RAIL_MIN_ZOOM: 11,
 	OLD_RAIL_CACHE_KEY: "dw_old_rail_cache",
@@ -536,7 +540,7 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Reference",
-		names:  [CFG.LAYER_HIST_MAPS, CFG.LAYER_OLD_RAIL, CFG.LAYER_SURVEY_MARKS, CFG.LAYER_OLD_MARKS],
+		names:  [CFG.LAYER_HIST_MAPS, CFG.LAYER_UXO, CFG.LAYER_OLD_RAIL, CFG.LAYER_SURVEY_MARKS, CFG.LAYER_OLD_MARKS],
 	},
 	{
 		header: "Live data",
