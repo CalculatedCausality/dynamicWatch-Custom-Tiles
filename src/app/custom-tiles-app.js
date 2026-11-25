@@ -58,6 +58,7 @@ import { createQldEnvironmentProviders } from "../providers/qld-environment.js";
 import { _miningSectionHtml, createQldMiningProviders, miningIdentifySources } from "../providers/qld-mining.js";
 import { createQldLandProviders, landIdentifySources } from "../providers/qld-land.js";
 import { createQldSurveyProvider, surveyIdentifySource } from "../providers/qld-survey.js";
+import { createQldTracksProvider, tracksIdentifySource } from "../providers/qld-tracks.js";
 import { allTrailsExploreUrl, allTrailsViewAround } from "../utils/alltrails.js";
 import { AllTrailsLayerProvider } from "../providers/alltrails.js";
 import { RoutePoiController } from "../providers/route-pois.js";
@@ -91,6 +92,7 @@ const { HistoricMinesLayerProvider, MineShaftsLayerProvider, HistoricLeasesLayer
 const { StateLandLayerProvider, LandUseLayerProvider } =
 	createQldLandProviders({ makeHoverIdentify });
 const SurveyMarksLayerProvider = createQldSurveyProvider({ makeHoverIdentify });
+const QldTracksLayerProvider = createQldTracksProvider({ makeHoverIdentify });
 
 /* -- Application ------------------------------------------------------- */
 
@@ -301,6 +303,7 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_GEOCACHING, new GeocachingLayerProvider());
 			addOverlay(CFG.LAYER_ABW,        new AussieBushwalkingLayerProvider());
 			addOverlay(CFG.LAYER_ALLTRAILS,  new AllTrailsLayerProvider());
+			addOverlay(CFG.LAYER_QLD_TRACKS, new QldTracksLayerProvider());
 			addOverlay(CFG.LAYER_MOBILE,     new MobileCoverageLayerProvider());
 			addOverlay(CFG.LAYER_SEAMARKS,   new OpenSeaMapLayerProvider());
 			addOverlay(CFG.LAYER_INFRA,      new PowerInfraLayerProvider());
@@ -835,7 +838,8 @@ export class CustomTilesApp {
 		// The hover tooltip shows one feature and needs a mouse; this lists
 		// them all (a goldfield has leases, workings and shafts stacked) and
 		// is the only way to read them on a phone.
-		for (const src of [...miningIdentifySources(), ...landIdentifySources(), surveyIdentifySource()]) {
+		for (const src of [...miningIdentifySources(), ...landIdentifySources(), surveyIdentifySource(),
+			tracksIdentifySource()]) {
 			const lyr = this.layers[src.layerName];
 			if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
 			arcgisIdentify(map, latlng, {

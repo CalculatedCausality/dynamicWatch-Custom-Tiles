@@ -1642,6 +1642,36 @@ t("survey report links must be https on a Queensland Government host", () => {
 	eq(dw._surveyYear("Null"), "");
 });
 
+t("QLD Tracks: registered in Walks, five filtered passes over the roads layer, no roads", () => {
+	eq(dw.CFG.LAYER_QLD_TRACKS, "QLD Tracks");
+	assert(dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Walks").names.includes("QLD Tracks"), "not in Walks");
+	const layers = JSON.parse(dw.tracksDynamicLayers());
+	eq(layers.length, 5);
+	eq(new Set(layers.map((l) => l.id)).size, 5, "dynamic layer ids must be unique");
+	for (const l of layers) {
+		eq(l.source.mapLayerId, 10);
+		assert(/class (IN \('Track','Walkway'\)|= 'Track'|= 'Walkway')/.test(l.definitionExpression), l.definitionExpression);
+		assert(!/Local|Connector|Secondary/.test(l.definitionExpression), "roads must not be drawn");
+	}
+	eq(layers[0].drawingInfo.renderer.label, "Private or restricted", "private tracks are drawn on top");
+});
+
+t("_formatTrack: name, use, access, fair weather, owner; escapes", () => {
+	// Real identify-shaped attributes near Mapleton.
+	const html = dw._formatTrack({ "Full road name": "Cornelius Break", Class: "Track", "Sub class": "4WD", Trafficability: "4WD",
+		"User access": "Public", Seasonality: "F", "Road owner": "QPWS", "Road maintainer": "QPWS" });
+	assert(html.includes("<b>Cornelius Break</b><br>4WD track"), html);
+	assert(html.includes("Fair-weather track"), html);
+	assert(html.includes("Owned by Queensland Parks and Wildlife Service"), html);
+	assert(!html.includes("dw-at-warn"), html);
+	const walk = dw._formatTrack({ "Full road name": "Track", Class: "Track", "Sub class": "Non vehicular track", Trafficability: "Pedestrian",
+		"User access": "Private", "Road maintainer": "Unmaintained" });
+	assert(walk.startsWith("<b>Walking track</b>"), "a generic name is not shown: " + walk);
+	assert(walk.includes("Private access") && walk.includes("Not maintained"), walk);
+	assert(dw._formatTrack({ Class: "Track", Trafficability: "Closed" }).includes(">Closed<"), "closed");
+	assert(dw._formatTrack({ "Full road name": "<b>x", Class: "Walkway" }).includes("&lt;b&gt;x"), "not escaped");
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

@@ -15,6 +15,7 @@ const HELPERS = [
 	// config/grouping
 	"CFG", "DW_LAYER_GROUPS", "DW_OVERLAY_GROUPS", "QldTokenManager",
 	"_formatSurveyMark", "_surveyReportUrl", "_surveyYear", "surveyDynamicLayers",
+	"_formatTrack", "tracksDynamicLayers", "TRACK_KINDS",
 	// tile geometry
 	"tileToBBox4326", "tileToBBox3857", "utfGridCellToLatLng",
 	"_overzoomPlacement",

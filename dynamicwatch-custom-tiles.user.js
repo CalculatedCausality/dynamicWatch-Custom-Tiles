@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.24.0
+// @version      7.25.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -166,6 +166,7 @@
     LAYER_LAND_USE: "Land Use",
     LAYER_STATE_LAND: "State Land",
     LAYER_SURVEY_MARKS: "Survey Marks",
+    LAYER_QLD_TRACKS: "QLD Tracks",
     LAYER_TOPO: "QLD Topo",
     LAYER_INTVL_GLOBAL: "INTVL Global Map",
     LAYER_GEOCACHING: "Geocaches",
@@ -344,6 +345,10 @@
     // draws them below 1:144,400, i.e. from zoom 13.
     QLD_SURVEY_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Location/SurveyControl/MapServer",
     QLD_SURVEY_MIN_ZOOM: 13,
+    // Tracks and walkways from the state road network (layer 10).
+    QLD_TRACKS_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Transportation/RoadsAndTracks/MapServer",
+    QLD_TRACKS_LAYER_ID: 10,
+    QLD_TRACKS_MIN_ZOOM: 12,
     // Historical printed map sheets index (parish/town/topographic/
     // exploration/… scans, 1860s-2012). Footprint overlay + click lists
     // the sheets covering a point, each with a scan link; a scan can be
@@ -446,7 +451,7 @@
     },
     {
       header: "Walks",
-      names: [CFG.LAYER_ABW, CFG.LAYER_ALLTRAILS]
+      names: [CFG.LAYER_ABW, CFG.LAYER_ALLTRAILS, CFG.LAYER_QLD_TRACKS]
     },
     {
       header: "Mining",
@@ -11730,6 +11735,113 @@
     });
   }
 
+  // src/providers/qld-tracks.js
+  var TRACKS = "class IN ('Track','Walkway')";
+  var OPEN = "(user_access IS NULL OR user_access NOT IN ('Private','Restricted'))";
+  var NOT_FOOT = "(sub_class IS NULL OR sub_class <> 'Non vehicular track')";
+  var TRACK_KINDS = [
+    ["Private or restricted", `${TRACKS} AND user_access IN ('Private','Restricted')`, [220, 38, 38], "esriSLSDash", 1.5],
+    ["Closed", `${TRACKS} AND ${OPEN} AND trafficability = 'Closed'`, [220, 38, 38], "esriSLSDot", 2],
+    ["Walking", `${OPEN} AND ((class = 'Track' AND (trafficability IN ('Pedestrian','Horse','Shared') OR sub_class = 'Non vehicular track')) OR class = 'Walkway')`, [22, 163, 74], "esriSLSDash", 2.25],
+    ["Vehicle", `class = 'Track' AND ${OPEN} AND trafficability IN ('4WD','2WD','Regular vehicle') AND ${NOT_FOOT}`, [146, 64, 14], "esriSLSDash", 2.25],
+    ["Other", `class = 'Track' AND ${OPEN} AND (trafficability IS NULL OR trafficability = 'Unknown') AND ${NOT_FOOT}`, [120, 113, 108], "esriSLSDash", 1.75]
+  ];
+  function tracksDynamicLayers() {
+    return JSON.stringify(TRACK_KINDS.map(([label, where, rgb, style, width], i) => ({
+      id: 101 + i,
+      source: { type: "mapLayer", mapLayerId: CFG.QLD_TRACKS_LAYER_ID },
+      definitionExpression: where,
+      drawingInfo: { renderer: { type: "simple", label, symbol: { type: "esriSLS", style, color: [...rgb, 235], width } }, showLabels: false }
+    })));
+  }
+  function _val2(v) {
+    if (v === null || v === void 0) return "";
+    const s = String(v).trim();
+    return s && !/^(null|none|unknown|na)$/i.test(s) ? s : "";
+  }
+  var OWNERS = {
+    LG: "the local council",
+    QPWS: "Queensland Parks and Wildlife Service",
+    TMR: "Transport and Main Roads",
+    Private: "a private owner"
+  };
+  var USES = {
+    Pedestrian: "Walking track",
+    Horse: "Horse track",
+    Shared: "Shared track (walk, ride)",
+    "4WD": "4WD track",
+    "2WD": "2WD track",
+    "Regular vehicle": "Vehicle track",
+    Closed: "Closed track"
+  };
+  function _formatTrack(attrs) {
+    const a = attrs || {};
+    const cls = _val2(a.Class);
+    const sub = _val2(a["Sub class"]);
+    const traffic = _val2(a.Trafficability);
+    const access = _val2(a["User access"]);
+    const owner = _val2(a["Road owner"]);
+    const maintainer = _val2(a["Road maintainer"]);
+    const name = _val2(a["Full road name"]);
+    const alias = _val2(a["Road name alias (1)"]);
+    const kind = cls === "Walkway" ? "Walkway" : USES[traffic] || (sub === "Non vehicular track" ? "Walking track" : sub === "4WD" ? "4WD track" : "Track");
+    const named = name && !/^(track|break|fire ?break|walkway)$/i.test(name) ? name : "";
+    const lines = [esc`<b>${named || kind}</b>`];
+    if (named) lines.push(_escHtml(kind));
+    if (alias && alias !== named) lines.push(esc`Also known as ${alias}`);
+    if (access === "Private" || access === "Restricted") lines.push(esc`<span class="dw-at-warn">${access} access</span>`);
+    else if (traffic === "Closed") lines.push(`<span class="dw-at-warn">Closed</span>`);
+    if (_val2(a.Seasonality) === "F") lines.push("Fair-weather track");
+    const care = [
+      OWNERS[owner] ? `owned by ${OWNERS[owner]}` : "",
+      maintainer === "Unmaintained" ? "not maintained" : ""
+    ].filter(Boolean).join(", ");
+    if (care) lines.push(esc`<span class="dw-cad-sub">${care.charAt(0).toUpperCase() + care.slice(1)}</span>`);
+    return lines.join("<br>");
+  }
+  var LAYER_DEFS2 = { [CFG.QLD_TRACKS_LAYER_ID]: TRACKS };
+  function tracksIdentifySource() {
+    return {
+      layerName: CFG.LAYER_QLD_TRACKS,
+      heading: "Tracks",
+      baseUrl: CFG.QLD_TRACKS_SERVICE,
+      layers: "all:" + CFG.QLD_TRACKS_LAYER_ID,
+      layerDefs: LAYER_DEFS2,
+      tolerance: 5,
+      minZoom: CFG.QLD_TRACKS_MIN_ZOOM,
+      format: _formatTrack
+    };
+  }
+  function createQldTracksProvider({ makeHoverIdentify: makeHoverIdentify2 }) {
+    const src = tracksIdentifySource();
+    const installHover = makeHoverIdentify2({
+      baseUrl: src.baseUrl,
+      layers: src.layers,
+      layerDefs: src.layerDefs,
+      tolerance: 5,
+      minZoom: CFG.QLD_TRACKS_MIN_ZOOM,
+      tipClass: "dw-qpws-tip",
+      formatTooltip: _formatTrack
+    });
+    return arcgisExportProvider({
+      baseUrl: CFG.QLD_TRACKS_SERVICE,
+      extraParams: "&dynamicLayers=" + encodeURIComponent(tracksDynamicLayers()),
+      pane: "dwTracksPane",
+      paneZIndex: 412,
+      opacity: 1,
+      minZoom: CFG.QLD_TRACKS_MIN_ZOOM,
+      maxZoom: 25,
+      attribution: 'Tracks &copy; <a href="https://www.data.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (Resources)</a>',
+      onAdd: (layer, map) => installHover(layer, map),
+      onRemove: (layer) => {
+        if (layer._dwHoverOff) {
+          layer._dwHoverOff();
+          layer._dwHoverOff = null;
+        }
+      }
+    });
+  }
+
   // src/utils/alltrails.js
   function allTrailsExploreUrl(view) {
     const v = view || {};
@@ -12733,7 +12845,7 @@
   };
   var TYPE_GLYPHS = { peak: "▲", volcano: "▲" };
   var COURSE_TYPES = /* @__PURE__ */ new Set(["climb", "climb_top", "creek_crossing", "track_section"]);
-  var TRACK_KINDS = {
+  var TRACK_KINDS2 = {
     path: "path",
     track: "track",
     minor: "road",
@@ -13517,7 +13629,7 @@
         return `<div>${line}</div><div>${span}</div>`;
       }
       if (poi.type === "track_section" && poi.until != null) {
-        const kind = TRACK_KINDS[poi.cls] || "";
+        const kind = TRACK_KINDS2[poi.cls] || "";
         return esc`<div>Until about ${formatRouteDistance(poi.until, metric)}${kind ? " · " + kind : ""}</div>`;
       }
       return "";
@@ -14596,6 +14708,7 @@
   var { HistoricMinesLayerProvider, MineShaftsLayerProvider, HistoricLeasesLayerProvider, LeasePointsLayerProvider } = createQldMiningProviders({ makeHoverIdentify });
   var { StateLandLayerProvider, LandUseLayerProvider } = createQldLandProviders({ makeHoverIdentify });
   var SurveyMarksLayerProvider = createQldSurveyProvider({ makeHoverIdentify });
+  var QldTracksLayerProvider = createQldTracksProvider({ makeHoverIdentify });
   var CustomTilesApp = class {
     constructor() {
       this.qldToken = new QldTokenManager({
@@ -14767,6 +14880,7 @@
         addOverlay(CFG.LAYER_GEOCACHING, new GeocachingLayerProvider());
         addOverlay(CFG.LAYER_ABW, new AussieBushwalkingLayerProvider());
         addOverlay(CFG.LAYER_ALLTRAILS, new AllTrailsLayerProvider());
+        addOverlay(CFG.LAYER_QLD_TRACKS, new QldTracksLayerProvider());
         addOverlay(CFG.LAYER_MOBILE, new MobileCoverageLayerProvider());
         addOverlay(CFG.LAYER_SEAMARKS, new OpenSeaMapLayerProvider());
         addOverlay(CFG.LAYER_INFRA, new PowerInfraLayerProvider());
@@ -15179,7 +15293,12 @@
           );
         });
       }
-      for (const src of [...miningIdentifySources(), ...landIdentifySources(), surveyIdentifySource()]) {
+      for (const src of [
+        ...miningIdentifySources(),
+        ...landIdentifySources(),
+        surveyIdentifySource(),
+        tracksIdentifySource()
+      ]) {
         const lyr = this.layers[src.layerName];
         if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
         arcgisIdentify(map, latlng, {
@@ -15936,6 +16055,9 @@
         _surveyReportUrl,
         _surveyYear,
         surveyDynamicLayers,
+        _formatTrack,
+        tracksDynamicLayers,
+        TRACK_KINDS,
         tileToBBox4326,
         tileToBBox3857,
         utfGridCellToLatLng,

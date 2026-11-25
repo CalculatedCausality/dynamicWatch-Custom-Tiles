@@ -133,6 +133,7 @@ export const CFG = {
 	LAYER_LAND_USE: "Land Use",
 	LAYER_STATE_LAND: "State Land",
 	LAYER_SURVEY_MARKS: "Survey Marks",
+	LAYER_QLD_TRACKS: "QLD Tracks",
 	LAYER_TOPO:    "QLD Topo",
 	LAYER_INTVL_GLOBAL: "INTVL Global Map",
 	LAYER_GEOCACHING: "Geocaches",
@@ -357,6 +358,12 @@ export const CFG = {
 		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
 		"Location/SurveyControl/MapServer",
 	QLD_SURVEY_MIN_ZOOM: 13,
+	// Tracks and walkways from the state road network (layer 10).
+	QLD_TRACKS_SERVICE:
+		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+		"Transportation/RoadsAndTracks/MapServer",
+	QLD_TRACKS_LAYER_ID: 10,
+	QLD_TRACKS_MIN_ZOOM: 12,
 
 	// Historical printed map sheets index (parish/town/topographic/
 	// exploration/… scans, 1860s-2012). Footprint overlay + click lists
@@ -480,7 +487,7 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Walks",
-		names:  [CFG.LAYER_ABW, CFG.LAYER_ALLTRAILS],
+		names:  [CFG.LAYER_ABW, CFG.LAYER_ALLTRAILS, CFG.LAYER_QLD_TRACKS],
 	},
 	{
 		header: "Mining",
