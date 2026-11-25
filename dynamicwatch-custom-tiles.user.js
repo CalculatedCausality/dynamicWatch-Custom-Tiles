@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.26.0
+// @version      7.27.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -167,6 +167,8 @@
     LAYER_STATE_LAND: "State Land",
     LAYER_SURVEY_MARKS: "Survey Marks",
     LAYER_QLD_TRACKS: "QLD Tracks",
+    LAYER_PARK_FIRES: "Park Fire History",
+    LAYER_FIRE_SCARS: "Fire Scars",
     LAYER_TOPO: "QLD Topo",
     LAYER_INTVL_GLOBAL: "INTVL Global Map",
     LAYER_GEOCACHING: "Geocaches",
@@ -351,6 +353,10 @@
     QLD_TRACKS_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Transportation/RoadsAndTracks/MapServer",
     QLD_TRACKS_LAYER_ID: 10,
     QLD_TRACKS_MIN_ZOOM: 12,
+    // Fire: QPWS planned burns and wildfires; statewide satellite fire scars.
+    QLD_PARK_FIRE_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Environment/ParksFireHistory/MapServer",
+    QLD_FIRE_SCAR_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Environment/FireScarMapping/MapServer",
+    QLD_FIRE_HOVER_MIN_ZOOM: 11,
     // Historical printed map sheets index (parish/town/topographic/
     // exploration/… scans, 1860s-2012). Footprint overlay + click lists
     // the sheets covering a point, each with a scan link; a scan can be
@@ -449,7 +455,7 @@
     },
     {
       header: "Environment",
-      names: [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS]
+      names: [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_PARK_FIRES, CFG.LAYER_FIRE_SCARS, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS]
     },
     {
       header: "Walks",
@@ -625,7 +631,9 @@
       spatialReference: { wkid: 4326 }
     }));
     const url = `${opts.baseUrl}/identify?geometry=${geometry}&geometryType=esriGeometryPoint&sr=4326&layers=${opts.layers}` + // Limits a sublayer to the features an overlay actually draws.
-    (opts.layerDefs ? `&layerDefs=${encodeURIComponent(JSON.stringify(opts.layerDefs))}` : "") + `&tolerance=${opts.tolerance || 3}&mapExtent=${mapExtent}&imageDisplay=${imageDisplay}&returnGeometry=false&f=json`;
+    (opts.layerDefs ? `&layerDefs=${encodeURIComponent(JSON.stringify(opts.layerDefs))}` : "") + `&tolerance=${opts.tolerance || 3}&mapExtent=${mapExtent}&imageDisplay=${imageDisplay}` + // Dates as epoch ms, not text: the text form follows the request's
+    // language (11/5 in en-US is 5/11 in en-AU).
+    (opts.unformatted ? `&returnUnformattedValues=true` : "") + `&returnGeometry=false&f=json`;
     gmJsonGet(url, (err, data) => {
       if (err) {
         cb(err, null);
@@ -11938,6 +11946,172 @@
     });
   }
 
+  // src/providers/qld-fire.js
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var FIRE_AGES = [
+    ["Within about a year", 1, 0, [220, 38, 38]],
+    ["2 to 4 years ago", 4, 2, [234, 88, 12]],
+    ["5 to 10 years ago", 10, 5, [202, 138, 4]]
+  ];
+  function parkFireDynamicLayers(year) {
+    const out = [];
+    FIRE_AGES.forEach(([label, from, to, rgb], ai) => {
+      for (const [ti, [type, style, alpha]] of [["WF", "esriSFSSolid", 110], ["PB", "esriSFSBackwardDiagonal", 200]].entries()) {
+        out.push({
+          id: 201 + ai * 2 + ti,
+          source: { type: "mapLayer", mapLayerId: 0 },
+          definitionExpression: `type = '${type}' AND outyear >= ${year - from} AND outyear <= ${year - to}`,
+          drawingInfo: { renderer: {
+            type: "simple",
+            label: `${label} (${type === "WF" ? "wildfire" : "planned burn"})`,
+            symbol: {
+              type: "esriSFS",
+              style,
+              color: [...rgb, alpha],
+              outline: { type: "esriSLS", style: "esriSLSSolid", color: [...rgb, 230], width: 1 }
+            }
+          }, showLabels: false }
+        });
+      }
+    });
+    return JSON.stringify(out);
+  }
+  function fireScarLayerId(year) {
+    return year - 1986;
+  }
+  function fireScarDynamicLayers(year) {
+    const pass = (id, source, rgb, alpha, label) => ({
+      id,
+      source: { type: "mapLayer", mapLayerId: source },
+      drawingInfo: { renderer: { type: "simple", label, symbol: {
+        type: "esriSFS",
+        style: "esriSFSSolid",
+        color: [...rgb, alpha],
+        outline: { type: "esriSLS", style: "esriSLSSolid", color: [...rgb, 200], width: 0.4 }
+      } }, showLabels: false }
+    });
+    return JSON.stringify([
+      pass(301, 0, [220, 38, 38], 140, String(year)),
+      pass(302, fireScarLayerId(year - 1), [234, 88, 12], 90, String(year - 1))
+    ]);
+  }
+  function _val3(v) {
+    if (v === null || v === void 0) return "";
+    const s = String(v).trim();
+    return s && !/^(null|none)$/i.test(s) ? s : "";
+  }
+  function _fireMonth(v) {
+    const s = _val3(v);
+    if (!s) return "";
+    let d = null;
+    if (/^-?\d{11,13}$/.test(s)) d = new Date(Number(s));
+    else {
+      const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(s);
+      if (m) d = new Date(Date.UTC(+m[3], +m[1] - 1, +m[2]));
+    }
+    return d && !isNaN(d) && d.getUTCFullYear() > 1900 ? `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}` : "";
+  }
+  var _ha = (v) => {
+    const n = Number(_val3(v));
+    return n > 0 ? (n >= 100 ? Math.round(n).toLocaleString("en-AU") : n.toFixed(n < 10 ? 1 : 0)) + " ha" : "";
+  };
+  function _formatParkFire(attrs) {
+    const a = attrs || {};
+    const type = _val3(a.Type || a.type);
+    const kind = type === "WF" ? "Wildfire" : type === "PB" ? "Planned burn" : "Fire";
+    const when = _fireMonth(a.IgnitionDate || a.ignitiondate) || _fireMonth(a.OutDate || a.outdate) || _val3(a.OutYear || a.outyear);
+    const park = _val3(a.Label || a.label).split("/")[0].trim();
+    const where = _val3(a.General_Location || a.general_location);
+    const pct = Number(_val3(a.Pct_Burn || a.pct_burn));
+    const lines = [esc`<b>${kind}${when ? ", " + when : ""}</b>`];
+    if (park) lines.push(_escHtml(park));
+    const facts = [_ha(a.Area_ha || a.area_ha), Number.isFinite(pct) && pct > 0 && _val3(a.Pct_Burn || a.pct_burn) ? `${Math.round(pct)}% burnt` : ""].filter(Boolean).join(" · ");
+    if (facts) lines.push(_escHtml(facts));
+    if (where) lines.push(esc`<span class="dw-cad-sub">${where.slice(0, 160)}</span>`);
+    return lines.join("<br>");
+  }
+  function _formatFireScar(attrs) {
+    const a = attrs || {};
+    const rawMonth = Number(_val3(a.Month || a.month));
+    const month = _val3(a["Month of Year"] || a["Month of year"] || a.month_desc) || (rawMonth >= 1 && rawMonth <= 12 ? ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][rawMonth - 1] : "");
+    const year = _val3(a.Year || a.year);
+    const lines = [esc`<b>Burnt${month || year ? ", " + [month, year].filter(Boolean).join(" ") : ""}</b>`];
+    const area = _ha(a["Area(ha)"] || a.area_ha);
+    lines.push(_escHtml(["Detected by satellite", area].filter(Boolean).join(" · ")));
+    return lines.join("<br>");
+  }
+  function fireIdentifySources(year) {
+    return [
+      {
+        layerName: CFG.LAYER_PARK_FIRES,
+        heading: "Park fire history",
+        baseUrl: CFG.QLD_PARK_FIRE_SERVICE,
+        layers: "all:0",
+        layerDefs: { 0: `outyear >= ${year - 10}` },
+        tolerance: 1,
+        unformatted: true,
+        minZoom: CFG.QLD_FIRE_HOVER_MIN_ZOOM,
+        format: _formatParkFire
+      },
+      {
+        layerName: CFG.LAYER_FIRE_SCARS,
+        heading: "Fire scars",
+        baseUrl: CFG.QLD_FIRE_SCAR_SERVICE,
+        layers: `all:0,${fireScarLayerId(year - 1)}`,
+        tolerance: 1,
+        unformatted: true,
+        minZoom: CFG.QLD_FIRE_HOVER_MIN_ZOOM,
+        format: _formatFireScar
+      }
+    ];
+  }
+  function createQldFireProviders({ makeHoverIdentify: makeHoverIdentify2 }) {
+    const year = (/* @__PURE__ */ new Date()).getFullYear();
+    const [parkSrc, scarSrc] = fireIdentifySources(year);
+    const offHover = (layer) => {
+      if (layer._dwHoverOff) {
+        layer._dwHoverOff();
+        layer._dwHoverOff = null;
+      }
+    };
+    const hover = (src) => makeHoverIdentify2({
+      baseUrl: src.baseUrl,
+      layers: src.layers,
+      layerDefs: src.layerDefs,
+      tolerance: src.tolerance,
+      unformatted: true,
+      minZoom: src.minZoom,
+      tipClass: "dw-qpws-tip",
+      formatTooltip: src.format
+    });
+    const installPark = hover(parkSrc), installScar = hover(scarSrc);
+    const ParkFireLayerProvider2 = arcgisExportProvider({
+      baseUrl: CFG.QLD_PARK_FIRE_SERVICE,
+      extraParams: "&dynamicLayers=" + encodeURIComponent(parkFireDynamicLayers(year)),
+      pane: "dwParkFirePane",
+      paneZIndex: 384,
+      opacity: 0.9,
+      minZoom: 8,
+      maxZoom: 25,
+      attribution: 'Park fire history &copy; <a href="https://www.data.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (QPWS)</a>',
+      onAdd: (layer, map) => installPark(layer, map),
+      onRemove: offHover
+    });
+    const FireScarLayerProvider2 = arcgisExportProvider({
+      baseUrl: CFG.QLD_FIRE_SCAR_SERVICE,
+      extraParams: "&dynamicLayers=" + encodeURIComponent(fireScarDynamicLayers(year)),
+      pane: "dwFireScarPane",
+      paneZIndex: 383,
+      opacity: 0.85,
+      minZoom: 6,
+      maxZoom: 25,
+      attribution: 'Fire scars &copy; <a href="https://www.data.qld.gov.au/" target="_blank" rel="noreferrer">State of Queensland (Sentinel-2 fire scar mapping)</a>',
+      onAdd: (layer, map) => installScar(layer, map),
+      onRemove: offHover
+    });
+    return { ParkFireLayerProvider: ParkFireLayerProvider2, FireScarLayerProvider: FireScarLayerProvider2 };
+  }
+
   // src/utils/alltrails.js
   function allTrailsExploreUrl(view) {
     const v = view || {};
@@ -14805,6 +14979,7 @@
   var { StateLandLayerProvider, LandUseLayerProvider } = createQldLandProviders({ makeHoverIdentify });
   var SurveyMarksLayerProvider = createQldSurveyProvider({ makeHoverIdentify });
   var QldTracksLayerProvider = createQldTracksProvider({ makeHoverIdentify });
+  var { ParkFireLayerProvider, FireScarLayerProvider } = createQldFireProviders({ makeHoverIdentify });
   var CustomTilesApp = class {
     constructor() {
       this.qldToken = new QldTokenManager({
@@ -14998,6 +15173,8 @@
         addOverlay(CFG.LAYER_STATE_LAND, new StateLandLayerProvider());
         addOverlay(CFG.LAYER_LAND_USE, new LandUseLayerProvider());
         addOverlay(CFG.LAYER_SURVEY_MARKS, new SurveyMarksLayerProvider());
+        addOverlay(CFG.LAYER_PARK_FIRES, new ParkFireLayerProvider());
+        addOverlay(CFG.LAYER_FIRE_SCARS, new FireScarLayerProvider());
         addOverlay(
           CFG.LAYER_INTVL_GLOBAL,
           new IntvlGlobalTilesLayerProvider()
@@ -15393,7 +15570,8 @@
         ...miningIdentifySources(),
         ...landIdentifySources(),
         surveyIdentifySource(),
-        tracksIdentifySource()
+        tracksIdentifySource(),
+        ...fireIdentifySources((/* @__PURE__ */ new Date()).getFullYear())
       ]) {
         const lyr = this.layers[src.layerName];
         if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
@@ -15401,6 +15579,7 @@
           baseUrl: src.baseUrl,
           layers: src.layers,
           layerDefs: src.layerDefs,
+          unformatted: src.unformatted,
           tolerance: noHover ? src.tolerance * 2 : src.tolerance
         }, (err, _feat, raw) => {
           if (err || !isCurrent()) return;
@@ -16168,6 +16347,12 @@
         _formatTrack,
         tracksDynamicLayers,
         TRACK_KINDS,
+        _fireMonth,
+        _formatFireScar,
+        _formatParkFire,
+        fireScarDynamicLayers,
+        fireScarLayerId,
+        parkFireDynamicLayers,
         tileToBBox4326,
         tileToBBox3857,
         utfGridCellToLatLng,

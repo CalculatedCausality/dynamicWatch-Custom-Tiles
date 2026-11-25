@@ -19,6 +19,9 @@ export function arcgisIdentify(map, latlng, opts, cb) {
 		`&tolerance=${opts.tolerance || 3}` +
 		`&mapExtent=${mapExtent}` +
 		`&imageDisplay=${imageDisplay}` +
+		// Dates as epoch ms, not text: the text form follows the request's
+		// language (11/5 in en-US is 5/11 in en-AU).
+		(opts.unformatted ? `&returnUnformattedValues=true` : "") +
 		`&returnGeometry=false&f=json`;
 	gmJsonGet(url, (err, data) => {
 		if (err) { cb(err, null); return; }

@@ -1695,6 +1695,37 @@ t("_formatTrack: name, use, access, fair weather, owner; escapes", () => {
 	assert(dw._formatTrack({ "Full road name": "<b>x", Class: "Walkway" }).includes("&lt;b&gt;x"), "not escaped");
 });
 
+t("fire overlays: registered in Environment; passes built for the year", () => {
+	const env = dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Environment").names;
+	assert(env.includes("Park Fire History") && env.includes("Fire Scars"), env.join());
+	const park = JSON.parse(dw.parkFireDynamicLayers(2026));
+	eq(park.length, 6);
+	eq(new Set(park.map((l) => l.id)).size, 6);
+	eq(park[0].definitionExpression, "type = 'WF' AND outyear >= 2025 AND outyear <= 2026");
+	eq(park[5].definitionExpression, "type = 'PB' AND outyear >= 2016 AND outyear <= 2021");
+	eq(park[1].drawingInfo.renderer.symbol.style, "esriSFSBackwardDiagonal", "planned burns are hatched");
+	eq(dw.fireScarLayerId(2025), 39, "matches the service's 2025 layer");
+	const scars = JSON.parse(dw.fireScarDynamicLayers(2026));
+	eq(scars.map((l) => l.source.mapLayerId).join(","), "0,39", "this year, then last year");
+});
+
+t("fire formatters: kind, month, park, area; escapes", () => {
+	eq(dw._fireMonth("4/15/2026 10:16:00 AM"), "Apr 2026");
+	eq(dw._fireMonth("1776173760000"), "Apr 2026");
+	eq(dw._fireMonth("Null"), "");
+	const park = dw._formatParkFire({ Type: "PB", IgnitionDate: "4/15/2026 10:16:00 AM", Label: "Mapleton National Park/P/2026/04", Area_ha: "20.7596", Pct_Burn: "90", General_Location: "Great walk intersection" });
+	assert(park.includes("<b>Planned burn, Apr 2026</b>") && park.includes("Mapleton National Park"), park);
+	assert(park.includes("21 ha · 90% burnt") && park.includes("Great walk intersection"), park);
+	assert(dw._formatParkFire({ Type: "WF", OutYear: "2019", Pct_Burn: "0" }).startsWith("<b>Wildfire, 2019</b>"), "year fallback");
+	assert(!dw._formatParkFire({ Type: "WF", Pct_Burn: "0" }).includes("% burnt"), "0% is not shown");
+	const scar = dw._formatFireScar({ "Month of Year": "January", Year: "2026", "Area(ha)": "0.04" });
+	eq(scar, "<b>Burnt, January 2026</b><br>Detected by satellite · 0.0 ha");
+	assert(dw._formatParkFire({ Label: "<b>x/P" }).includes("&lt;b&gt;x"), "not escaped");
+	// Unformatted identify values (what the overlays ask for): epoch dates, numeric month.
+	assert(dw._formatParkFire({ Type: "WF", IgnitionDate: 1478332920000 }).startsWith("<b>Wildfire, Nov 2016</b>"), "epoch date");
+	assert(dw._formatFireScar({ Month: 1, Year: 2026, "Area(ha)": 103.2 }).startsWith("<b>Burnt, January 2026</b>"), "numeric month");
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

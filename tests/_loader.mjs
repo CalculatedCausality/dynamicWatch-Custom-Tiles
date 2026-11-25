@@ -16,6 +16,7 @@ const HELPERS = [
 	"CFG", "DW_LAYER_GROUPS", "DW_OVERLAY_GROUPS", "QldTokenManager",
 	"_formatSurveyMark", "_surveyReportUrl", "_surveyYear", "surveyDynamicLayers",
 	"_formatTrack", "tracksDynamicLayers", "TRACK_KINDS",
+	"_fireMonth", "_formatFireScar", "_formatParkFire", "fireScarDynamicLayers", "fireScarLayerId", "parkFireDynamicLayers",
 	// tile geometry
 	"tileToBBox4326", "tileToBBox3857", "utfGridCellToLatLng",
 	"_overzoomPlacement",

@@ -20,6 +20,7 @@ import {
 } from './providers/qld-cadastre.js';
 import { _parseAuStreetAddress, _pickJurisdiction } from './providers/cadastre-au.js';
 import { QldTokenManager } from './tokens.js';
+import { _fireMonth, _formatFireScar, _formatParkFire, fireScarDynamicLayers, fireScarLayerId, parkFireDynamicLayers } from './providers/qld-fire.js';
 import { _formatTrack, tracksDynamicLayers, TRACK_KINDS } from './providers/qld-tracks.js';
 import { _formatSurveyMark, _surveyReportUrl, _surveyYear, surveyDynamicLayers } from './providers/qld-survey.js';
 import { allTrailsChunkUrls, allTrailsExploreUrl, allTrailsTokenIn, allTrailsViewAround } from './utils/alltrails.js';
@@ -116,6 +117,7 @@ export function bootUserscript() {
 			CFG, DW_LAYER_GROUPS, DW_OVERLAY_GROUPS, QldTokenManager,
 			_formatSurveyMark, _surveyReportUrl, _surveyYear, surveyDynamicLayers,
 			_formatTrack, tracksDynamicLayers, TRACK_KINDS,
+			_fireMonth, _formatFireScar, _formatParkFire, fireScarDynamicLayers, fireScarLayerId, parkFireDynamicLayers,
 			tileToBBox4326, tileToBBox3857, utfGridCellToLatLng,
 			_overzoomPlacement,
 			mvtDecode, parseLayer, parseValue, parseFeature,

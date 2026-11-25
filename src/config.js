@@ -134,6 +134,8 @@ export const CFG = {
 	LAYER_STATE_LAND: "State Land",
 	LAYER_SURVEY_MARKS: "Survey Marks",
 	LAYER_QLD_TRACKS: "QLD Tracks",
+	LAYER_PARK_FIRES: "Park Fire History",
+	LAYER_FIRE_SCARS: "Fire Scars",
 	LAYER_TOPO:    "QLD Topo",
 	LAYER_INTVL_GLOBAL: "INTVL Global Map",
 	LAYER_GEOCACHING: "Geocaches",
@@ -366,6 +368,14 @@ export const CFG = {
 		"Transportation/RoadsAndTracks/MapServer",
 	QLD_TRACKS_LAYER_ID: 10,
 	QLD_TRACKS_MIN_ZOOM: 12,
+	// Fire: QPWS planned burns and wildfires; statewide satellite fire scars.
+	QLD_PARK_FIRE_SERVICE:
+		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+		"Environment/ParksFireHistory/MapServer",
+	QLD_FIRE_SCAR_SERVICE:
+		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
+		"Environment/FireScarMapping/MapServer",
+	QLD_FIRE_HOVER_MIN_ZOOM: 11,
 
 	// Historical printed map sheets index (parish/town/topographic/
 	// exploration/… scans, 1860s-2012). Footprint overlay + click lists
@@ -485,7 +495,7 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Environment",
-		names:  [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS],
+		names:  [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_PARK_FIRES, CFG.LAYER_FIRE_SCARS, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS],
 	},
 	{
 		header: "Walks",

@@ -33,6 +33,7 @@ Current modules:
 - `src/providers/qld-imagery.js` — QLD Roads and QLD Historical imagery providers.
 - `src/providers/alltrails.js` — AllTrails Trail Map overlay: AllTrails' Mapbox-hosted map tiles, and the lookup of the public map key from AllTrails' pages.
 - `src/providers/qld-mining.js` — QLD mining overlays: Historic Mines (workings), Mine Shafts (Abandoned Mine Lands openings), and Historic Mining Leases (MinesPermitsHistoric title footprints), each with hover-identify tooltips.
+- `src/providers/qld-fire.js` — Park Fire History and Fire Scars overlays: QPWS burns by age and Sentinel-2 fire scars, drawn through `dynamicLayers`, with hover and pop-up formatters.
 - `src/providers/qld-tracks.js` — QLD Tracks overlay: tracks and walkways from the state road network, drawn as five filtered `dynamicLayers` passes, with hover and pop-up formatter.
 - `src/providers/qld-survey.js` — Survey Marks overlay: QLD survey control marks recoloured by condition through `dynamicLayers`, with hover and pop-up formatters.
 - `src/providers/qld-land.js` — QLD land overlays: State Land (the cadastre Tenure layer filtered and recoloured through `dynamicLayers`) and Land Use (QLUMP), with their hover and pop-up formatters.
