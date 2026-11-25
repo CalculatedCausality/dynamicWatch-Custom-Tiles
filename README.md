@@ -73,6 +73,8 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 | **National Parks** | Queensland's NP estate types (NP/NS/NY/NA) from the authoritative QPWS reference |
 | **Park Fire History** | Queensland Parks and Wildlife's record of planned burns and wildfires on park and forest land over the last ten years, coloured by age: red within about a year, orange 2 to 4 years ago, yellow 5 to 10. Wildfires are solid, planned burns hatched. Hover for the kind, month, park, area and how much burnt |
 | **Fire Scars** | Burns detected by satellite (Sentinel-2) on all land, not only parks: red this year, orange last year. Hover for the month and area. The current year is filled in as the government updates it |
+| **Natural Radiation (Australia)** | Natural gamma radiation from the ground across the whole continent, from Geoscience Australia's 2019 Radiometric Grid of Australia (merged from over 600 airborne surveys, about 100 m detail; CC BY 4.0). Drawn in GA's colour stretch: purple low, through cyan and yellow, to red high. The colours rank places against the rest of Australia; they are not danger levels, so check the reading. Hover or right-click for the reading in nGy/h, compared with the world average outdoors (59 nGy/h). Gaps are areas never surveyed. This is the official source of the Australia layer on Safecast's map, newer than Safecast's 2010 copy |
+| **Radiation (Safecast)** | Background radiation measured by Safecast's volunteers worldwide, as coloured dots along the routes they drove or walked, in Safecast's own scale: dark blue through cyan is normal background (up to about 0.25 µSv/h), purple and pink are raised (about 0.3–0.6), and red, orange and yellow are high (about 1 µSv/h and above). Readings are sparse outside Japan and the US; in Australia they are mostly along main roads. Close in, where Safecast has no detailed tile, the nearest coarser one is stretched. Data CC0 |
 | **Light Pollution** | Sky brightness from `lightpollutionmap.info`; WMS-served at 65% opacity |
 | **OpenSeaMap** | Nautical seamarks (buoys, lights, lanes, harbour features) |
 
@@ -343,6 +345,12 @@ bash tests/run.sh --ci   # plain text output
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
 - **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, refreshing names, Build Up Ahead (adding, one-step Undo, replacing only its own waypoints), list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.31.0
+
+- New **Natural Radiation (Australia)** overlay (in Environment, off by default): Geoscience Australia's 2019 map of natural radiation across the continent, with the reading on hover. Tampermonkey will ask to allow `services.ga.gov.au`.
+- New **Radiation (Safecast)** overlay (in Environment, off by default): Safecast's crowd-sourced background radiation readings.
+- Fixed: the Suburbs overlay did not stack in its place among the other layers (its order value was not a whole number, which browsers ignore).
 
 ### Release notes — 7.30.0
 

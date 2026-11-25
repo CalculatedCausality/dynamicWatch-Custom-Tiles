@@ -114,7 +114,7 @@ export function createSuburbProvider({ makeHoverIdentify }) {
 		baseUrl: CFG.ABS_SAL_SERVICE,
 		extraParams: "&dynamicLayers=" + encodeURIComponent(suburbDynamicLayers()),
 		tileSize: 512,
-		pane: "dwSuburbPane", paneZIndex: 386.5, opacity: 1, minZoom: CFG.ABS_SAL_MIN_ZOOM, maxZoom: 25,
+		pane: "dwSuburbPane", paneZIndex: 386, opacity: 1, minZoom: CFG.ABS_SAL_MIN_ZOOM, maxZoom: 25,
 		attribution: 'Suburbs &copy; <a href="https://www.abs.gov.au/" target="_blank" rel="noreferrer">Australian Bureau of Statistics</a>, CC BY 4.0',
 		onAdd: (layer, map) => installHover(layer, map),
 		onRemove: (layer) => { if (layer._dwHoverOff) { layer._dwHoverOff(); layer._dwHoverOff = null; } },

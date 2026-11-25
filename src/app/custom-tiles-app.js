@@ -8,6 +8,7 @@ import {
 	GoogleHybridLayerProvider,
 	MobileCoverageLayerProvider,
 	OpenSeaMapLayerProvider,
+	SafecastLayerProvider,
 	QldGlobeLayerProvider,
 	QldLabelsLayerProvider,
 	QldReliefLayerProvider,
@@ -60,6 +61,7 @@ import { createQldLandProviders, landIdentifySources } from "../providers/qld-la
 import { createQldSurveyProvider, surveyIdentifySource } from "../providers/qld-survey.js";
 import { createQldTracksProvider, tracksIdentifySource } from "../providers/qld-tracks.js";
 import { createQldFireProviders, fireIdentifySources } from "../providers/qld-fire.js";
+import { GaRadiometricsLayerProvider, gaDoseIdentify } from "../providers/ga-radiometrics.js";
 import { createPostcodeProvider, createSuburbProvider, postcodeIdentifySource, suburbIdentifySource } from "../providers/abs-postcodes.js";
 import { allTrailsExploreUrl, allTrailsViewAround } from "../utils/alltrails.js";
 import { AllTrailsLayerProvider } from "../providers/alltrails.js";
@@ -311,6 +313,8 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_QLD_TRACKS, new QldTracksLayerProvider());
 			addOverlay(CFG.LAYER_MOBILE,     new MobileCoverageLayerProvider());
 			addOverlay(CFG.LAYER_SEAMARKS,   new OpenSeaMapLayerProvider());
+			addOverlay(CFG.LAYER_GA_RADIATION, new GaRadiometricsLayerProvider());
+			addOverlay(CFG.LAYER_SAFECAST,   new SafecastLayerProvider());
 			addOverlay(CFG.LAYER_INFRA,      new PowerInfraLayerProvider());
 			addOverlay(CFG.LAYER_TELECOM,    new TelecomsLayerProvider());
 			addOverlay(CFG.LAYER_LIGHTPOL,   new LightPollutionLayerProvider());
@@ -859,6 +863,12 @@ export class CustomTilesApp {
 				const html = _miningSectionHtml(src, (raw && raw.results) || []);
 				if (html) section("dw-popup-ident-mining", html);
 			});
+		}
+
+		// NATURAL RADIATION — the dose rate at the point (a WMS, not ArcGIS).
+		const ga = this.layers[CFG.LAYER_GA_RADIATION];
+		if (ga && map.hasLayer(ga)) {
+			gaDoseIdentify(map, latlng, (html) => { if (html && isCurrent()) section("dw-popup-ident-mining", html); });
 		}
 
 		// HISTORIC MAP SHEETS — in the right-click / long-press location popup

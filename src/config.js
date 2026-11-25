@@ -118,6 +118,11 @@ export const CFG = {
 	LAYER_WAZE: "Waze Traffic",
 	LAYER_MOBILE: "Mobile Coverage",
 	LAYER_SEAMARKS: "OpenSeaMap",
+	LAYER_SAFECAST: "Radiation (Safecast)",
+	LAYER_GA_RADIATION: "Natural Radiation (Australia)",
+	// Geoscience Australia National Geophysical Grids WMS (CORS-open).
+	GA_GEOPHYS_WMS: "https://services.ga.gov.au/gis/geophysical-grids/ows",
+	SAFECAST_TILES: "https://s3-ap-northeast-1.amazonaws.com/te512jp.safecast.org/{z}/{x}/{y}.png",
 	LAYER_INFRA: "Power Infrastructure",
 	LAYER_TELECOM: "Telecoms",
 	LAYER_LIGHTPOL: "Light Pollution",
@@ -502,7 +507,7 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Environment",
-		names:  [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_PARK_FIRES, CFG.LAYER_FIRE_SCARS, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS],
+		names:  [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_PARK_FIRES, CFG.LAYER_FIRE_SCARS, CFG.LAYER_GA_RADIATION, CFG.LAYER_SAFECAST, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS],
 	},
 	{
 		header: "Walks",

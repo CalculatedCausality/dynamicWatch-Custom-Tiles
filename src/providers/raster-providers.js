@@ -84,6 +84,16 @@ export const QldReliefLayerProvider = tileProvider(CFG.QLD_RELIEF_TILE, {
 	attribution: "&copy; State of Queensland (Department of Resources)",
 });
 
+// Safecast's crowd-sourced radiation measurements (points layer), served
+// as 512 px PNG tiles with standard z/x/y addressing on public S3. Tiles
+// stop at z14 where readings are dense and earlier where they are sparse,
+// so missing ones fall back to the nearest coarser tile. Data CC0.
+export const SafecastLayerProvider = tileProvider(
+	CFG.SAFECAST_TILES,
+	{ maxNativeZoom: 14, maxZoom: 25, opacity: 0.9, overzoom: true,
+	  attribution: 'Radiation &copy; <a href="https://safecast.org/" target="_blank" rel="noreferrer">Safecast</a> (CC0)' },
+);
+
 export const OpenSeaMapLayerProvider = tileProvider(
 	CFG.OPENSEAMAP_TILE,
 	{ maxNativeZoom: 18, maxZoom: 25,

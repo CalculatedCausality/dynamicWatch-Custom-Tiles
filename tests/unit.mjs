@@ -2,7 +2,7 @@
 // Catches regressions in tile projection, MVT decode, point-in-polygon,
 // colour utilities, and the INTVL hover-helper logic. No network.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import vm from "node:vm";
@@ -1761,6 +1761,44 @@ t("ArcGIS export tiles of 512 px ask for the area of a 256 px tile one zoom out"
 	eq(JSON.stringify(dw.exportTileBBox(512, 12, 1894, 1181)), JSON.stringify(dw.tileToBBox4326(11, 1894, 1181)));
 	eq(JSON.stringify(dw.exportTileBBox(256, 12, 1894, 1181)), JSON.stringify(dw.tileToBBox4326(12, 1894, 1181)));
 	eq(JSON.stringify(dw.exportTileBBox(undefined, 12, 1, 1)), JSON.stringify(dw.tileToBBox4326(12, 1, 1)));
+});
+
+t("Safecast radiation layer: registered in Environment, public S3 tile template", () => {
+	assert(dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Environment").names.includes("Radiation (Safecast)"), "not in Environment");
+	eq(dw.CFG.SAFECAST_TILES, "https://s3-ap-northeast-1.amazonaws.com/te512jp.safecast.org/{z}/{x}/{y}.png");
+});
+
+t("every overlay pane z-index is a whole number (CSS ignores fractions)", () => {
+	const src = resolve(dirname(fileURLToPath(import.meta.url)), "..", "src");
+	const files = readdirSync(src, { recursive: true }).filter((f) => String(f).endsWith(".js"));
+	assert(files.length > 20, "found the source files");
+	for (const f of files) {
+		const bad = readFileSync(resolve(src, String(f)), "utf8").match(/paneZIndex:\s*\d+\.\d+/g);
+		assert(!bad, f + ": " + bad);
+	}
+});
+
+t("Natural Radiation (Australia): GA WMS tile and value requests, dose reading", () => {
+	assert(dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Environment").names.includes("Natural Radiation (Australia)"));
+	const q = new URL(dw.gaDoseTileUrl(10, 946, 590)).searchParams;
+	eq(q.get("LAYERS"), "geophys:radmap_v4_2019_filtered_dose");
+	eq(q.get("CRS"), "EPSG:3857");
+	eq(q.get("FORMAT"), "image/png8", "compact form");
+	const b = dw.tileToBBox3857(10, 946, 590);
+	eq(q.get("BBOX"), `${b.west},${b.south},${b.east},${b.north}`);
+	const i = new URL(dw.gaDoseInfoUrl(1000, 2000, 10)).searchParams;
+	eq(i.get("REQUEST"), "GetFeatureInfo");
+	eq(i.get("BBOX"), "985,1985,1015,2015");
+	eq(i.get("I") + "," + i.get("J") + "," + i.get("WIDTH"), "1,1,3");
+	// Real answers: Nambour, then offshore.
+	eq(dw.gaDoseValue({ features: [{ properties: { GRAY_INDEX: 44.73810577392578 } }] }), 44.73810577392578);
+	eq(dw.gaDoseValue({ features: [] }), null);
+	eq(dw.gaDoseValue({ features: [{ properties: { GRAY_INDEX: -183700 } }] }), null, "filter artefact");
+	const html = dw._formatDose(44.738);
+	assert(html.startsWith("<b>Natural radiation 45 nGy/h</b>") && html.includes("about the world average"), html);
+	assert(dw._formatDose(20).includes("below the world average"));
+	assert(dw._formatDose(300).includes("well above"));
+	eq(dw._formatDose(null), "");
 });
 
 // ---- Vexcel aerial token helpers ----

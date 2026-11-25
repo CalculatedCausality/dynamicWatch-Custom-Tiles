@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.30.0
+// @version      7.31.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -56,6 +56,7 @@
 // @connect      www.aussiebushwalking.com
 // @connect      www.alltrails.com
 // @connect      geo.abs.gov.au
+// @connect      services.ga.gov.au
 // @connect      cloudfront.net
 // @connect      api.mapbox.com
 // @connect      s3.amazonaws.com
@@ -152,6 +153,11 @@
     LAYER_WAZE: "Waze Traffic",
     LAYER_MOBILE: "Mobile Coverage",
     LAYER_SEAMARKS: "OpenSeaMap",
+    LAYER_SAFECAST: "Radiation (Safecast)",
+    LAYER_GA_RADIATION: "Natural Radiation (Australia)",
+    // Geoscience Australia National Geophysical Grids WMS (CORS-open).
+    GA_GEOPHYS_WMS: "https://services.ga.gov.au/gis/geophysical-grids/ows",
+    SAFECAST_TILES: "https://s3-ap-northeast-1.amazonaws.com/te512jp.safecast.org/{z}/{x}/{y}.png",
     LAYER_INFRA: "Power Infrastructure",
     LAYER_TELECOM: "Telecoms",
     LAYER_LIGHTPOL: "Light Pollution",
@@ -465,7 +471,7 @@
     },
     {
       header: "Environment",
-      names: [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_PARK_FIRES, CFG.LAYER_FIRE_SCARS, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS]
+      names: [CFG.LAYER_NATIONAL_PARKS, CFG.LAYER_PARK_FIRES, CFG.LAYER_FIRE_SCARS, CFG.LAYER_GA_RADIATION, CFG.LAYER_SAFECAST, CFG.LAYER_LIGHTPOL, CFG.LAYER_SEAMARKS]
     },
     {
       header: "Walks",
@@ -3233,6 +3239,16 @@
     opacity: 0.45,
     attribution: "&copy; State of Queensland (Department of Resources)"
   });
+  var SafecastLayerProvider = tileProvider(
+    CFG.SAFECAST_TILES,
+    {
+      maxNativeZoom: 14,
+      maxZoom: 25,
+      opacity: 0.9,
+      overzoom: true,
+      attribution: 'Radiation &copy; <a href="https://safecast.org/" target="_blank" rel="noreferrer">Safecast</a> (CC0)'
+    }
+  );
   var OpenSeaMapLayerProvider = tileProvider(
     CFG.OPENSEAMAP_TILE,
     {
@@ -12125,6 +12141,96 @@
     return { ParkFireLayerProvider: ParkFireLayerProvider2, FireScarLayerProvider: FireScarLayerProvider2 };
   }
 
+  // src/providers/ga-radiometrics.js
+  var LAYER = "geophys:radmap_v4_2019_filtered_dose";
+  var COMMON = `SERVICE=WMS&VERSION=1.3.0&LAYERS=${encodeURIComponent(LAYER)}&STYLES=&CRS=EPSG:3857`;
+  function gaDoseTileUrl(z, x, y) {
+    const b = tileToBBox3857(z, x, y);
+    return `${CFG.GA_GEOPHYS_WMS}?${COMMON}&REQUEST=GetMap&BBOX=${b.west},${b.south},${b.east},${b.north}&WIDTH=256&HEIGHT=256&FORMAT=image%2Fpng8&TRANSPARENT=true`;
+  }
+  function gaDoseInfoUrl(x, y, metresPerPixel) {
+    const h = metresPerPixel * 1.5;
+    return `${CFG.GA_GEOPHYS_WMS}?${COMMON}&REQUEST=GetFeatureInfo&QUERY_LAYERS=${encodeURIComponent(LAYER)}&BBOX=${x - h},${y - h},${x + h},${y + h}&WIDTH=3&HEIGHT=3&I=1&J=1&INFO_FORMAT=application%2Fjson`;
+  }
+  function gaDoseValue(data) {
+    const f = data && Array.isArray(data.features) ? data.features[0] : null;
+    const v = f && f.properties ? Number(f.properties.GRAY_INDEX) : NaN;
+    return Number.isFinite(v) && v >= 0 && v < 1e5 ? v : null;
+  }
+  var WORLD_AVG = 59;
+  function _formatDose(value) {
+    if (value == null) return "";
+    const v = value < 10 ? value.toFixed(1) : String(Math.round(value));
+    const ratio = value / WORLD_AVG;
+    const compare = ratio < 0.67 ? "below the world average outdoors" : ratio <= 1.5 ? "about the world average outdoors" : ratio <= 3 ? "above the world average outdoors" : "well above the world average outdoors (often granite or mineral sands)";
+    return esc`<b>Natural radiation ${v} nGy/h</b><br>${compare} (${WORLD_AVG} nGy/h)` + `<br><span class="dw-cad-sub">Gamma from the ground, Geoscience Australia 2019 airborne survey</span>`;
+  }
+  function fetchGaDose(map, latlng, cb) {
+    const p = L.CRS.EPSG3857.project(latlng);
+    const mpp = 2 * Math.PI * 6378137 / (256 * Math.pow(2, map.getZoom()));
+    return gmJsonGet(gaDoseInfoUrl(p.x, p.y, mpp), { timeout: 15e3 }, (err, data) => cb(err ? null : gaDoseValue(data)));
+  }
+  function gaDoseIdentify(map, latlng, cb) {
+    fetchGaDose(map, latlng, (v) => cb(v == null ? "" : `<div class="dw-mine-hd">Natural radiation here</div><div class="dw-mine-list"><div class="dw-mine-row">${_formatDose(v)}</div></div>`));
+  }
+  var GaRadiometricsLayerProvider = class extends LayerProvider {
+    create() {
+      const Grid = L.TileLayer.extend({
+        getTileUrl(coords) {
+          return gaDoseTileUrl(this._getZoomForUrl(), coords.x, coords.y);
+        },
+        onAdd(map) {
+          L.TileLayer.prototype.onAdd.call(this, map);
+          const noHover = L.Browser.mobile || window.matchMedia && window.matchMedia("(hover: none)").matches;
+          if (noHover) return;
+          const tip = L.tooltip({ sticky: true, opacity: 0.95, className: "dw-qpws-tip", direction: "right", offset: [12, 0] });
+          let timer = null, gen = 0;
+          this._dwMove = (e) => {
+            clearTimeout(timer);
+            const ll = e.latlng, my = ++gen;
+            timer = setTimeout(() => fetchGaDose(map, ll, (v) => {
+              if (my !== gen || !this._map) return;
+              if (v == null) {
+                if (tip._map) tip.remove();
+                return;
+              }
+              tip.setLatLng(ll).setContent(_formatDose(v));
+              if (!tip._map) tip.addTo(map);
+            }), 300);
+          };
+          this._dwOut = () => {
+            clearTimeout(timer);
+            gen++;
+            if (tip._map) tip.remove();
+          };
+          map.on("mousemove", this._dwMove);
+          map.on("mouseout", this._dwOut);
+        },
+        onRemove(map) {
+          if (this._dwMove) {
+            this._dwOut();
+            map.off("mousemove", this._dwMove);
+            map.off("mouseout", this._dwOut);
+          }
+          this._dwMove = this._dwOut = null;
+          L.TileLayer.prototype.onRemove.call(this, map);
+        }
+      });
+      const layer = new Grid("", {
+        tileSize: 256,
+        minZoom: 3,
+        maxNativeZoom: 13,
+        maxZoom: 25,
+        opacity: 0.6,
+        crossOrigin: true,
+        bounds: L.latLngBounds([-44.5, 112], [-9, 154.5]),
+        attribution: 'Radiometrics &copy; <a href="https://www.ga.gov.au/" target="_blank" rel="noreferrer">Geoscience Australia</a> (CC BY 4.0)'
+      });
+      layer._dwMb3DUrl = `${CFG.GA_GEOPHYS_WMS}?${COMMON}&REQUEST=GetMap&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256&FORMAT=image%2Fpng8&TRANSPARENT=true`;
+      return layer;
+    }
+  };
+
   // src/providers/abs-postcodes.js
   function postcodeDynamicLayers() {
     return JSON.stringify([{
@@ -12264,7 +12370,7 @@
       extraParams: "&dynamicLayers=" + encodeURIComponent(suburbDynamicLayers()),
       tileSize: 512,
       pane: "dwSuburbPane",
-      paneZIndex: 386.5,
+      paneZIndex: 386,
       opacity: 1,
       minZoom: CFG.ABS_SAL_MIN_ZOOM,
       maxZoom: 25,
@@ -15425,6 +15531,8 @@
         addOverlay(CFG.LAYER_QLD_TRACKS, new QldTracksLayerProvider());
         addOverlay(CFG.LAYER_MOBILE, new MobileCoverageLayerProvider());
         addOverlay(CFG.LAYER_SEAMARKS, new OpenSeaMapLayerProvider());
+        addOverlay(CFG.LAYER_GA_RADIATION, new GaRadiometricsLayerProvider());
+        addOverlay(CFG.LAYER_SAFECAST, new SafecastLayerProvider());
         addOverlay(CFG.LAYER_INFRA, new PowerInfraLayerProvider());
         addOverlay(CFG.LAYER_TELECOM, new TelecomsLayerProvider());
         addOverlay(CFG.LAYER_LIGHTPOL, new LightPollutionLayerProvider());
@@ -15860,6 +15968,12 @@
           if (err || !isCurrent()) return;
           const html = _miningSectionHtml(src, raw && raw.results || []);
           if (html) section("dw-popup-ident-mining", html);
+        });
+      }
+      const ga = this.layers[CFG.LAYER_GA_RADIATION];
+      if (ga && map.hasLayer(ga)) {
+        gaDoseIdentify(map, latlng, (html) => {
+          if (html && isCurrent()) section("dw-popup-ident-mining", html);
         });
       }
       const histMaps = this.layers[CFG.LAYER_HIST_MAPS];
@@ -16622,6 +16736,10 @@
         _formatTrack,
         tracksDynamicLayers,
         TRACK_KINDS,
+        _formatDose,
+        gaDoseInfoUrl,
+        gaDoseTileUrl,
+        gaDoseValue,
         _formatPostcode,
         postcodeDynamicLayers,
         _formatSuburb,
