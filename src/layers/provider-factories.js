@@ -116,6 +116,13 @@ export function tokenTileProvider(buildUrl, opts = {}) {
 	};
 }
 
+// Ground box of an export tile. A 512 px tile at map zoom z covers one
+// standard 256 px tile at z - 1; bigger tiles mean fewer repeated
+// server-drawn labels.
+export function exportTileBBox(tileSize, z, x, y) {
+	return tileToBBox4326(z - Math.log2((tileSize || 256) / 256), x, y);
+}
+
 export function makeArcgisExportTileLayer(opts) {
 	const tileSize = opts.tileSize || 256;
 	const clickThrough = opts.clickThrough !== false;
@@ -138,7 +145,7 @@ export function makeArcgisExportTileLayer(opts) {
 		},
 
 		getTileUrl(coords) {
-			const bb = tileToBBox4326(coords.z, coords.x, coords.y);
+			const bb = exportTileBBox(tileSize, coords.z, coords.x, coords.y);
 			return (
 				`${opts.baseUrl}/export?` +
 				`bbox=${bb.minLon},${bb.minLat},${bb.maxLon},${bb.maxLat}` +

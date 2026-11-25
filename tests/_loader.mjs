@@ -16,7 +16,7 @@ const HELPERS = [
 	"CFG", "DW_LAYER_GROUPS", "DW_OVERLAY_GROUPS", "QldTokenManager",
 	"_formatSurveyMark", "_surveyReportUrl", "_surveyYear", "surveyDynamicLayers",
 	"_formatTrack", "tracksDynamicLayers", "TRACK_KINDS",
-	"_formatPostcode", "postcodeDynamicLayers",
+	"_formatPostcode", "postcodeDynamicLayers", "_formatSuburb", "suburbDynamicLayers", "exportTileBBox",
 	"_fireMonth", "_formatFireScar", "_formatParkFire", "fireScarDynamicLayers", "fireScarLayerId", "parkFireDynamicLayers",
 	// tile geometry
 	"tileToBBox4326", "tileToBBox3857", "utfGridCellToLatLng",

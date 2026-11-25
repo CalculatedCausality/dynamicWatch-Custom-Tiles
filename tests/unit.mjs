@@ -1745,6 +1745,24 @@ t("Postcodes: registered in Property, outlines labelled with the postcode", () =
 	assert(dw._formatPostcode({ POA_CODE_2021: "<b>" }).includes("&lt;b&gt;"), "not escaped");
 });
 
+t("Suburbs: registered in Property, named outlines; state suffix dropped in the hover", () => {
+	assert(dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Property").names.includes("Suburbs"), "not in Property");
+	const [l] = JSON.parse(dw.suburbDynamicLayers());
+	eq(l.drawingInfo.labelingInfo[0].labelExpression, "[sal_name_2021]");
+	eq(l.drawingInfo.renderer.symbol.outline.style, "esriSLSSolid", "solid, unlike the dashed postcodes");
+	// Real identify attributes for Nambour.
+	eq(dw._formatSuburb({ SAL_NAME_2021: "Nambour", STATE_NAME_2021: "Queensland", AREA_ALBERS_SQKM: "10.8469" }),
+		"<b>Nambour</b><br>Queensland · 11 km²");
+	assert(dw._formatSuburb({ SAL_NAME_2021: "Kenmore (Qld)" }).startsWith("<b>Kenmore</b>"), "suffix kept");
+	assert(dw._formatSuburb({ SAL_NAME_2021: "<i>" }).includes("&lt;i&gt;"), "not escaped");
+});
+
+t("ArcGIS export tiles of 512 px ask for the area of a 256 px tile one zoom out", () => {
+	eq(JSON.stringify(dw.exportTileBBox(512, 12, 1894, 1181)), JSON.stringify(dw.tileToBBox4326(11, 1894, 1181)));
+	eq(JSON.stringify(dw.exportTileBBox(256, 12, 1894, 1181)), JSON.stringify(dw.tileToBBox4326(12, 1894, 1181)));
+	eq(JSON.stringify(dw.exportTileBBox(undefined, 12, 1, 1)), JSON.stringify(dw.tileToBBox4326(12, 1, 1)));
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

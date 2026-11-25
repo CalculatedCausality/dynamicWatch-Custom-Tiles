@@ -31,7 +31,7 @@ Current modules:
 - `src/providers/qld-cadastre.js` — QLD parcel address resolver, the shared OnTheHouse sales pipeline, and the cadastre tooltip formatter used by all jurisdictions.
 - `src/providers/qld-environment.js` — QPWS Estate, National Parks, and their ArcGIS query layer helper.
 - `src/providers/qld-imagery.js` — QLD Roads and QLD Historical imagery providers.
-- `src/providers/abs-postcodes.js` — Postcodes overlay: ABS 2021 Postal Areas outlined and labelled through `dynamicLayers`, with hover and pop-up formatter.
+- `src/providers/abs-postcodes.js` — Postcodes and Suburbs overlays: ABS 2021 Postal Areas and Suburbs and Localities outlined and labelled through `dynamicLayers`, with hover and pop-up formatter.
 - `src/providers/alltrails.js` — AllTrails Trail Map overlay: AllTrails' Mapbox-hosted map tiles, and the lookup of the public map key from AllTrails' pages.
 - `src/providers/qld-mining.js` — QLD mining overlays: Historic Mines (workings), Mine Shafts (Abandoned Mine Lands openings), and Historic Mining Leases (MinesPermitsHistoric title footprints), each with hover-identify tooltips.
 - `src/providers/qld-fire.js` — Park Fire History and Fire Scars overlays: QPWS burns by age and Sentinel-2 fire scars, drawn through `dynamicLayers`, with hover and pop-up formatters.

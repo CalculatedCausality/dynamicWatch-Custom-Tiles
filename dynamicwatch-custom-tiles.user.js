@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.29.0
+// @version      7.30.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -171,6 +171,7 @@
     LAYER_PARK_FIRES: "Park Fire History",
     LAYER_FIRE_SCARS: "Fire Scars",
     LAYER_POSTCODES: "Postcodes",
+    LAYER_SUBURBS: "Suburbs",
     LAYER_TOPO: "QLD Topo",
     LAYER_INTVL_GLOBAL: "INTVL Global Map",
     LAYER_GEOCACHING: "Geocaches",
@@ -362,6 +363,8 @@
     // ABS 2021 Postal Areas, all of Australia (CORS-open, no key).
     ABS_POA_SERVICE: "https://geo.abs.gov.au/arcgis/rest/services/ASGS2021/POA/MapServer",
     ABS_POA_MIN_ZOOM: 9,
+    ABS_SAL_SERVICE: "https://geo.abs.gov.au/arcgis/rest/services/ASGS2021/SAL/MapServer",
+    ABS_SAL_MIN_ZOOM: 11,
     // Historical printed map sheets index (parish/town/topographic/
     // exploration/… scans, 1860s-2012). Footprint overlay + click lists
     // the sheets covering a point, each with a scan link; a scan can be
@@ -448,6 +451,7 @@
       names: [
         CFG.LAYER_CADASTRE,
         CFG.LAYER_POSTCODES,
+        CFG.LAYER_SUBURBS,
         CFG.LAYER_STATE_LAND,
         CFG.LAYER_LAND_USE,
         CFG.LAYER_SCC_APPS,
@@ -3116,6 +3120,9 @@
       }
     };
   }
+  function exportTileBBox(tileSize, z, x, y) {
+    return tileToBBox4326(z - Math.log2((tileSize || 256) / 256), x, y);
+  }
   function makeArcgisExportTileLayer(opts) {
     const tileSize = opts.tileSize || 256;
     const clickThrough = opts.clickThrough !== false;
@@ -3135,7 +3142,7 @@
         L.TileLayer.prototype.onRemove.call(this, map);
       },
       getTileUrl(coords) {
-        const bb = tileToBBox4326(coords.z, coords.x, coords.y);
+        const bb = exportTileBBox(tileSize, coords.z, coords.x, coords.y);
         return `${opts.baseUrl}/export?bbox=${bb.minLon},${bb.minLat},${bb.maxLon},${bb.maxLat}&bboxSR=4326&imageSR=4326` + (opts.showLayers != null ? `&layers=show:${opts.showLayers}` : "") + `&size=${tileSize},${tileSize}&format=png32&transparent=true&f=image${opts.extraParams || ""}`;
       }
     });
@@ -12178,12 +12185,90 @@
     return arcgisExportProvider({
       baseUrl: CFG.ABS_POA_SERVICE,
       extraParams: "&dynamicLayers=" + encodeURIComponent(postcodeDynamicLayers()),
+      // Large tiles: each tile labels its own piece of an area, so fewer tiles
+      // means fewer repeated numbers.
+      tileSize: 512,
       pane: "dwPostcodePane",
       paneZIndex: 387,
       opacity: 1,
       minZoom: CFG.ABS_POA_MIN_ZOOM,
       maxZoom: 25,
       attribution: 'Postal areas &copy; <a href="https://www.abs.gov.au/" target="_blank" rel="noreferrer">Australian Bureau of Statistics</a>, CC BY 4.0',
+      onAdd: (layer, map) => installHover(layer, map),
+      onRemove: (layer) => {
+        if (layer._dwHoverOff) {
+          layer._dwHoverOff();
+          layer._dwHoverOff = null;
+        }
+      }
+    });
+  }
+  function suburbDynamicLayers() {
+    return JSON.stringify([{
+      id: 0,
+      source: { type: "mapLayer", mapLayerId: 0 },
+      drawingInfo: {
+        renderer: { type: "simple", symbol: {
+          type: "esriSFS",
+          style: "esriSFSNull",
+          outline: { type: "esriSLS", style: "esriSLSSolid", color: [15, 118, 110, 200], width: 1.2 }
+        } },
+        showLabels: true,
+        labelingInfo: [{
+          labelExpression: "[sal_name_2021]",
+          labelPlacement: "esriServerPolygonPlacementAlwaysHorizontal",
+          symbol: {
+            type: "esriTS",
+            color: [17, 94, 89, 255],
+            haloColor: [255, 255, 255, 255],
+            haloSize: 2,
+            font: { family: "Arial", size: 10, style: "italic", weight: "bold" }
+          }
+        }]
+      }
+    }]);
+  }
+  function _formatSuburb(attrs) {
+    const a = attrs || {};
+    const name = String(a.SAL_NAME_2021 || a.sal_name_2021 || "").replace(/\s*\((?:Qld|NSW|Vic\.?|SA|WA|Tas\.?|NT|ACT|OT)\)\s*$/i, "").trim();
+    const state = String(a.STATE_NAME_2021 || a.state_name_2021 || "").trim();
+    const km2 = Number(a.AREA_ALBERS_SQKM || a.area_albers_sqkm);
+    const lines = [esc`<b>${name || "Suburb"}</b>`];
+    const facts = [state, km2 > 0 ? `${km2 >= 10 ? Math.round(km2).toLocaleString("en-AU") : km2.toFixed(1)} km²` : ""].filter(Boolean).join(" · ");
+    if (facts) lines.push(_escHtml(facts));
+    return lines.join("<br>");
+  }
+  function suburbIdentifySource() {
+    return {
+      layerName: CFG.LAYER_SUBURBS,
+      heading: "Suburb",
+      baseUrl: CFG.ABS_SAL_SERVICE,
+      layers: "all:0",
+      tolerance: 0,
+      minZoom: CFG.ABS_SAL_MIN_ZOOM,
+      format: _formatSuburb
+    };
+  }
+  function createSuburbProvider({ makeHoverIdentify: makeHoverIdentify2 }) {
+    const src = suburbIdentifySource();
+    const installHover = makeHoverIdentify2({
+      baseUrl: src.baseUrl,
+      layers: src.layers,
+      tolerance: 0,
+      minZoom: src.minZoom,
+      tipClass: "dw-qpws-tip",
+      formatTooltip: _formatSuburb
+    });
+    return arcgisExportProvider({
+      baseUrl: CFG.ABS_SAL_SERVICE,
+      extraParams: "&dynamicLayers=" + encodeURIComponent(suburbDynamicLayers()),
+      tileSize: 512,
+      pane: "dwSuburbPane",
+      paneZIndex: 386.5,
+      opacity: 1,
+      minZoom: CFG.ABS_SAL_MIN_ZOOM,
+      maxZoom: 25,
+      attribution: 'Suburbs &copy; <a href="https://www.abs.gov.au/" target="_blank" rel="noreferrer">Australian Bureau of Statistics</a>, CC BY 4.0',
       onAdd: (layer, map) => installHover(layer, map),
       onRemove: (layer) => {
         if (layer._dwHoverOff) {
@@ -15165,6 +15250,7 @@
   var QldTracksLayerProvider = createQldTracksProvider({ makeHoverIdentify });
   var { ParkFireLayerProvider, FireScarLayerProvider } = createQldFireProviders({ makeHoverIdentify });
   var PostcodeLayerProvider = createPostcodeProvider({ makeHoverIdentify });
+  var SuburbLayerProvider = createSuburbProvider({ makeHoverIdentify });
   var CustomTilesApp = class {
     constructor() {
       this.qldToken = new QldTokenManager({
@@ -15361,6 +15447,7 @@
         addOverlay(CFG.LAYER_PARK_FIRES, new ParkFireLayerProvider());
         addOverlay(CFG.LAYER_FIRE_SCARS, new FireScarLayerProvider());
         addOverlay(CFG.LAYER_POSTCODES, new PostcodeLayerProvider());
+        addOverlay(CFG.LAYER_SUBURBS, new SuburbLayerProvider());
         addOverlay(
           CFG.LAYER_INTVL_GLOBAL,
           new IntvlGlobalTilesLayerProvider()
@@ -15758,7 +15845,8 @@
         surveyIdentifySource(),
         tracksIdentifySource(),
         ...fireIdentifySources((/* @__PURE__ */ new Date()).getFullYear()),
-        postcodeIdentifySource()
+        postcodeIdentifySource(),
+        suburbIdentifySource()
       ]) {
         const lyr = this.layers[src.layerName];
         if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
@@ -16536,6 +16624,9 @@
         TRACK_KINDS,
         _formatPostcode,
         postcodeDynamicLayers,
+        _formatSuburb,
+        suburbDynamicLayers,
+        exportTileBBox,
         _fireMonth,
         _formatFireScar,
         _formatParkFire,

@@ -50,6 +50,7 @@ Overlays toggle on top of whichever base layer is active. They're grouped by wha
 |---|---|
 | **Australia Cadastre** | Property/parcel boundaries for **every state & territory** (QLD, NSW, VIC, SA, WA, TAS, ACT, NT). Click a parcel for lot/plan, area, locality, and — where a street address resolves — recent sale history from OnTheHouse. Rich lot/plan+address for QLD/NSW/VIC/SA/TAS/ACT; WA/NT show locality from the national dataset |
 | **Postcodes** | Every postcode area in Australia as an outline with the postcode written inside, from the Australian Bureau of Statistics' 2021 Postal Areas. Hover for the postcode and its area. These are the ABS's close approximation of Australia Post postcodes, published for statistics; Australia Post's official boundaries are a paid product. Appears from zoom 9 |
+| **Suburbs** | Every suburb and locality in Australia as a teal outline with its name, from the ABS's 2021 Suburbs and Localities (its close approximation of gazetted localities). Hover for the name, state and area. Shows alongside Postcodes, which are grey and dashed. Appears from zoom 11 |
 | **State Land** | Queensland land the State owns, from the cadastre's tenure records, each kind in its own colour: **national park** (green), **state forest, forest reserve and timber reserve** (brown), **reserves** set aside for a community purpose (teal), **unallocated State land** (orange) and State land **held under lease** (yellow). Hover for the name, kind, lot/plan, area and locality. Appears from zoom 11. A lease is occupied by its holder, so yellow does not mean open to the public |
 | **Land Use** | What each piece of Queensland is used for, from the Queensland Land Use Mapping Program, in the program's own colours (residential red, nature conservation beige, grazing pale, forestry green, water blue…). Hover for the class, its national land-use code and the year it was mapped (2011–2017 depending on the region, so recent subdivisions are missing) |
 | **SCC Applications** | Sunshine Coast Council development/building/plumbing applications as colour-coded markers; an on-map submenu picks current vs decided sets; popups carry the full record, property history, documents, and a deep link into Development.i |
@@ -163,7 +164,7 @@ A few layers show inline tooltips on hover:
 - **State Land** — name, kind of tenure, lot/plan, area, and locality
 - **Land Use** — land-use class, national code, and year mapped
 
-With any mining overlay, State Land, Land Use, Survey Marks, QLD Tracks, a fire overlay or Postcodes on, **right-click** (or long-press on a phone) a spot and the location menu lists everything recorded there, not only the one under the pointer.
+With any mining overlay, State Land, Land Use, Survey Marks, QLD Tracks, a fire overlay, Postcodes or Suburbs on, **right-click** (or long-press on a phone) a spot and the location menu lists everything recorded there, not only the one under the pointer.
 - **INTVL Global Map** — the runner's name, level and city, territory size, the claiming run's distance, time and pace, when it was captured, and how much that runner holds on screen
 
 ### POIs along your route
@@ -277,7 +278,7 @@ Quick-reference table — what you need to log in to for each layer to render.
 | INTVL Global Map | No | Public Mapbox Vector Tile CDN | |
 | State Land, Land Use | No | Queensland Government ArcGIS (cadastre tenure; QLUMP land use) | Same host as the cadastre |
 | AllTrails Trail Map | No (reads AllTrails' site from your browser once) | AllTrails' map tiles, hosted on Mapbox | The map key is looked up in your browser and kept there; it is not in the script |
-| Postcodes | No | ABS 2021 Postal Areas (geo.abs.gov.au) | CC BY 4.0 |
+| Postcodes, Suburbs | No | ABS 2021 Postal Areas and Suburbs and Localities (geo.abs.gov.au) | CC BY 4.0 |
 | Aussie Bushwalking | No | aussiebushwalking.com's walk-map vector tiles | Read only while the overlay is on |
 | Geocaches | No | Groundspeak's public tile-info + map.details endpoints | No login. UTFGrid drives placement; lazy map.details fetch enriches on click. |
 
@@ -342,6 +343,10 @@ bash tests/run.sh --ci   # plain text output
 - **`e2e/verify-raster-security.mjs`** — verifies public QLD Topo raster tiles in 2D and 3D under normal Chromium CORS and site-isolation rules.
 - **`e2e/verify-route-pois.mjs`** — presses the POI button on a saved route and checks route-ordered pins, category filtering, popups, adding a POI as a waypoint (including distance names), climbs, creek crossings and track sections on the route, removing a waypoint with a row's tick, refreshing names, Build Up Ahead (adding, one-step Undo, replacing only its own waypoints), list clicks opening popups beside the panel, the script's toolbar buttons being spaced and labelled like the native ones, and that no click leaks through to the planner. Run with `npm run e2e:route-pois`; also part of `npm run test:live`.
 - **`e2e/verify-vexcel-report.mjs`** — checks that offline Vexcel reports decode embedded JPEGs in all four directions, auto-open the result modal, switch photos, and support native 1:1 and fit controls (synthetic local imagery; no Vexcel login required). Run with `npm run e2e:vexcel-report`.
+
+### Release notes — 7.30.0
+
+- New **Suburbs** overlay (in Property, off by default): every suburb and locality in Australia, outlined and named, from the ABS.
 
 ### Release notes — 7.29.0
 
