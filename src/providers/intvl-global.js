@@ -214,6 +214,9 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 					`<div class="dw-intvl-lb-rows"></div>`;
 				L.DomEvent.disableClickPropagation(this._lb);
 				L.DomEvent.disableScrollPropagation(this._lb);
+				// Presses and releases inside the panel are the panel's own; the
+				// planner adds a route point on a map click otherwise.
+				L.DomEvent.on(this._lb, "pointerdown pointerup mousedown mouseup touchstart touchend", L.DomEvent.stopPropagation);
 				this._lb.addEventListener("click", (e) => {
 					const head = e.target.closest(".dw-intvl-lb-head");
 					if (head) {
@@ -223,7 +226,11 @@ export class IntvlGlobalTilesLayerProvider extends LayerProvider {
 					}
 					const row = e.target.closest(".dw-intvl-lb-row");
 					if (!row) return;
-					this._pin(row.dataset.key === this._pinned ? "" : row.dataset.key);
+					const key = row.dataset.key === this._pinned ? "" : row.dataset.key;
+					// Redraw after this click has finished: removing the clicked row
+					// mid-click made the map treat it as a map click (and add a
+					// route point), since the row no longer sat inside the panel.
+					setTimeout(() => this._pin(key), 0);
 				});
 				this._onViewChange = () => this._queueBoard();
 				map.on("moveend", this._onViewChange);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.32.0
+// @version      7.32.1
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -8889,6 +8889,7 @@
           this._lb.innerHTML = `<button type="button" class="dw-intvl-lb-head" aria-expanded="true">INTVL leaders on screen</button><div class="dw-intvl-lb-rows"></div>`;
           L.DomEvent.disableClickPropagation(this._lb);
           L.DomEvent.disableScrollPropagation(this._lb);
+          L.DomEvent.on(this._lb, "pointerdown pointerup mousedown mouseup touchstart touchend", L.DomEvent.stopPropagation);
           this._lb.addEventListener("click", (e) => {
             const head = e.target.closest(".dw-intvl-lb-head");
             if (head) {
@@ -8898,7 +8899,8 @@
             }
             const row = e.target.closest(".dw-intvl-lb-row");
             if (!row) return;
-            this._pin(row.dataset.key === this._pinned ? "" : row.dataset.key);
+            const key = row.dataset.key === this._pinned ? "" : row.dataset.key;
+            setTimeout(() => this._pin(key), 0);
           });
           this._onViewChange = () => this._queueBoard();
           map.on("moveend", this._onViewChange);
