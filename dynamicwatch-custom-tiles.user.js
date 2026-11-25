@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.28.0
+// @version      7.29.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -55,6 +55,7 @@
 // @connect      tiles04.geocaching.com
 // @connect      www.aussiebushwalking.com
 // @connect      www.alltrails.com
+// @connect      geo.abs.gov.au
 // @connect      cloudfront.net
 // @connect      api.mapbox.com
 // @connect      s3.amazonaws.com
@@ -169,6 +170,7 @@
     LAYER_QLD_TRACKS: "QLD Tracks",
     LAYER_PARK_FIRES: "Park Fire History",
     LAYER_FIRE_SCARS: "Fire Scars",
+    LAYER_POSTCODES: "Postcodes",
     LAYER_TOPO: "QLD Topo",
     LAYER_INTVL_GLOBAL: "INTVL Global Map",
     LAYER_GEOCACHING: "Geocaches",
@@ -357,6 +359,9 @@
     QLD_PARK_FIRE_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Environment/ParksFireHistory/MapServer",
     QLD_FIRE_SCAR_SERVICE: "https://spatial-gis.information.qld.gov.au/arcgis/rest/services/Environment/FireScarMapping/MapServer",
     QLD_FIRE_HOVER_MIN_ZOOM: 11,
+    // ABS 2021 Postal Areas, all of Australia (CORS-open, no key).
+    ABS_POA_SERVICE: "https://geo.abs.gov.au/arcgis/rest/services/ASGS2021/POA/MapServer",
+    ABS_POA_MIN_ZOOM: 9,
     // Historical printed map sheets index (parish/town/topographic/
     // exploration/… scans, 1860s-2012). Footprint overlay + click lists
     // the sheets covering a point, each with a scan link; a scan can be
@@ -442,6 +447,7 @@
       header: "Property",
       names: [
         CFG.LAYER_CADASTRE,
+        CFG.LAYER_POSTCODES,
         CFG.LAYER_STATE_LAND,
         CFG.LAYER_LAND_USE,
         CFG.LAYER_SCC_APPS,
@@ -12112,6 +12118,82 @@
     return { ParkFireLayerProvider: ParkFireLayerProvider2, FireScarLayerProvider: FireScarLayerProvider2 };
   }
 
+  // src/providers/abs-postcodes.js
+  function postcodeDynamicLayers() {
+    return JSON.stringify([{
+      id: 0,
+      source: { type: "mapLayer", mapLayerId: 0 },
+      drawingInfo: {
+        renderer: { type: "simple", symbol: {
+          type: "esriSFS",
+          style: "esriSFSNull",
+          // Dark grey dashes: the planner draws routes in purple.
+          outline: { type: "esriSLS", style: "esriSLSDash", color: [55, 65, 81, 220], width: 1.4 }
+        } },
+        showLabels: true,
+        labelingInfo: [{
+          labelExpression: "[poa_code_2021]",
+          labelPlacement: "esriServerPolygonPlacementAlwaysHorizontal",
+          symbol: {
+            type: "esriTS",
+            color: [31, 41, 55, 255],
+            haloColor: [255, 255, 255, 255],
+            haloSize: 2,
+            font: { family: "Arial", size: 11, weight: "bold" }
+          }
+        }]
+      }
+    }]);
+  }
+  function _formatPostcode(attrs) {
+    const a = attrs || {};
+    const code = String(a.POA_CODE_2021 || a.poa_code_2021 || "").trim();
+    const km2 = Number(a.AREA_ALBERS_SQKM || a.area_albers_sqkm);
+    const lines = [esc`<b>Postcode ${code || "unknown"}</b>`];
+    if (km2 > 0) lines.push(_escHtml(`${km2 >= 10 ? Math.round(km2).toLocaleString("en-AU") : km2.toFixed(1)} km²`));
+    lines.push(`<span class="dw-cad-sub">ABS approximation of the postcode area</span>`);
+    return lines.join("<br>");
+  }
+  function postcodeIdentifySource() {
+    return {
+      layerName: CFG.LAYER_POSTCODES,
+      heading: "Postcode",
+      baseUrl: CFG.ABS_POA_SERVICE,
+      layers: "all:0",
+      tolerance: 0,
+      minZoom: CFG.ABS_POA_MIN_ZOOM,
+      format: _formatPostcode
+    };
+  }
+  function createPostcodeProvider({ makeHoverIdentify: makeHoverIdentify2 }) {
+    const src = postcodeIdentifySource();
+    const installHover = makeHoverIdentify2({
+      baseUrl: src.baseUrl,
+      layers: src.layers,
+      tolerance: 0,
+      minZoom: src.minZoom,
+      tipClass: "dw-qpws-tip",
+      formatTooltip: _formatPostcode
+    });
+    return arcgisExportProvider({
+      baseUrl: CFG.ABS_POA_SERVICE,
+      extraParams: "&dynamicLayers=" + encodeURIComponent(postcodeDynamicLayers()),
+      pane: "dwPostcodePane",
+      paneZIndex: 387,
+      opacity: 1,
+      minZoom: CFG.ABS_POA_MIN_ZOOM,
+      maxZoom: 25,
+      attribution: 'Postal areas &copy; <a href="https://www.abs.gov.au/" target="_blank" rel="noreferrer">Australian Bureau of Statistics</a>, CC BY 4.0',
+      onAdd: (layer, map) => installHover(layer, map),
+      onRemove: (layer) => {
+        if (layer._dwHoverOff) {
+          layer._dwHoverOff();
+          layer._dwHoverOff = null;
+        }
+      }
+    });
+  }
+
   // src/utils/alltrails.js
   function allTrailsExploreUrl(view) {
     const v = view || {};
@@ -15082,6 +15164,7 @@
   var SurveyMarksLayerProvider = createQldSurveyProvider({ makeHoverIdentify });
   var QldTracksLayerProvider = createQldTracksProvider({ makeHoverIdentify });
   var { ParkFireLayerProvider, FireScarLayerProvider } = createQldFireProviders({ makeHoverIdentify });
+  var PostcodeLayerProvider = createPostcodeProvider({ makeHoverIdentify });
   var CustomTilesApp = class {
     constructor() {
       this.qldToken = new QldTokenManager({
@@ -15277,6 +15360,7 @@
         addOverlay(CFG.LAYER_SURVEY_MARKS, new SurveyMarksLayerProvider());
         addOverlay(CFG.LAYER_PARK_FIRES, new ParkFireLayerProvider());
         addOverlay(CFG.LAYER_FIRE_SCARS, new FireScarLayerProvider());
+        addOverlay(CFG.LAYER_POSTCODES, new PostcodeLayerProvider());
         addOverlay(
           CFG.LAYER_INTVL_GLOBAL,
           new IntvlGlobalTilesLayerProvider()
@@ -15673,7 +15757,8 @@
         ...landIdentifySources(),
         surveyIdentifySource(),
         tracksIdentifySource(),
-        ...fireIdentifySources((/* @__PURE__ */ new Date()).getFullYear())
+        ...fireIdentifySources((/* @__PURE__ */ new Date()).getFullYear()),
+        postcodeIdentifySource()
       ]) {
         const lyr = this.layers[src.layerName];
         if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
@@ -16449,6 +16534,8 @@
         _formatTrack,
         tracksDynamicLayers,
         TRACK_KINDS,
+        _formatPostcode,
+        postcodeDynamicLayers,
         _fireMonth,
         _formatFireScar,
         _formatParkFire,

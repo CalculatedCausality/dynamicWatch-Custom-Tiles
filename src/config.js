@@ -136,6 +136,7 @@ export const CFG = {
 	LAYER_QLD_TRACKS: "QLD Tracks",
 	LAYER_PARK_FIRES: "Park Fire History",
 	LAYER_FIRE_SCARS: "Fire Scars",
+	LAYER_POSTCODES: "Postcodes",
 	LAYER_TOPO:    "QLD Topo",
 	LAYER_INTVL_GLOBAL: "INTVL Global Map",
 	LAYER_GEOCACHING: "Geocaches",
@@ -376,6 +377,9 @@ export const CFG = {
 		"https://spatial-gis.information.qld.gov.au/arcgis/rest/services/" +
 		"Environment/FireScarMapping/MapServer",
 	QLD_FIRE_HOVER_MIN_ZOOM: 11,
+	// ABS 2021 Postal Areas, all of Australia (CORS-open, no key).
+	ABS_POA_SERVICE: "https://geo.abs.gov.au/arcgis/rest/services/ASGS2021/POA/MapServer",
+	ABS_POA_MIN_ZOOM: 9,
 
 	// Historical printed map sheets index (parish/town/topographic/
 	// exploration/… scans, 1860s-2012). Footprint overlay + click lists
@@ -486,7 +490,7 @@ export const DW_LAYER_GROUPS = [
 export const DW_OVERLAY_GROUPS = [
 	{
 		header: "Property",
-		names:  [CFG.LAYER_CADASTRE, CFG.LAYER_STATE_LAND, CFG.LAYER_LAND_USE, CFG.LAYER_SCC_APPS,
+		names:  [CFG.LAYER_CADASTRE, CFG.LAYER_POSTCODES, CFG.LAYER_STATE_LAND, CFG.LAYER_LAND_USE, CFG.LAYER_SCC_APPS,
 		         CFG.LAYER_QPWS, CFG.LAYER_RELIEF],
 	},
 	{

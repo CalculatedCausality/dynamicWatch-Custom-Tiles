@@ -1733,6 +1733,18 @@ t("years read from identify dates come out right in either day/month order", () 
 	for (const s of ["5/17/2025", "17/5/2025", "5/17/2025 3:04:00 PM"]) eq(dw._surveyYear(s), "2025", s);
 });
 
+t("Postcodes: registered in Property, outlines labelled with the postcode", () => {
+	assert(dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Property").names.includes("Postcodes"), "not in Property");
+	const [l] = JSON.parse(dw.postcodeDynamicLayers());
+	eq(l.source.mapLayerId, 0);
+	eq(l.drawingInfo.renderer.symbol.style, "esriSFSNull", "outlines only, no fill");
+	eq(l.drawingInfo.labelingInfo[0].labelExpression, "[poa_code_2021]");
+	// Real identify attributes for Nambour.
+	const html = dw._formatPostcode({ POA_CODE_2021: "4560", AREA_ALBERS_SQKM: "218.163" });
+	assert(html.startsWith("<b>Postcode 4560</b><br>218 km²"), html);
+	assert(dw._formatPostcode({ POA_CODE_2021: "<b>" }).includes("&lt;b&gt;"), "not escaped");
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

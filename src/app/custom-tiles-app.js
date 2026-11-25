@@ -60,6 +60,7 @@ import { createQldLandProviders, landIdentifySources } from "../providers/qld-la
 import { createQldSurveyProvider, surveyIdentifySource } from "../providers/qld-survey.js";
 import { createQldTracksProvider, tracksIdentifySource } from "../providers/qld-tracks.js";
 import { createQldFireProviders, fireIdentifySources } from "../providers/qld-fire.js";
+import { createPostcodeProvider, postcodeIdentifySource } from "../providers/abs-postcodes.js";
 import { allTrailsExploreUrl, allTrailsViewAround } from "../utils/alltrails.js";
 import { AllTrailsLayerProvider } from "../providers/alltrails.js";
 import { RoutePoiController } from "../providers/route-pois.js";
@@ -95,6 +96,7 @@ const { StateLandLayerProvider, LandUseLayerProvider } =
 const SurveyMarksLayerProvider = createQldSurveyProvider({ makeHoverIdentify });
 const QldTracksLayerProvider = createQldTracksProvider({ makeHoverIdentify });
 const { ParkFireLayerProvider, FireScarLayerProvider } = createQldFireProviders({ makeHoverIdentify });
+const PostcodeLayerProvider = createPostcodeProvider({ makeHoverIdentify });
 
 /* -- Application ------------------------------------------------------- */
 
@@ -327,6 +329,7 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_SURVEY_MARKS, new SurveyMarksLayerProvider());
 			addOverlay(CFG.LAYER_PARK_FIRES, new ParkFireLayerProvider());
 			addOverlay(CFG.LAYER_FIRE_SCARS, new FireScarLayerProvider());
+			addOverlay(CFG.LAYER_POSTCODES, new PostcodeLayerProvider());
 			addOverlay(CFG.LAYER_INTVL_GLOBAL,
 				new IntvlGlobalTilesLayerProvider());
 
@@ -843,7 +846,7 @@ export class CustomTilesApp {
 		// them all (a goldfield has leases, workings and shafts stacked) and
 		// is the only way to read them on a phone.
 		for (const src of [...miningIdentifySources(), ...landIdentifySources(), surveyIdentifySource(),
-			tracksIdentifySource(), ...fireIdentifySources(new Date().getFullYear())]) {
+			tracksIdentifySource(), ...fireIdentifySources(new Date().getFullYear()), postcodeIdentifySource()]) {
 			const lyr = this.layers[src.layerName];
 			if (!lyr || !map.hasLayer(lyr) || map.getZoom() < src.minZoom) continue;
 			arcgisIdentify(map, latlng, {
