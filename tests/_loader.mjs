@@ -20,6 +20,7 @@ const HELPERS = [
 	"_formatEasement", "_formatPastoral", "_formatPipeline", "destroyedMarksDynamicLayers", "pastoralDynamicLayers",
 	"_formatOldRailway", "parseRailways", "railQuery", "railTileBox", "railTilesFor",
 	"UXO_KINDS", "_formatUxo", "polygonContains", "uxoToElements",
+	"_formatToilet", "toiletClosed", "toiletFacts", "toiletHours", "toiletPageUrl", "toiletQueryUrl",
 	"_formatPostcode", "postcodeDynamicLayers", "_formatSuburb", "suburbDynamicLayers", "exportTileBBox",
 	"_fireMonth", "_formatFireScar", "_formatParkFire", "fireScarDynamicLayers", "fireScarLayerId", "parkFireDynamicLayers",
 	// tile geometry

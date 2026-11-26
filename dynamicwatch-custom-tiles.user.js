@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dynamicWatch – Map Layers & Overlays
 // @namespace    https://dynamic.watch
-// @version      7.36.0
+// @version      7.37.0
 // @description  Multi-source basemaps and overlays for dynamicWatch, including QLD imagery, cadastre, traffic, geocaches, heatmaps, infrastructure, POIs along your route, and 3D terrain.
 // @author       Matthew Aucott
 // @homepageURL  https://github.com/CalculatedCausality/dynamicWatch-Custom-Tiles
@@ -59,6 +59,7 @@
 // @connect      services.ga.gov.au
 // @connect      overpass-api.de
 // @connect      tiles-indigo.apps.veris.net.au
+// @connect      portal.data.nsw.gov.au
 // @connect      cloudfront.net
 // @connect      api.mapbox.com
 // @connect      s3.amazonaws.com
@@ -164,6 +165,9 @@
     LAYER_OLD_MARKS: "Old Survey Marks (destroyed)",
     LAYER_OLD_RAIL: "Old Railways",
     LAYER_UXO: "Unexploded Ordnance (Defence)",
+    LAYER_TOILETS: "Public Toilets",
+    TOILETS_SERVICE: "https://portal.data.nsw.gov.au/arcgis/rest/services/Hosted/National_Public_Toilet_Map/FeatureServer/0",
+    TOILETS_MIN_ZOOM: 11,
     // The PMTiles file behind Defence's UXO Mapping Application.
     UXO_PMTILES: "https://tiles-indigo.apps.veris.net.au/uxo/uxo-area.pmtiles",
     UXO_MIN_ZOOM: 11,
@@ -497,7 +501,7 @@
     },
     {
       header: "Walks",
-      names: [CFG.LAYER_ABW, CFG.LAYER_ALLTRAILS, CFG.LAYER_QLD_TRACKS]
+      names: [CFG.LAYER_ABW, CFG.LAYER_ALLTRAILS, CFG.LAYER_QLD_TRACKS, CFG.LAYER_TOILETS]
     },
     {
       header: "Mining",
@@ -13135,6 +13139,151 @@
     }
   };
 
+  // src/providers/toilets.js
+  var TOILET_FIELDS = [
+    "objectid",
+    "facilityid",
+    "name",
+    "facilitytype",
+    "address1",
+    "town",
+    "openinghours",
+    "accessible",
+    "drinkingwater",
+    "shower",
+    "babychange",
+    "parking",
+    "keyrequired",
+    "mlak24",
+    "paymentrequired",
+    "dumppoint",
+    "openinghoursnote",
+    "accessnote"
+  ];
+  var yes = (v2) => v2 === true || v2 === "TRUE" || v2 === "True" || v2 === "true" || v2 === 1;
+  var clean2 = (v2, max) => String(v2 == null ? "" : v2).replace(/\s+/g, " ").trim().slice(0, max);
+  function toiletQueryUrl(bounds) {
+    const q = new URLSearchParams({
+      where: "1=1",
+      geometry: [bounds.west, bounds.south, bounds.east, bounds.north].map((v2) => v2.toFixed(5)).join(","),
+      geometryType: "esriGeometryEnvelope",
+      inSR: "4326",
+      outSR: "4326",
+      spatialRel: "esriSpatialRelIntersects",
+      outFields: TOILET_FIELDS.join(","),
+      returnGeometry: "true",
+      resultRecordCount: "2000",
+      f: "json"
+    });
+    return CFG.TOILETS_SERVICE + "/query?" + q.toString();
+  }
+  function toiletHours(text) {
+    const t = clean2(text, 160);
+    if (!t || /^opening hours unknown$/i.test(t)) return "";
+    const m = /^OPEN:\s*(.*)$/i.exec(t);
+    return m ? "Open " + m[1].replace(/^Daylight/, "daylight").replace(/^Variable/, "variable").replace(/^Venue/, "venue") : t;
+  }
+  var toiletClosed = (a) => /^currently closed/i.test(clean2(a && a.openinghours, 40));
+  function toiletFacts(a) {
+    return [
+      yes(a.accessible) && "accessible",
+      yes(a.drinkingwater) && "drinking water",
+      yes(a.shower) && "shower",
+      yes(a.babychange) && "baby change",
+      yes(a.parking) && "parking",
+      yes(a.dumppoint) && "dump point",
+      (yes(a.keyrequired) || yes(a.mlak24)) && "key needed",
+      yes(a.paymentrequired) && "pay to use"
+    ].filter(Boolean);
+  }
+  function toiletPageUrl(id) {
+    return /^\d{1,9}$/.test(String(id)) ? `https://toiletmap.gov.au/facility/${id}` : "";
+  }
+  function _formatToilet(attrs, withLink) {
+    const a = attrs || {};
+    const name = clean2(a.name, 120) || "Public toilet";
+    const where = [clean2(a.facilitytype, 40), clean2(a.address1, 80), clean2(a.town, 60)].filter((s) => s && s !== "Other").join(" · ");
+    const lines = [esc`<b>${name}</b>`];
+    if (where) lines.push(_escHtml(where));
+    const hours = toiletHours(a.openinghours);
+    if (hours) lines.push(_escHtml(hours));
+    const facts = toiletFacts(a);
+    if (facts.length) lines.push(esc`<span class="dw-cad-sub">${facts.join(" · ")}</span>`);
+    const url = withLink && toiletPageUrl(a.facilityid);
+    if (url) lines.push(esc`<a href="${url}" target="_blank" rel="noopener noreferrer">Open on the Toilet Map ↗</a>`);
+    return lines.join("<br>");
+  }
+  var ToiletsLayerProvider = class extends LayerProvider {
+    create() {
+      const PANE2 = "dwToiletPane";
+      const icon = (closed) => L.divIcon({
+        className: "dw-wc-icon",
+        html: `<span class="dw-wc-pin${closed ? " dw-wc-closed" : ""}">WC</span>`,
+        iconSize: [22, 16],
+        iconAnchor: [11, 8],
+        popupAnchor: [0, -8],
+        tooltipAnchor: [0, -8]
+      });
+      const Layer = L.Layer.extend({
+        onAdd(map) {
+          if (!map.getPane(PANE2)) {
+            map.createPane(PANE2);
+            map.getPane(PANE2).style.zIndex = "446";
+          }
+          this._group = L.layerGroup().addTo(map);
+          this._seen = /* @__PURE__ */ new Map();
+          map.on("moveend", this._update, this);
+          this._update();
+        },
+        onRemove(map) {
+          map.off("moveend", this._update, this);
+          if (this._busy) {
+            gmCancel(this._busy);
+            this._busy = null;
+          }
+          if (this._group) {
+            this._group.remove();
+            this._group = null;
+          }
+          this._seen = null;
+        },
+        _update() {
+          const map = this._map;
+          if (!map || !this._group) return;
+          if (map.getZoom() < CFG.TOILETS_MIN_ZOOM) return;
+          if (this._busy) {
+            gmCancel(this._busy);
+            this._busy = null;
+          }
+          const b = map.getBounds().pad(0.15);
+          this._busy = gmJsonGet(
+            toiletQueryUrl({ west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() }),
+            { timeout: 3e4 },
+            (err, data) => {
+              this._busy = null;
+              if (err || !data || !Array.isArray(data.features) || !this._group) return;
+              if (this._seen.size > 5e3) {
+                this._group.clearLayers();
+                this._seen.clear();
+              }
+              for (const f of data.features) {
+                const a = f.attributes || {}, g = f.geometry;
+                if (!g || !Number.isFinite(g.x) || !Number.isFinite(g.y) || this._seen.has(a.objectid)) continue;
+                const m = L.marker([g.y, g.x], { icon: icon(toiletClosed(a)), pane: PANE2, keyboard: false }).bindTooltip(_formatToilet(a, false), { className: "dw-abw-tip", direction: "top" }).bindPopup(() => _formatToilet(a, true), { className: "dw-abw-popup", maxWidth: 280, autoPan: false });
+                this._seen.set(a.objectid, m);
+                m.addTo(this._group);
+              }
+            }
+          );
+        },
+        getAttribution() {
+          return 'Toilets &copy; <a href="https://toiletmap.gov.au/" target="_blank" rel="noreferrer">National Public Toilet Map</a> (Department of Health, Disability and Ageing, CC BY 3.0 AU)';
+        }
+      });
+      return new Layer();
+    }
+  };
+
   // src/providers/abs-postcodes.js
   function postcodeDynamicLayers() {
     return JSON.stringify([{
@@ -13327,7 +13476,7 @@
   }
 
   // src/providers/alltrails.js
-  var clean2 = (v2, max) => String(v2 == null ? "" : v2).replace(/\s+/g, " ").trim().slice(0, max);
+  var clean3 = (v2, max) => String(v2 == null ? "" : v2).replace(/\s+/g, " ").trim().slice(0, max);
   var ROUTE_COLORS = { hiking: "#15803d", mountain_biking: "#b45309", biking: "#1d4ed8", running: "#be123c" };
   var ROUTE_NAMES = { hiking: "Walking route", mountain_biking: "Mountain bike route", biking: "Cycling route", running: "Running route" };
   var NETWORKS = {
@@ -13362,18 +13511,18 @@
     const kind = HIGHWAYS[p.h] || "Trail";
     const access = atAccess(p);
     const facts = [
-      clean2(p.s, 30),
+      clean3(p.s, 30),
       SAC[p.sac] || "",
       Number(p.l) > 0 ? `${Number(p.l)} km section` : ""
     ].filter(Boolean).join(" · ");
-    return esc`<b>${clean2(p.n, 100) || kind}</b>` + (p.n ? esc`<br>${kind}` : "") + (facts ? esc`<br>${facts}` : "") + (access ? esc`<br><span class="dw-at-warn">${access === "permit" ? "Permit needed" : access === "private" ? "Private: no public access" : "No access on foot"}</span>` : "");
+    return esc`<b>${clean3(p.n, 100) || kind}</b>` + (p.n ? esc`<br>${kind}` : "") + (facts ? esc`<br>${facts}` : "") + (access ? esc`<br><span class="dw-at-warn">${access === "permit" ? "Permit needed" : access === "private" ? "Private: no public access" : "No access on foot"}</span>` : "");
   }
   function atRouteHtml(props) {
     const p = props || {};
     const kind = ROUTE_NAMES[p.type] || "Waymarked route";
-    const net = NETWORKS[p.network] ? `${NETWORKS[p.network]} route` : clean2(p.network, 60);
-    const sub = [kind, net, p.ref ? `marked "${clean2(p.ref, 20)}"` : ""].filter(Boolean).join(" · ");
-    return esc`<b>${clean2(p.name, 100) || kind}</b><br>${sub}`;
+    const net = NETWORKS[p.network] ? `${NETWORKS[p.network]} route` : clean3(p.network, 60);
+    const sub = [kind, net, p.ref ? `marked "${clean3(p.ref, 20)}"` : ""].filter(Boolean).join(" · ");
+    return esc`<b>${clean3(p.name, 100) || kind}</b><br>${sub}`;
   }
   function atPopupHtml(detailsHtml, latlng) {
     const url = latlng && Number.isFinite(latlng.lat) && Number.isFinite(latlng.lng) ? allTrailsExploreUrl(allTrailsViewAround(latlng.lat, latlng.lng, 3)) : "";
@@ -16446,6 +16595,7 @@
         addOverlay(CFG.LAYER_OLD_MARKS, new OldMarksProvider());
         addOverlay(CFG.LAYER_OLD_RAIL, new OldRailwaysLayerProvider());
         addOverlay(CFG.LAYER_UXO, new UxoLayerProvider());
+        addOverlay(CFG.LAYER_TOILETS, new ToiletsLayerProvider());
         addOverlay(CFG.LAYER_SAFECAST, new SafecastLayerProvider());
         addOverlay(CFG.LAYER_INFRA, new PowerInfraLayerProvider());
         addOverlay(CFG.LAYER_TELECOM, new TelecomsLayerProvider());
@@ -17151,6 +17301,9 @@
         ".dw-qpws-tip b { font-weight: 700; }",
         ".dw-infra-tip { font-size: 11px; line-height: 1.4; }",
         ".dw-abw-icon { background: none; border: 0; }",
+        ".dw-wc-icon { background: none; border: 0; }",
+        ".dw-wc-pin { display: block; width: 22px; height: 16px; line-height: 12px; border-radius: 4px; border: 2px solid #fff; box-sizing: border-box; background: #0369a1; color: #fff; font: bold 9px/12px Arial, sans-serif; text-align: center; box-shadow: 0 0 2px rgba(0,0,0,.6); }",
+        ".dw-wc-pin.dw-wc-closed { background: #9ca3af; }",
         ".dw-at-warn { color: #b91c1c; font-weight: 600; }",
         ".dw-at-note { position: absolute; left: 50%; bottom: 56px; transform: translateX(-50%); z-index: 1000; max-width: 340px; background: rgba(255,255,255,.97); border: 1px solid #b45309; border-radius: 8px; padding: 8px 12px; font-size: 12px; line-height: 1.4; box-shadow: 0 2px 8px rgba(0,0,0,.25); }",
         ".dw-abw-pin { display: block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.6); box-sizing: border-box; }",
@@ -17677,6 +17830,12 @@
         _formatUxo,
         polygonContains,
         uxoToElements,
+        _formatToilet,
+        toiletClosed,
+        toiletFacts,
+        toiletHours,
+        toiletPageUrl,
+        toiletQueryUrl,
         _formatPostcode,
         postcodeDynamicLayers,
         _formatSuburb,

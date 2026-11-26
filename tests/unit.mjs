@@ -1879,6 +1879,26 @@ t("UXO: Defence layers kept, parcels skipped, hover text and point-in-area", () 
 	assert(dw.polygonContains(sq, 0.5, 0.5) && !dw.polygonContains(hole, 0.5, 0.5) && dw.polygonContains(hole, 0.2, 0.2) && !dw.polygonContains(sq, 2, 2));
 });
 
+t("Public Toilets: query, hours, facts, hover and link", () => {
+	assert(dw.DW_OVERLAY_GROUPS.find((g) => g.header === "Walks").names.includes("Public Toilets"));
+	const u = new URL(dw.toiletQueryUrl({ west: 152.9, south: -26.7, east: 153, north: -26.6 }));
+	eq(u.searchParams.get("geometry"), "152.90000,-26.70000,153.00000,-26.60000");
+	eq(u.searchParams.get("outSR"), "4326");
+	eq(dw.toiletHours("OPEN: 24 hours"), "Open 24 hours");
+	eq(dw.toiletHours("OPEN: Daylight hours"), "Open daylight hours");
+	eq(dw.toiletHours("Currently closed"), "Currently closed");
+	eq(dw.toiletHours("Opening hours unknown"), "");
+	assert(dw.toiletClosed({ openinghours: "Currently closed" }) && !dw.toiletClosed({ openinghours: "OPEN: 24 hours" }));
+	// Real record: Nambour Railway Station.
+	const a = { facilityid: 4546, name: "Nambour Railway Station", facilitytype: "Train station", address1: "Station Square", town: "Nambour",
+		openinghours: "OPEN: Sat 6am-10:45am", accessible: "TRUE", drinkingwater: "TRUE", babychange: "TRUE", parking: "TRUE", shower: "FALSE", keyrequired: "FALSE" };
+	eq(dw._formatToilet(a, false), "<b>Nambour Railway Station</b><br>Train station · Station Square · Nambour<br>Open Sat 6am-10:45am<br><span class=\"dw-cad-sub\">accessible · drinking water · baby change · parking</span>");
+	assert(dw._formatToilet(a, true).endsWith('<a href="https://toiletmap.gov.au/facility/4546" target="_blank" rel="noopener noreferrer">Open on the Toilet Map ↗</a>'));
+	eq(dw.toiletPageUrl("4546/../x"), "", "only numeric ids make links");
+	eq(dw._formatToilet({ facilitytype: "Other", town: "Mapleton" }, false), "<b>Public toilet</b><br>Mapleton");
+	assert(dw._formatToilet({ name: "<b>x" }).includes("&lt;b&gt;x"), "not escaped");
+});
+
 // ---- Vexcel aerial token helpers ----
 
 // Forge a JWT-shaped token with a chosen exp (signature is irrelevant —

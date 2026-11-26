@@ -127,6 +127,9 @@ export const CFG = {
 	LAYER_OLD_MARKS: "Old Survey Marks (destroyed)",
 	LAYER_OLD_RAIL: "Old Railways",
 	LAYER_UXO: "Unexploded Ordnance (Defence)",
+	LAYER_TOILETS: "Public Toilets",
+	TOILETS_SERVICE: "https://portal.data.nsw.gov.au/arcgis/rest/services/Hosted/National_Public_Toilet_Map/FeatureServer/0",
+	TOILETS_MIN_ZOOM: 11,
 	// The PMTiles file behind Defence's UXO Mapping Application.
 	UXO_PMTILES: "https://tiles-indigo.apps.veris.net.au/uxo/uxo-area.pmtiles",
 	UXO_MIN_ZOOM: 11,
@@ -532,7 +535,7 @@ export const DW_OVERLAY_GROUPS = [
 	},
 	{
 		header: "Walks",
-		names:  [CFG.LAYER_ABW, CFG.LAYER_ALLTRAILS, CFG.LAYER_QLD_TRACKS],
+		names:  [CFG.LAYER_ABW, CFG.LAYER_ALLTRAILS, CFG.LAYER_QLD_TRACKS, CFG.LAYER_TOILETS],
 	},
 	{
 		header: "Mining",

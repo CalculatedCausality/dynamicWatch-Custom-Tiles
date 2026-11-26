@@ -66,6 +66,7 @@ import { createGeologyProviders, geologyIdentifySources } from "../providers/geo
 import { createExtraProviders, extraIdentifySources } from "../providers/extra-layers.js";
 import { OldRailwaysLayerProvider } from "../providers/old-railways.js";
 import { UxoLayerProvider } from "../providers/uxo.js";
+import { ToiletsLayerProvider } from "../providers/toilets.js";
 import { createPostcodeProvider, createSuburbProvider, postcodeIdentifySource, suburbIdentifySource } from "../providers/abs-postcodes.js";
 import { allTrailsExploreUrl, allTrailsViewAround } from "../utils/alltrails.js";
 import { AllTrailsLayerProvider } from "../providers/alltrails.js";
@@ -328,6 +329,7 @@ export class CustomTilesApp {
 			addOverlay(CFG.LAYER_OLD_MARKS, new OldMarksProvider());
 			addOverlay(CFG.LAYER_OLD_RAIL, new OldRailwaysLayerProvider());
 			addOverlay(CFG.LAYER_UXO, new UxoLayerProvider());
+			addOverlay(CFG.LAYER_TOILETS, new ToiletsLayerProvider());
 			addOverlay(CFG.LAYER_SAFECAST,   new SafecastLayerProvider());
 			addOverlay(CFG.LAYER_INFRA,      new PowerInfraLayerProvider());
 			addOverlay(CFG.LAYER_TELECOM,    new TelecomsLayerProvider());
@@ -1172,6 +1174,9 @@ export class CustomTilesApp {
 			".dw-qpws-tip b { font-weight: 700; }",
 			".dw-infra-tip { font-size: 11px; line-height: 1.4; }",
 			".dw-abw-icon { background: none; border: 0; }",
+			".dw-wc-icon { background: none; border: 0; }",
+			".dw-wc-pin { display: block; width: 22px; height: 16px; line-height: 12px; border-radius: 4px; border: 2px solid #fff; box-sizing: border-box; background: #0369a1; color: #fff; font: bold 9px/12px Arial, sans-serif; text-align: center; box-shadow: 0 0 2px rgba(0,0,0,.6); }",
+			".dw-wc-pin.dw-wc-closed { background: #9ca3af; }",
 			".dw-at-warn { color: #b91c1c; font-weight: 600; }",
 			".dw-at-note { position: absolute; left: 50%; bottom: 56px; transform: translateX(-50%); z-index: 1000; max-width: 340px; background: rgba(255,255,255,.97); border: 1px solid #b45309; border-radius: 8px; padding: 8px 12px; font-size: 12px; line-height: 1.4; box-shadow: 0 2px 8px rgba(0,0,0,.25); }",
 			".dw-abw-pin { display: block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.6); box-sizing: border-box; }",
